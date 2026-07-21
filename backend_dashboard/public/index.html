@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Earthquake Safety — Emergency Response Dashboard (Pilot)</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<style>
+  :root {
+    --safe: #2e7d32;
+    --waiting: #f9a825;
+    --danger: #c62828;
+    --bg: #f4f5f7;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, "Segoe UI", Arial, sans-serif;
+    background: var(--bg);
+    color: #222;
+  }
+  header {
+    background: #1c2b36;
+    color: #fff;
+    padding: 14px 20px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+  header h1 { font-size: 18px; margin: 0; font-weight: 600; }
+  header p { margin: 2px 0 0; font-size: 12px; color: #b7c2cc; }
+  .layout { display: flex; height: calc(100vh - 60px); flex-wrap: wrap; }
+  #map { flex: 1 1 60%; min-height: 400px; }
+  .sidebar {
+    flex: 1 1 320px;
+    max-width: 380px;
+    background: #fff;
+    padding: 16px;
+    overflow-y: auto;
+    border-left: 1px solid #e0e0e0;
+  }
+  .stat-row { display: flex; gap: 10px; margin-bottom: 16px; }
+  .stat {
+    flex: 1;
+    background: var(--bg);
+    border-radius: 8px;
+    padding: 10px;
+    text-align: center;
+  }
+  .stat .num { font-size: 22px; font-weight: 700; }
+  .stat.safe .num { color: var(--safe); }
+  .stat.waiting .num { color: var(--waiting); }
+  .stat.danger .num { color: var(--danger); }
+  .stat .label { font-size: 11px; color: #666; text-transform: uppercase; }
+  ul.userlist { list-style: none; padding: 0; margin: 0; }
+  ul.userlist li {
+    padding: 10px;
+    border-radius: 8px;
+    margin-bottom: 8px;
+    border-left: 4px solid #ccc;
+    background: var(--bg);
+    font-size: 13px;
+  }
+  li.safe { border-color: var(--safe); }
+  li.waiting { border-color: var(--waiting); }
+  li.danger { border-color: var(--danger); }
+  li .id { font-weight: 700; }
+  li .meta { color: #666; margin-top: 2px; }
+  .badge {
+    display: inline-block;
+    padding: 1px 7px;
+    border-radius: 10px;
+    font-size: 10px;
+    font-weight: 700;
+    color: #fff;
+    margin-left: 6px;
+  }
+  .badge.bt { background: #455a64; }
+  button.demo {
+    background: #1c2b36;
+    color: #fff;
+    border: none;
+    padding: 8px 14px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 12px;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1>Earthquake Safety — Emergency Response Dashboard (PILOT / DEMO)</h1>
+    <p>Not a production system. In-memory data only. Refreshes every 4 seconds.</p>
+  </div>
+  <button class="demo" onclick="seedDemoData()">Load demo test users</button>
+</header>
+
+<div class="layout">
+  <div id="map"></div>
+  <div class="sidebar">
+    <div class="stat-row">
+      <div class="stat safe"><div class="num" id="count-safe">0</div><div class="label">Safe</div></div>
+      <div class="stat waiting"><div class="num" id="count-waiting">0</div><div class="label">Awaiting</div></div>
+      <div class="stat danger"><div class="num" id="count-danger">0</div><div class="label">Not Responding</div></div>
+    </div>
+    <ul class="userlist" id="userlist"></ul>
+  </div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="dashboard.js"></script>
+</body>
+</html>

@@ -1,0 +1,14 @@
+{
+  "name": "earthquake-pilot-backend",
+  "version": "0.1.0",
+  "description": "Minimal backend + live dashboard for the earthquake safety app pilot. In-memory storage only - fine for a demo/pilot, swap for a real database before any wider use.",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "cors": "^2.8.5"
+  }
+}
