@@ -1,0 +1,39 @@
+{
+  "summary": "Verified real-GPS bug fix in /app/frontend/app/alert.tsx. All 8 code-level checks pass (BestForNavigation used everywhere, warm-up watcher via watchPositionAsync storing latestFixRef, 15s/50m freshness gating in handleImSafe, hasServicesEnabledAsync check with location_services_off, permission_denied path, POST payload shape intact, success toast + auto-nav wired, no hardcoded lat/lng literals). E2E on web preview with geolocation mocked to Mriehel, Malta (35.8916, 14.4658 ±10m): warm fix was consumed (console: '[QuakeGuard] using warm GPS fix → 35.8916 14.4658 ± 10 m'), POST https://safequake.onrender.com/api/status returned HTTP 200, alert-success-toast rendered. However a NEW regression was found: on AlertScreen unmount, sub?.remove() throws 'LocationEventEmitter.removeSubscription is not a function' (web-only expo-location issue) — this triggers a red-screen LogBox overlay and BLOCKS the auto-nav back to Home on web preview.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [
+      {
+        "component": "alert.tsx warm-up watcher cleanup (line 68-71)",
+        "issue": "sub?.remove() throws 'TypeError: _LocationEventEmitter.LocationEventEmitter.removeSubscription is not a function' on unmount when running on Expo web. This is caused by the newly added watchPositionAsync subscription. Red-screen LogBox overlay appears and the auto-nav back to Home is aborted after 'I'M SAFE'.",
+        "testID": "alert-screen",
+        "priority": "HIGH"
+      }
+    ],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": [
+      {
+        "component": "expo-location watchPositionAsync",
+        "issue": "LocationSubscription.remove() is not fully implemented in expo-location web shim for the version used. Recommend wrapping cleanup in try/catch so it's harmless on web and still works on iOS/Android: try { sub?.remove(); } catch {}. Alternatively, only start the watcher when Platform.OS !== 'web'."
+      }
+    ]
+  },
+  "test_report_links": ["/app/test_reports/iteration_2.json"],
+  "action_items": [
+    "Wrap sub?.remove() cleanup in a try/catch (or gate the warm-up watcher behind Platform.OS !== 'web') to prevent the red-screen and restore auto-nav back to Home on web preview.",
+    "No changes needed to the core GPS logic — BestForNavigation + warm-up ref + 15s/50m gating is correctly implemented and produces the real live-location fix in the payload."
+  ],
+  "critical_code_review_comments": [
+    "Bug fix implementation is clean: warm-up watcher + ref + freshness gate is a good pattern.",
+    "Consider also using an accuracy-improving loop that resolves once accuracy <=20m for even better fixes on cold-start; not required now.",
+    "The web-only LocationSubscription.remove crash should be guarded — it is now the only user-visible failure on the web preview flow."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "not tested (frontend-only request)", "frontend": "7/8 checks pass; primary bug (wrong location) fixed, but a new unmount-time exception blocks auto-nav on web"},
+  "seed_data_creation": "none",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Primary fix verified with mocked geolocation (Playwright context.set_geolocation to Mriehel, Malta). POST to safequake.onrender.com/api/status returns 200 and the payload uses the warm high-accuracy fix. Remaining issue is the expo-location subscription cleanup crash on web — a small try/catch or Platform gate around sub.remove() will fully close this out. On a real device the accuracy of BestForNavigation cannot be validated via web Playwright.",
+  "rca_of_issue": "RCA of the newly discovered regression: The warm-up useEffect (alert.tsx lines 44-72) subscribes via Location.watchPositionAsync. Its cleanup calls sub?.remove(). Under expo-location's web shim, LocationSubscription.remove() eventually calls LocationEventEmitter.removeSubscription which is not a function on web, causing an uncaught TypeError during React unmount. This surfaces as a red-screen LogBox and prevents router.replace('/') from completing the navigation. Reproduction: open the app on web, tap trigger-alert-btn, tap im-safe-btn, wait ~1.2s for auto-nav — LogBox error appears instead of Home. Mitigation: wrap sub?.remove() in try/catch, or start the watcher only on native (Platform.OS !== 'web'). Root cause is not in the bug fix logic itself — it's a platform-shim gap that the newly-added subscription now exercises."
+}

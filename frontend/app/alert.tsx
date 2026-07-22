@@ -6,7 +6,7 @@ import * as Haptics from "expo-haptics";
 import * as Location from "expo-location";
 import * as Battery from "expo-battery";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Pressable,
   StyleSheet,
@@ -36,6 +36,40 @@ export default function AlertScreen() {
 
   const pulse = useSharedValue(1);
   const ring = useSharedValue(0);
+  // Warm-up: keep the freshest high-accuracy GPS fix we've received so far
+  const latestFixRef = useRef<Location.LocationObject | null>(null);
+
+  // Pre-warm the GPS the moment the alert opens so tapping "I'm Safe" uses a
+  // real, fresh fix (avoids Wi-Fi / cell triangulation and cold-start delay).
+  useEffect(() => {
+    let sub: Location.LocationSubscription | null = null;
+    let cancelled = false;
+    (async () => {
+      try {
+        const servicesOn = await Location.hasServicesEnabledAsync();
+        if (!servicesOn) return;
+        const { status: permStatus } =
+          await Location.requestForegroundPermissionsAsync();
+        if (permStatus !== "granted" || cancelled) return;
+        sub = await Location.watchPositionAsync(
+          {
+            accuracy: Location.Accuracy.BestForNavigation,
+            timeInterval: 1000,
+            distanceInterval: 0,
+          },
+          (loc) => {
+            latestFixRef.current = loc;
+          },
+        );
+      } catch {
+        // swallow — handleImSafe will fall back to getCurrentPositionAsync
+      }
+    })();
+    return () => {
+      cancelled = true;
+      sub?.remove();
+    };
+  }, []);
 
   useEffect(() => {
     pulse.value = withRepeat(
@@ -84,33 +118,74 @@ export default function AlertScreen() {
       () => {},
     );
 
-    // Gather location (with timeout guard)
+    // Gather location (with timeout guard) — force a fresh high-accuracy GPS fix
     let latitude: number | null = null;
     let longitude: number | null = null;
     let accuracy: number | null = null;
     let locationError: string | null = null;
-    try {
-      const { status: permStatus } =
-        await Location.requestForegroundPermissionsAsync();
-      if (permStatus === "granted") {
-        const posPromise = Location.getCurrentPositionAsync({
-          accuracy: Location.Accuracy.Balanced,
-        });
-        const timeoutPromise = new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error("location_timeout")), 8000),
-        );
-        const pos = (await Promise.race([
-          posPromise,
-          timeoutPromise,
-        ])) as Location.LocationObject;
-        latitude = pos.coords.latitude;
-        longitude = pos.coords.longitude;
-        accuracy = pos.coords.accuracy ?? null;
-      } else {
-        locationError = "permission_denied";
+
+    // 1) If our warm-up watcher already has a very recent, high-accuracy fix,
+    //    use it — instant and truly the phone's live location.
+    const cached = latestFixRef.current;
+    if (
+      cached &&
+      Date.now() - cached.timestamp < 15000 &&
+      cached.coords.accuracy !== null &&
+      cached.coords.accuracy !== undefined &&
+      cached.coords.accuracy <= 50
+    ) {
+      latitude = cached.coords.latitude;
+      longitude = cached.coords.longitude;
+      accuracy = cached.coords.accuracy ?? null;
+      console.log(
+        "[QuakeGuard] using warm GPS fix →",
+        latitude,
+        longitude,
+        "±",
+        accuracy,
+        "m",
+      );
+    } else {
+      try {
+        // Make sure device location services are on (Android especially)
+        const servicesOn = await Location.hasServicesEnabledAsync();
+        if (!servicesOn) {
+          locationError = "location_services_off";
+        } else {
+          const { status: permStatus } =
+            await Location.requestForegroundPermissionsAsync();
+          if (permStatus === "granted") {
+            const posPromise = Location.getCurrentPositionAsync({
+              // BestForNavigation → real GPS fix, not Wi-Fi / cell triangulation
+              accuracy: Location.Accuracy.BestForNavigation,
+              mayShowUserSettingsDialog: true,
+            });
+            const timeoutPromise = new Promise<never>((_, reject) =>
+              setTimeout(() => reject(new Error("location_timeout")), 15000),
+            );
+            const pos = (await Promise.race([
+              posPromise,
+              timeoutPromise,
+            ])) as Location.LocationObject;
+            latitude = pos.coords.latitude;
+            longitude = pos.coords.longitude;
+            accuracy = pos.coords.accuracy ?? null;
+            console.log(
+              "[QuakeGuard] GPS fix →",
+              latitude,
+              longitude,
+              "±",
+              accuracy,
+              "m",
+            );
+          } else {
+            locationError = "permission_denied";
+          }
+        }
+      } catch (e: any) {
+        locationError = e?.message ?? "location_error";
+        console.log("[QuakeGuard] location error:", locationError);
       }
-    } catch (e: any) {
-      locationError = e?.message ?? "location_error";
     }
 
     // Gather battery
