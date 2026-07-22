@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, HTTPException
+from fastapi import FastAPI, APIRouter, HTTPException, Header
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -28,6 +28,10 @@ _push_client = httpx.AsyncClient(
     headers={"X-Push-Key": PUSH_KEY},
     timeout=10.0,
 )
+
+# Admin password for the "Trigger Earthquake Alert" dashboard button.
+# Sent by the dashboard as `X-Admin-Token: <password>` on POST /api/trigger-alert.
+ADMIN_TRIGGER_PASSWORD = os.environ.get("ADMIN_TRIGGER_PASSWORD", "")
 
 app = FastAPI()
 api_router = APIRouter(prefix="/api")
@@ -124,10 +128,24 @@ async def send_push(recipients: List[str], data: dict, idempotency_key: Optional
             logging.warning(f"Push trigger failed (non-blocking): {e}")
 
 @api_router.post("/trigger-alert")
-async def trigger_alert(body: TriggerAlertBody):
+async def trigger_alert(
+    body: TriggerAlertBody,
+    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
+):
     """Broadcast a QuakeGuard alert to every registered device (except the
     device that triggered it, if provided). Returns count of recipients.
-    Push delivery failure is logged but never blocks the response."""
+    Push delivery failure is logged but never blocks the response.
+
+    Requires header `X-Admin-Token` matching the ADMIN_TRIGGER_PASSWORD env
+    var. This protects the dashboard button from random visitors.
+    """
+    if not ADMIN_TRIGGER_PASSWORD:
+        # Fail-closed: refuse to broadcast if the operator hasn't set a
+        # password. Better than silently allowing anonymous triggers.
+        raise HTTPException(500, "ADMIN_TRIGGER_PASSWORD not configured on server")
+    if x_admin_token != ADMIN_TRIGGER_PASSWORD:
+        raise HTTPException(401, "Invalid or missing X-Admin-Token")
+
     query = {}
     if body.triggeredBy:
         query = {"user_id": {"$ne": body.triggeredBy}}
