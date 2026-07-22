@@ -4,6 +4,7 @@ import { Image } from "expo-image";
 import { LinearGradient } from "expo-linear-gradient";
 import { Ionicons } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
+import * as Location from "expo-location";
 import { useState } from "react";
 import {
   ActivityIndicator,
@@ -66,10 +67,96 @@ export default function HomeScreen() {
     setTriggering(true);
     await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy).catch(() => {});
 
-    // 1) Immediately mark this device 'not_responding' on the dashboard so it
-    //    turns red the instant the alert starts (before the user has a chance
-    //    to tap 'I'm Safe').
-    postStatus({ status: "not_responding" }).catch(() => {});
+    // 1) Try to grab a location instantly for the initial 'not_responding'
+    //    ping so a red MARKER also appears on the dashboard map — not just a
+    //    count. We use last-known first (returns immediately) and fall back
+    //    to a coarse-but-fast fix if no cache exists.
+    let servicesOn = true;
+    let permGranted = false;
+    try {
+      servicesOn = await Location.hasServicesEnabledAsync();
+      if (servicesOn) {
+        const cur = await Location.getForegroundPermissionsAsync();
+        if (cur.granted) {
+          permGranted = true;
+        } else if (cur.canAskAgain) {
+          const req = await Location.requestForegroundPermissionsAsync();
+          permGranted = req.status === "granted";
+        }
+      }
+    } catch {
+      // ignore — treat as no permission
+    }
+
+    let lastKnown: Location.LocationObject | null = null;
+    if (permGranted) {
+      try {
+        lastKnown = await Location.getLastKnownPositionAsync({
+          maxAge: 120_000,
+          requiredAccuracy: 500,
+        });
+      } catch {
+        lastKnown = null;
+      }
+    }
+
+    const initialLocation = lastKnown
+      ? {
+          latitude: lastKnown.coords.latitude,
+          longitude: lastKnown.coords.longitude,
+          accuracy: lastKnown.coords.accuracy ?? null,
+          error: null,
+        }
+      : {
+          latitude: null,
+          longitude: null,
+          accuracy: null,
+          error: !servicesOn
+            ? "location_services_off"
+            : !permGranted
+              ? "permission_denied"
+              : "no_cached_fix",
+        };
+
+    postStatus({
+      status: "not_responding",
+      location: initialLocation,
+    }).catch(() => {});
+
+    // 1b) If we didn't have a fresh cached fix, kick off a real GPS lookup in
+    //     the background and re-POST 'not_responding' with the true coords the
+    //     moment it lands — so the map marker snaps to the actual position.
+    if (permGranted && (!lastKnown || (lastKnown.coords.accuracy ?? 9999) > 100)) {
+      (async () => {
+        try {
+          const fresh = await Location.getCurrentPositionAsync({
+            accuracy: Location.Accuracy.BestForNavigation,
+          });
+          await postStatus({
+            status: "not_responding",
+            location: {
+              latitude: fresh.coords.latitude,
+              longitude: fresh.coords.longitude,
+              accuracy: fresh.coords.accuracy ?? null,
+              error: null,
+            },
+          });
+          console.log(
+            "[QuakeGuard] refreshed not_responding location →",
+            fresh.coords.latitude,
+            fresh.coords.longitude,
+            "±",
+            fresh.coords.accuracy,
+            "m",
+          );
+        } catch (e) {
+          console.log(
+            "[QuakeGuard] background GPS refresh failed:",
+            (e as Error)?.message,
+          );
+        }
+      })();
+    }
 
     // 2) Fan out a push notification to every OTHER registered device so
     //    they get the same alert simultaneously (server broadcast).
