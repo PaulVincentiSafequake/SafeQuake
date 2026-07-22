@@ -44,9 +44,7 @@
       ],
       [
         "expo-notifications",
-        {
-          "iosCriticalAlerts": true
-        }
+        {}
       ],
       [
         "expo-splash-screen",

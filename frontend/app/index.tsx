@@ -17,6 +17,7 @@ import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context"
 
 import { colors, radius, spacing } from "@/src/theme";
 import { postStatus } from "@/src/utils/checkin";
+import { broadcastAlert } from "@/src/utils/push";
 import {
   cancelCheckInReminders,
   ensureNotificationSetup,
@@ -70,9 +71,12 @@ export default function HomeScreen() {
     //    to tap 'I'm Safe').
     postStatus({ status: "not_responding" }).catch(() => {});
 
-    // 2) Ask for notification permission (incl. iOS critical alerts) and
-    //    schedule staggered reminder notifications every ~90s until the user
-    //    marks themselves safe.
+    // 2) Fan out a push notification to every OTHER registered device so
+    //    they get the same alert simultaneously (server broadcast).
+    broadcastAlert().catch(() => {});
+
+    // 3) Ask for notification permission and schedule local reminder
+    //    notifications every ~90s until the user marks themselves safe.
     (async () => {
       const ok = await ensureNotificationSetup();
       if (ok) {

@@ -1,14 +1,15 @@
-from fastapi import FastAPI, APIRouter
+from fastapi import FastAPI, APIRouter, HTTPException
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import logging
+import httpx
 from pathlib import Path
 from pydantic import BaseModel, Field
-from typing import List
+from typing import List, Optional
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 ROOT_DIR = Path(__file__).parent
@@ -19,40 +20,152 @@ mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
-# Create the main app without a prefix
-app = FastAPI()
+# Emergent Push relay
+PUSH_BASE_URL = "https://integrations.emergentagent.com"
+PUSH_KEY = os.environ.get("EMERGENT_PUSH_KEY", "placeholder")
+_push_client = httpx.AsyncClient(
+    base_url=PUSH_BASE_URL,
+    headers={"X-Push-Key": PUSH_KEY},
+    timeout=10.0,
+)
 
-# Create a router with the /api prefix
+app = FastAPI()
 api_router = APIRouter(prefix="/api")
 
-
-# Define Models
+# ---------- Legacy status-check demo endpoints (kept as-is) ----------
 class StatusCheck(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     client_name: str
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 class StatusCheckCreate(BaseModel):
     client_name: str
 
-# Add your routes to the router instead of directly to app
 @api_router.get("/")
 async def root():
     return {"message": "Hello World"}
 
 @api_router.post("/status", response_model=StatusCheck)
 async def create_status_check(input: StatusCheckCreate):
-    status_dict = input.dict()
-    status_obj = StatusCheck(**status_dict)
-    _ = await db.status_checks.insert_one(status_obj.dict())
+    status_obj = StatusCheck(**input.dict())
+    await db.status_checks.insert_one(status_obj.dict())
     return status_obj
 
 @api_router.get("/status", response_model=List[StatusCheck])
 async def get_status_checks():
-    status_checks = await db.status_checks.find().to_list(1000)
-    return [StatusCheck(**status_check) for status_check in status_checks]
+    status_checks = await db.status_checks.find({}, {"_id": 0}).to_list(1000)
+    return [StatusCheck(**s) for s in status_checks]
 
-# Include the router in the main app
+# ---------- Push registration + fan-out ----------
+class RegisterPushBody(BaseModel):
+    user_id: str
+    platform: str          # "android" | "ios"
+    device_token: str
+
+class TriggerAlertBody(BaseModel):
+    triggeredBy: Optional[str] = None       # deviceId of the trigger source
+    magnitude: Optional[float] = None
+    distance_km: Optional[float] = None
+    intensity: Optional[str] = None
+
+@api_router.post("/register-push", status_code=201)
+async def register_push(body: RegisterPushBody):
+    """Register a device native push token with the Emergent push relay,
+    and remember it locally so we can broadcast alerts to every device."""
+    # Store locally so we know who to fan out to
+    await db.push_devices.update_one(
+        {"user_id": body.user_id},
+        {"$set": {
+            "user_id": body.user_id,
+            "platform": body.platform,
+            "device_token": body.device_token,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }},
+        upsert=True,
+    )
+    try:
+        resp = await _push_client.post(
+            "/api/v1/push/users/register",
+            json=body.model_dump(),
+        )
+        if resp.status_code == 401:
+            raise HTTPException(500, "EMERGENT_PUSH_KEY missing or invalid")
+        if resp.status_code >= 500:
+            raise HTTPException(502, "Push provider unavailable")
+        resp.raise_for_status()
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.warning(f"Push register failed (non-blocking): {e}")
+    return {"status": "registered"}
+
+async def send_push(recipients: List[str], data: dict, idempotency_key: Optional[str] = None) -> None:
+    if not recipients:
+        return
+    if "title" not in data or "message" not in data:
+        raise ValueError("data must include title and message")
+    # Chunk to 100 per Emergent relay contract
+    CHUNK = 100
+    for i in range(0, len(recipients), CHUNK):
+        chunk = recipients[i:i + CHUNK]
+        payload = {"recipients": chunk, "data": data}
+        if idempotency_key:
+            payload["$idempotency_key"] = f"{idempotency_key}-{i // CHUNK}"
+        try:
+            resp = await _push_client.post("/api/v1/push/trigger", json=payload)
+            if resp.status_code == 401:
+                raise HTTPException(500, "EMERGENT_PUSH_KEY missing or invalid")
+            if resp.status_code >= 500:
+                raise HTTPException(502, "Push provider unavailable")
+            resp.raise_for_status()
+        except HTTPException:
+            raise
+        except Exception as e:
+            logging.warning(f"Push trigger failed (non-blocking): {e}")
+
+@api_router.post("/trigger-alert")
+async def trigger_alert(body: TriggerAlertBody):
+    """Broadcast a QuakeGuard alert to every registered device (except the
+    device that triggered it, if provided). Returns count of recipients.
+    Push delivery failure is logged but never blocks the response."""
+    query = {}
+    if body.triggeredBy:
+        query = {"user_id": {"$ne": body.triggeredBy}}
+    devices = await db.push_devices.find(query, {"_id": 0, "user_id": 1}).to_list(10000)
+    recipients = [d["user_id"] for d in devices]
+
+    idem = f"quake-{uuid.uuid4()}"
+    magnitude = body.magnitude or 6.4
+    title = "EARTHQUAKE ALERT"
+    message = f"Magnitude {magnitude}. Are you safe? Tap to check in."
+    push_delivered = True
+    push_error: Optional[str] = None
+    try:
+        await send_push(
+            recipients=recipients,
+            data={
+                "title": title,
+                "message": message,
+                "action_url": "/alert",
+            },
+            idempotency_key=idem,
+        )
+    except HTTPException as e:
+        push_delivered = False
+        push_error = e.detail
+        logging.warning(f"trigger-alert push non-fatal: {e.detail}")
+    except Exception as e:
+        push_delivered = False
+        push_error = str(e)
+        logging.warning(f"trigger-alert push non-fatal: {e}")
+    return {
+        "status": "broadcast",
+        "recipients": len(recipients),
+        "push_delivered": push_delivered,
+        "push_error": push_error,
+    }
+
+# ---------- Wire up ----------
 app.include_router(api_router)
 
 app.add_middleware(
@@ -63,13 +176,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
 )
 logger = logging.getLogger(__name__)
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
     client.close()
+    await _push_client.aclose()
