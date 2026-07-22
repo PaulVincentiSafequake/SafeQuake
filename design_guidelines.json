@@ -1,0 +1,133 @@
+{
+  "app_name": "QuakeGuard",
+  "personality": "7 Dark-First Utility DARK",
+  "personality_one_liner": "A high-contrast, tactical command-center designed for immediate action and supreme glanceability during emergencies.",
+  "color": {
+    "surface": "#0F1115",
+    "onSurface": "#FFFFFF",
+    "surfaceSecondary": "#1C1F26",
+    "onSurfaceSecondary": "#E2E4E9",
+    "surfaceTertiary": "#2A2F3A",
+    "onSurfaceTertiary": "#B0B5C0",
+    "surfaceInverse": "#FFFFFF",
+    "onSurfaceInverse": "#000000",
+    "brand": "#FF3B30",
+    "brandPrimary": "#FF3B30",
+    "onBrandPrimary": "#FFFFFF",
+    "brandSecondary": "#FF9500",
+    "onBrandSecondary": "#000000",
+    "brandTertiary": "#3B1C1A",
+    "onBrandTertiary": "#FF8A84",
+    "success": "#34C759",
+    "onSuccess": "#000000",
+    "warning": "#FFCC00",
+    "onWarning": "#000000",
+    "error": "#FF3B30",
+    "onError": "#FFFFFF",
+    "info": "#0A84FF",
+    "onInfo": "#FFFFFF",
+    "border": "#2A2F3A",
+    "borderStrong": "#3D4454",
+    "divider": "#1F232B"
+  },
+  "typography": {
+    "displayFontFamily": "Barlow Condensed",
+    "textFontFamily": "DM Sans",
+    "scale": {
+      "sm": 12,
+      "base": 14,
+      "lg": 16,
+      "xl": 20,
+      "2xl": 24
+    }
+  },
+  "spacing": {
+    "rule": "Strictly utility-driven, tight rhythm for data, generous touch targets",
+    "xs": 4,
+    "sm": 8,
+    "md": 12,
+    "lg": 16,
+    "xl": 24,
+    "2xl": 32,
+    "3xl": 48
+  },
+  "radius_tokens": {
+    "sm": 4,
+    "md": 8,
+    "lg": 16,
+    "pill": 999
+  },
+  "shadow_tier": "0",
+  "navigation": "stack_only",
+  "icon_set": "Phosphor",
+  "glassmorphism": {
+    "enabled": false,
+    "do's": [
+      "Use solid tonal separation instead of blur to prioritize readability and performance under stress."
+    ],
+    "dont's": [
+      "Do not use blur or glassmorphism—tactical utility apps need stark contrast."
+    ]
+  },
+  "platform_libraries": {
+    "glass": {
+      "ios": "expo-glass-effect",
+      "android": "expo-blur",
+      "low_end_android_fallback": "solid surfaceSecondary"
+    },
+    "image": "expo-image",
+    "blur": "expo-blur",
+    "bottom_sheet": "@gorhom/bottom-sheet",
+    "animation": "react-native-reanimated",
+    "gesture": "react-native-gesture-handler"
+  },
+  "screens": [
+    {
+      "name": "Home",
+      "purpose": "A monitoring dashboard providing safety preparedness checklists and a quick mechanism to trigger a test alert.",
+      "states": {
+        "loading": "Dark spinner centered on #0F1115",
+        "empty": "No active alerts. Display 'All Clear' status.",
+        "error": "Failed to connect to monitoring service. 'Retry' button."
+      },
+      "layout": "1. Top Status Banner: Full-width, small 'System Active' indicator.\n2. Hero Area: Image of seismograph waves with a vertical gradient scrim overlay, text 'Earthquake Preparedness' large display type.\n3. Content Column: 'Safety Tips' grid or list cards (Drop, Cover, Hold On) using surfaceSecondary, tight typography.\n4. Bottom CTA: A fixed, sticky container at the bottom with a full-width 'Trigger Alert (Test)' button in brandPrimary (#FF3B30)."
+    },
+    {
+      "name": "Alert",
+      "purpose": "A full-screen, high-severity warning simulating a critical earthquake, requiring the user to mark themselves safe.",
+      "states": {
+        "loading": "N/A - Critical alerts render instantly.",
+        "empty": "N/A",
+        "error": "N/A"
+      },
+      "layout": "1. Full Screen Root: No safe area restrictions at the top for maximum urgency. Background is a blurred red emergency light (opacity ~15% via image over dark red/black gradient).\n2. Top: 'EARTHQUAKE DETECTED' in massive Barlow Condensed text, centered.\n3. Middle: Pulsing animation around an emergency siren icon. Expected intensity and countdown metrics in large monospace/condensed numbers.\n4. Bottom Action: Fixed 'I\\'m Safe' CTA button in success color (#34C759), large touch target. Clicking this sends battery and location to the mock server and dismisses the alert."
+    }
+  ],
+  "images": {
+    "home_hero_bg": {
+      "url": "https://images.unsplash.com/photo-1772050137595-0116f8dba498?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjY2NjV8MHwxfHNlYXJjaHwxfHxlYXJ0aHF1YWtlJTIwc2Vpc21vZ3JhcGglMjBkYXJrfGVufDB8fHx8MTc4NDcwNTQ2MHww&ixlib=rb-4.1.0&q=85",
+      "alt": "Abstract black and white seismograph wave representation"
+    },
+    "alert_bg": {
+      "url": "https://images.pexels.com/photos/10466266/pexels-photo-10466266.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+      "alt": "Detailed view of a police car's red siren light shining at night"
+    }
+  },
+  "haptics": {
+    "events": {
+      "trigger_alert": "heavy",
+      "im_safe": "success",
+      "alert_pulse": "notificationWarning"
+    }
+  },
+  "instructions_to_main_agent": [
+    "Implement a deep dark utility theme (Personality 7) with obsidian backgrounds and signal red accents.",
+    "Do NOT use glassmorphism. Use solid tonal separation for high performance and legibility during an emergency.",
+    "For the Home screen, place the 'Trigger Alert' button inside a sticky bottom container that clears the safe area.",
+    "For the Alert screen, use 'react-native-reanimated' to create a pulsing animation around the warning icon or the screen border. The background must be red/black gradient or heavily tinted image.",
+    "The 'I\\'m Safe' button on the Alert screen should simulate capturing location (mock coordinates) and battery level (use expo-battery or mock data) and log it before navigating back.",
+    "Typography: Use Barlow Condensed for all headings, scores, and massive metrics to achieve the tactical/operational look. Use DM Sans for body.",
+    "Image setup: Overlay 'home_hero_bg' with a vertical gradient scrim (transparent to #0F1115) so the text is fully readable.",
+    "Ensure 'I\\'m Safe' CTA is high-contrast green (#34C759) to stand out against the red alert background, clearly differentiating safety from danger."
+  ]
+}
