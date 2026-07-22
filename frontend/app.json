@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "frontend",
+    "name": "QuakeGuard",
     "slug": "frontend",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -10,7 +10,11 @@
     "newArchEnabled": true,
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.emergent.quakealert.yjbyic"
+      "bundleIdentifier": "com.emergent.quakealert.yjbyic",
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "Share your location to report you are safe",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "Share your location to report you are safe"
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -18,7 +22,11 @@
         "backgroundColor": "#000000"
       },
       "edgeToEdgeEnabled": true,
-      "package": "com.emergent.quakealert.yjbyic"
+      "package": "com.emergent.quakealert.yjbyic",
+      "permissions": [
+        "ACCESS_COARSE_LOCATION",
+        "ACCESS_FINE_LOCATION"
+      ]
     },
     "web": {
       "bundler": "metro",
@@ -27,6 +35,13 @@
     },
     "plugins": [
       "expo-router",
+      "expo-font",
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "Share your location to report you are safe"
+        }
+      ],
       [
         "expo-splash-screen",
         {
