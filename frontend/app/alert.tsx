@@ -67,7 +67,11 @@ export default function AlertScreen() {
     })();
     return () => {
       cancelled = true;
-      sub?.remove();
+      try {
+        sub?.remove();
+      } catch {
+        // expo-location's web shim lacks removeSubscription; safe to ignore
+      }
     };
   }, []);
 
