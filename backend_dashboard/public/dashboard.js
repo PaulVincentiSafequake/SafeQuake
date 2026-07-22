@@ -1,4 +1,4 @@
-/**
+"public"/**
  * Dashboard logic. Polls the backend every 4 seconds, this is
  * intentionally simple (no websockets) so it's easy for a developer
  * to read and swap for something more real-time later if needed.
@@ -113,3 +113,75 @@ async function seedDemoData() {
 
 refresh();
 setInterval(refresh, 4000);
+(function initQuakeGuardTriggerButton() {
+  // === EDIT THIS ==========================================================
+  var QUAKEGUARD_BACKEND = "https://quake-alert-18.emergent.host"; // no trailing /
+  // ========================================================================
+
+  var btn    = document.getElementById("qg-trigger-btn");
+  var status = document.getElementById("qg-trigger-status");
+  if (!btn || !status) {
+    // Button not on this page — nothing to wire up.
+    return;
+  }
+
+  function setStatus(msg, kind) {
+    status.textContent = msg || "";
+    status.className = kind || "";
+  }
+
+  btn.addEventListener("click", async function onTriggerClick() {
+    var confirmed = window.confirm(
+      "Broadcast an EARTHQUAKE ALERT to every registered device?\n\n" +
+      "This will push a notification to all installed apps and flip their " +
+      "dashboard status to 'not responding' until they mark themselves safe."
+    );
+    if (!confirmed) return;
+
+    var pwd = window.prompt("Enter emergency personnel password:");
+    if (!pwd) { setStatus("Cancelled.", "info"); return; }
+
+    btn.disabled = true;
+    setStatus("Broadcasting…", "info");
+
+    try {
+      var res = await fetch(QUAKEGUARD_BACKEND + "/api/trigger-alert", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Admin-Token": pwd
+        },
+        body: JSON.stringify({
+          triggeredBy: "dashboard",
+          magnitude: 6.4,
+          distance_km: 12,
+          intensity: "VII"
+        })
+      });
+
+      if (res.status === 401) {
+        setStatus("Wrong password. Alert not sent.", "err");
+        return;
+      }
+      if (!res.ok) {
+        setStatus("Server error (" + res.status + "). Alert not sent.", "err");
+        return;
+      }
+
+      var data = await res.json();
+      var n = (data && typeof data.recipients === "number") ? data.recipients : "?";
+      var delivered = data && data.push_delivered;
+      setStatus(
+        "Alert broadcast to " + n + " device" + (n === 1 ? "" : "s") +
+          (delivered === false
+            ? " (push queued — check EMERGENT_PUSH_KEY on the backend if this persists)."
+            : "."),
+        "ok"
+      );
+    } catch (e) {
+      setStatus("Network error: " + (e && e.message ? e.message : e), "err");
+    } finally {
+      btn.disabled = false;
+    }
+  });
+})();
