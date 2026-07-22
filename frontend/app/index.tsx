@@ -142,8 +142,7 @@ export default function HomeScreen() {
       >
         <LinearGradient
           colors={["rgba(15,17,21,0)", colors.surface]}
-          style={styles.stickyScrim}
-          pointerEvents="none"
+          style={[styles.stickyScrim, { pointerEvents: "none" }]}
         />
         <Pressable
           onPress={handleTrigger}

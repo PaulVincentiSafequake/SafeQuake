@@ -70,13 +70,21 @@ export default function AlertScreen() {
     transform: [{ scale: 1 + ring.value * 1.6 }],
   }));
 
+  useEffect(() => {
+    if (status !== "sent") return;
+    const nav = setTimeout(() => router.replace("/"), 1200);
+    return () => clearTimeout(nav);
+  }, [status, router]);
+
   const handleImSafe = async () => {
-    if (status === "sending") return;
+    if (status === "sending" || status === "sent") return;
     setStatus("sending");
     setErrorMsg(null);
-    await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(
+      () => {},
+    );
 
-    // Gather location
+    // Gather location (with timeout guard)
     let latitude: number | null = null;
     let longitude: number | null = null;
     let accuracy: number | null = null;
@@ -85,9 +93,16 @@ export default function AlertScreen() {
       const { status: permStatus } =
         await Location.requestForegroundPermissionsAsync();
       if (permStatus === "granted") {
-        const pos = await Location.getCurrentPositionAsync({
+        const posPromise = Location.getCurrentPositionAsync({
           accuracy: Location.Accuracy.Balanced,
         });
+        const timeoutPromise = new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("location_timeout")), 8000),
+        );
+        const pos = (await Promise.race([
+          posPromise,
+          timeoutPromise,
+        ])) as Location.LocationObject;
         latitude = pos.coords.latitude;
         longitude = pos.coords.longitude;
         accuracy = pos.coords.accuracy ?? null;
@@ -149,7 +164,6 @@ export default function AlertScreen() {
       console.log("[QuakeGuard] I'm Safe → response status:", res.status);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       setStatus("sent");
-      setTimeout(() => router.replace("/"), 1200);
     } catch (e: any) {
       console.log("[QuakeGuard] I'm Safe → error:", e?.message);
       setErrorMsg(e?.message ?? "Network error");
