@@ -217,22 +217,45 @@ export default function AlertScreen() {
       await AsyncStorage.setItem("quakeguard_device_id", deviceId);
     }
 
-    const payload = {
+    const hasCoords = latitude !== null && longitude !== null;
+
+    const payload: Record<string, any> = {
       deviceId,
       status: "safe",
       client_name: "quakeguard-mobile",
       timestamp: new Date().toISOString(),
+      // Nested (original shape)
       location: {
         latitude,
         longitude,
         accuracy,
         error: locationError,
       },
+      // Battery
       battery: {
         level: batteryLevel,
         state: batteryState,
       },
+      batteryLevel,
+      batteryState,
     };
+
+    // Fan out lat/lng across the most common field names so ANY dashboard
+    // schema will find them (flat top-level, short names, coords wrapper,
+    // and GeoJSON [lng, lat]).
+    if (hasCoords) {
+      payload.latitude = latitude;
+      payload.longitude = longitude;
+      payload.lat = latitude;
+      payload.lng = longitude;
+      payload.lon = longitude;
+      payload.accuracy = accuracy;
+      payload.coords = { latitude, longitude, accuracy };
+      payload.coordinates = [longitude, latitude];
+      payload.geo = { type: "Point", coordinates: [longitude, latitude] };
+    }
+
+    console.log("[QuakeGuard] POST payload →", JSON.stringify(payload));
 
     try {
       const res = await fetch(SAFE_ENDPOINT, {
