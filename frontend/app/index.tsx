@@ -4,7 +4,9 @@ import { Image } from "expo-image";
 import { LinearGradient } from "expo-linear-gradient";
 import { Ionicons } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
+import { useState } from "react";
 import {
+  ActivityIndicator,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -14,6 +16,12 @@ import {
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { colors, radius, spacing } from "@/src/theme";
+import { postStatus } from "@/src/utils/checkin";
+import {
+  cancelCheckInReminders,
+  ensureNotificationSetup,
+  scheduleCheckInReminders,
+} from "@/src/utils/reminders";
 
 const HERO_IMG =
   "https://images.unsplash.com/photo-1772050137595-0116f8dba498?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjY2NjV8MHwxfHNlYXJjaHwxfHxlYXJ0aHF1YWtlJTIwc2Vpc21vZ3JhcGglMjBkYXJrfGVufDB8fHx8MTc4NDcwNTQ2MHww&ixlib=rb-4.1.0&q=85";
@@ -50,10 +58,31 @@ const TIPS: Tip[] = [
 export default function HomeScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
+  const [triggering, setTriggering] = useState(false);
 
   const handleTrigger = async () => {
-    await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
+    if (triggering) return;
+    setTriggering(true);
+    await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy).catch(() => {});
+
+    // 1) Immediately mark this device 'not_responding' on the dashboard so it
+    //    turns red the instant the alert starts (before the user has a chance
+    //    to tap 'I'm Safe').
+    postStatus({ status: "not_responding" }).catch(() => {});
+
+    // 2) Ask for notification permission (incl. iOS critical alerts) and
+    //    schedule staggered reminder notifications every ~90s until the user
+    //    marks themselves safe.
+    (async () => {
+      const ok = await ensureNotificationSetup();
+      if (ok) {
+        await cancelCheckInReminders();
+        await scheduleCheckInReminders();
+      }
+    })();
+
     router.push("/alert");
+    setTriggering(false);
   };
 
   return (
@@ -146,14 +175,21 @@ export default function HomeScreen() {
         />
         <Pressable
           onPress={handleTrigger}
+          disabled={triggering}
           style={({ pressed }) => [
             styles.triggerBtn,
             pressed && { opacity: 0.85, transform: [{ scale: 0.98 }] },
           ]}
           testID="trigger-alert-btn"
         >
-          <Ionicons name="warning" size={22} color={colors.onBrandPrimary} />
-          <Text style={styles.triggerText}>TRIGGER TEST ALERT</Text>
+          {triggering ? (
+            <ActivityIndicator color={colors.onBrandPrimary} />
+          ) : (
+            <Ionicons name="warning" size={22} color={colors.onBrandPrimary} />
+          )}
+          <Text style={styles.triggerText}>
+            {triggering ? "TRIGGERING…" : "TRIGGER TEST ALERT"}
+          </Text>
         </Pressable>
       </View>
     </View>

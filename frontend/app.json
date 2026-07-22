@@ -43,6 +43,12 @@
         }
       ],
       [
+        "expo-notifications",
+        {
+          "iosCriticalAlerts": true
+        }
+      ],
+      [
         "expo-splash-screen",
         {
           "image": "./assets/images/splash-image.png",

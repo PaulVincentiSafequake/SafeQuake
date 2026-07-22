@@ -5,7 +5,6 @@ import { LinearGradient } from "expo-linear-gradient";
 import * as Haptics from "expo-haptics";
 import * as Location from "expo-location";
 import * as Battery from "expo-battery";
-import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useEffect, useRef, useState } from "react";
 import {
   Pressable,
@@ -23,7 +22,9 @@ import Animated, {
   cancelAnimation,
 } from "react-native-reanimated";
 
-import { colors, radius, SAFE_ENDPOINT, spacing } from "@/src/theme";
+import { colors, radius, spacing } from "@/src/theme";
+import { postStatus } from "@/src/utils/checkin";
+import { cancelCheckInReminders } from "@/src/utils/reminders";
 
 type Status = "idle" | "sending" | "sent" | "error";
 
@@ -210,61 +211,17 @@ export default function AlertScreen() {
       // ignore
     }
 
-    // Get or create a stable deviceId
-    let deviceId = await AsyncStorage.getItem("quakeguard_device_id");
-    if (!deviceId) {
-      deviceId = `qg-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-      await AsyncStorage.setItem("quakeguard_device_id", deviceId);
-    }
-
-    const hasCoords = latitude !== null && longitude !== null;
-
-    const payload: Record<string, any> = {
-      deviceId,
-      status: "safe",
-      client_name: "quakeguard-mobile",
-      timestamp: new Date().toISOString(),
-      // Nested (original shape)
-      location: {
-        latitude,
-        longitude,
-        accuracy,
-        error: locationError,
-      },
-      // Battery
-      battery: {
-        level: batteryLevel,
-        state: batteryState,
-      },
-      batteryLevel,
-      batteryState,
-    };
-
-    // Fan out lat/lng across the most common field names so ANY dashboard
-    // schema will find them (flat top-level, short names, coords wrapper,
-    // and GeoJSON [lng, lat]).
-    if (hasCoords) {
-      payload.latitude = latitude;
-      payload.longitude = longitude;
-      payload.lat = latitude;
-      payload.lng = longitude;
-      payload.lon = longitude;
-      payload.accuracy = accuracy;
-      payload.coords = { latitude, longitude, accuracy };
-      payload.coordinates = [longitude, latitude];
-      payload.geo = { type: "Point", coordinates: [longitude, latitude] };
-    }
-
-    console.log("[QuakeGuard] POST payload →", JSON.stringify(payload));
-
     try {
-      const res = await fetch(SAFE_ENDPOINT, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+      const res = await postStatus({
+        status: "safe",
+        location: { latitude, longitude, accuracy, error: locationError },
+        battery: { level: batteryLevel, state: batteryState },
       });
       console.log("[QuakeGuard] I'm Safe → response status:", res.status);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      // Cancel any pending / delivered reminder notifications now that the
+      // user has actively marked themselves safe.
+      await cancelCheckInReminders();
       setStatus("sent");
     } catch (e: any) {
       console.log("[QuakeGuard] I'm Safe → error:", e?.message);
@@ -367,7 +324,10 @@ export default function AlertScreen() {
           </Pressable>
 
           <Pressable
-            onPress={() => router.back()}
+            onPress={() => {
+              cancelCheckInReminders().catch(() => {});
+              router.back();
+            }}
             style={styles.dismissBtn}
             hitSlop={12}
             testID="alert-dismiss-btn"
