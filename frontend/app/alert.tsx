@@ -375,7 +375,11 @@ export default function AlertScreen() {
             onPress={() => {
               stopSiren();
               cancelCheckInReminders().catch(() => {});
-              router.back();
+              if (router.canGoBack()) {
+                router.back();
+              } else {
+                router.replace("/");
+              }
             }}
             style={styles.dismissBtn}
             hitSlop={12}
