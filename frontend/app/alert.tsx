@@ -5,6 +5,7 @@ import { LinearGradient } from "expo-linear-gradient";
 import * as Haptics from "expo-haptics";
 import * as Location from "expo-location";
 import * as Battery from "expo-battery";
+import { useAudioPlayer, setAudioModeAsync } from "expo-audio";
 import { useEffect, useRef, useState } from "react";
 import {
   Pressable,
@@ -26,6 +27,8 @@ import { colors, radius, spacing } from "@/src/theme";
 import { postStatus } from "@/src/utils/checkin";
 import { cancelCheckInReminders } from "@/src/utils/reminders";
 
+const SIREN_SOURCE = require("../assets/audio/siren.mp3");
+
 type Status = "idle" | "sending" | "sent" | "error";
 
 export default function AlertScreen() {
@@ -39,6 +42,50 @@ export default function AlertScreen() {
   const ring = useSharedValue(0);
   // Warm-up: keep the freshest high-accuracy GPS fix we've received so far
   const latestFixRef = useRef<Location.LocationObject | null>(null);
+
+  // Looping siren — starts the moment the Alert screen mounts, stops when
+  // the user marks themselves safe / dismisses / navigates away.
+  const sirenPlayer = useAudioPlayer(SIREN_SOURCE);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        // playsInSilentMode → the siren plays through the physical silent
+        // switch on iOS. This is the intended behaviour for an emergency alarm.
+        await setAudioModeAsync({
+          playsInSilentMode: true,
+          shouldPlayInBackground: false,
+          interruptionMode: "doNotMix",
+        });
+        if (cancelled) return;
+        sirenPlayer.loop = true;
+        sirenPlayer.volume = 1.0;
+        sirenPlayer.play();
+      } catch (e) {
+        console.log("[QuakeGuard] siren start failed:", (e as Error)?.message);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      try {
+        sirenPlayer.pause();
+        sirenPlayer.seekTo(0);
+      } catch {
+        // ignore
+      }
+    };
+  }, [sirenPlayer]);
+
+  const stopSiren = () => {
+    try {
+      sirenPlayer.pause();
+      sirenPlayer.seekTo(0);
+    } catch {
+      // ignore
+    }
+  };
+
 
   // Pre-warm the GPS the moment the alert opens so tapping "I'm Safe" uses a
   // real, fresh fix (avoids Wi-Fi / cell triangulation and cold-start delay).
@@ -222,6 +269,7 @@ export default function AlertScreen() {
       // Cancel any pending / delivered reminder notifications now that the
       // user has actively marked themselves safe.
       await cancelCheckInReminders();
+      stopSiren();
       setStatus("sent");
     } catch (e: any) {
       console.log("[QuakeGuard] I'm Safe → error:", e?.message);
@@ -325,6 +373,7 @@ export default function AlertScreen() {
 
           <Pressable
             onPress={() => {
+              stopSiren();
               cancelCheckInReminders().catch(() => {});
               router.back();
             }}
