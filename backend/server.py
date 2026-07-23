@@ -183,6 +183,62 @@ async def trigger_alert(
         "push_error": push_error,
     }
 
+@api_router.get("/debug/devices")
+async def debug_devices():
+    """Diagnostic: list every device that has registered a push token.
+    Returned tokens are truncated to 8 chars each so they can't be reused
+    but you can still tell whether YOUR device made it into the list.
+    Also reports whether EMERGENT_PUSH_KEY is a real value or the
+    build-time 'placeholder'."""
+    devices = await db.push_devices.find({}, {"_id": 0}).to_list(1000)
+    for d in devices:
+        tok = d.get("device_token", "") or ""
+        d["device_token_preview"] = (tok[:8] + "…" + tok[-4:]) if len(tok) > 12 else tok
+        d.pop("device_token", None)
+    return {
+        "device_count": len(devices),
+        "push_key_status": "placeholder" if PUSH_KEY == "placeholder" else "real",
+        "admin_password_configured": bool(ADMIN_TRIGGER_PASSWORD),
+        "devices": devices,
+    }
+
+@api_router.post("/debug/test-push")
+async def debug_test_push(
+    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
+):
+    """Send a plain test push to every registered device — bypasses the
+    'not_responding' bookkeeping so you can isolate whether the push
+    channel itself is delivering. Password-protected same as trigger-alert."""
+    if not ADMIN_TRIGGER_PASSWORD:
+        raise HTTPException(500, "ADMIN_TRIGGER_PASSWORD not configured on server")
+    if x_admin_token != ADMIN_TRIGGER_PASSWORD:
+        raise HTTPException(401, "Invalid or missing X-Admin-Token")
+    devices = await db.push_devices.find({}, {"_id": 0, "user_id": 1}).to_list(10000)
+    recipients = [d["user_id"] for d in devices]
+    push_delivered = True
+    push_error: Optional[str] = None
+    try:
+        await send_push(
+            recipients=recipients,
+            data={
+                "title": "QuakeGuard test push",
+                "message": "If you see this, the push channel is working.",
+                "action_url": "/",
+            },
+            idempotency_key=f"quake-testpush-{uuid.uuid4()}",
+        )
+    except HTTPException as e:
+        push_delivered = False
+        push_error = e.detail
+    except Exception as e:
+        push_delivered = False
+        push_error = str(e)
+    return {
+        "recipients": len(recipients),
+        "push_delivered": push_delivered,
+        "push_error": push_error,
+    }
+
 # ---------- Wire up ----------
 app.include_router(api_router)
 

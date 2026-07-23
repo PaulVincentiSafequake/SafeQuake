@@ -5,7 +5,7 @@ import { LinearGradient } from "expo-linear-gradient";
 import * as Haptics from "expo-haptics";
 import * as Location from "expo-location";
 import * as Battery from "expo-battery";
-import { useAudioPlayer, setAudioModeAsync } from "expo-audio";
+import { useAudioPlayer, useAudioPlayerStatus, setAudioModeAsync } from "expo-audio";
 import { useEffect, useRef, useState } from "react";
 import {
   Pressable,
@@ -45,29 +45,43 @@ export default function AlertScreen() {
 
   // Looping siren — starts the moment the Alert screen mounts, stops when
   // the user marks themselves safe / dismisses / navigates away.
+  // NOTE: useAudioPlayer + useAudioPlayerStatus is the correct API pair —
+  // .play() before the source finishes loading is a no-op on iOS, which was
+  // the cause of "silent alert screen" on TestFlight builds.
   const sirenPlayer = useAudioPlayer(SIREN_SOURCE);
+  const sirenStatus = useAudioPlayerStatus(sirenPlayer);
 
   useEffect(() => {
-    let cancelled = false;
+    console.log("[QuakeGuard] siren isLoaded:", sirenStatus.isLoaded);
+    if (!sirenStatus.isLoaded) return;
+
+    // Belt-and-braces: (re)apply the audio session config just before playing
+    // in case _layout.tsx's cold-start call was preempted by native init.
     (async () => {
       try {
-        // playsInSilentMode → the siren plays through the physical silent
-        // switch on iOS. This is the intended behaviour for an emergency alarm.
         await setAudioModeAsync({
           playsInSilentMode: true,
           shouldPlayInBackground: false,
           interruptionMode: "doNotMix",
+          allowsRecording: false,
         });
-        if (cancelled) return;
+      } catch (e) {
+        console.log("[QuakeGuard] setAudioModeAsync failed:", (e as Error)?.message);
+      }
+      try {
         sirenPlayer.loop = true;
         sirenPlayer.volume = 1.0;
         sirenPlayer.play();
+        console.log("[QuakeGuard] siren.play() called");
       } catch (e) {
-        console.log("[QuakeGuard] siren start failed:", (e as Error)?.message);
+        console.log("[QuakeGuard] siren.play() threw:", (e as Error)?.message);
       }
     })();
+  }, [sirenStatus.isLoaded, sirenPlayer]);
+
+  // Unmount cleanup
+  useEffect(() => {
     return () => {
-      cancelled = true;
       try {
         sirenPlayer.pause();
         sirenPlayer.seekTo(0);
@@ -81,6 +95,7 @@ export default function AlertScreen() {
     try {
       sirenPlayer.pause();
       sirenPlayer.seekTo(0);
+      console.log("[QuakeGuard] siren stopped");
     } catch {
       // ignore
     }

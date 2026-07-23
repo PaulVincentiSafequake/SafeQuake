@@ -2,6 +2,7 @@ import { Stack, useRouter } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
 import * as Notifications from "expo-notifications";
 import * as Linking from "expo-linking";
+import { setAudioModeAsync } from "expo-audio";
 import { useEffect } from "react";
 import { LogBox, Platform } from "react-native";
 import { SafeAreaProvider } from "react-native-safe-area-context";
@@ -43,6 +44,20 @@ if (Platform.OS === "android") {
     bypassDnd: true,
     lockscreenVisibility: Notifications.AndroidNotificationVisibility.PUBLIC,
   }).catch(() => {});
+}
+
+// Module-scope audio-session init so the siren on /alert can play through
+// the physical silent switch on iOS. Runs BEFORE any useAudioPlayer is
+// instantiated.
+if (Platform.OS !== "web") {
+  setAudioModeAsync({
+    playsInSilentMode: true,
+    shouldPlayInBackground: false,
+    interruptionMode: "doNotMix",
+    allowsRecording: false,
+  }).catch((e) =>
+    console.log("[QuakeGuard] cold-start setAudioModeAsync err:", e?.message),
+  );
 }
 
 export default function RootLayout() {

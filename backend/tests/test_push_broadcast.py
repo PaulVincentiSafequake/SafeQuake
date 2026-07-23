@@ -92,7 +92,7 @@ class TestTriggerAlert:
         """spec (b): triggeredBy=dev-A → recipients=2 (dev-B + dev-C),
         push_delivered=false, push_error='EMERGENT_PUSH_KEY missing or invalid'."""
         src = seed_devices[0]["user_id"]
-        r = api.post(f"{BASE_URL}/api/trigger-alert", json={"triggeredBy": src})
+        r = api.post(f"{BASE_URL}/api/trigger-alert", json={"triggeredBy": src}, headers={"X-Admin-Token": "Pt3481pt"})
         assert r.status_code == 200
         body = r.json()
         assert body["status"] == "broadcast"
@@ -106,14 +106,14 @@ class TestTriggerAlert:
         """Strict count: recipients from body == total docs where user_id != triggeredBy."""
         src = seed_devices[0]["user_id"]
         expected = db.push_devices.count_documents({"user_id": {"$ne": src}})
-        r = api.post(f"{BASE_URL}/api/trigger-alert", json={"triggeredBy": src})
+        r = api.post(f"{BASE_URL}/api/trigger-alert", json={"triggeredBy": src}, headers={"X-Admin-Token": "Pt3481pt"})
         assert r.status_code == 200
         assert r.json()["recipients"] == expected
 
     def test_empty_body_returns_all_devices(self, api, db, seed_devices):
         """spec (c): POST /api/trigger-alert body {} → recipients = total devices."""
         expected = db.push_devices.count_documents({})
-        r = api.post(f"{BASE_URL}/api/trigger-alert", json={})
+        r = api.post(f"{BASE_URL}/api/trigger-alert", json={}, headers={"X-Admin-Token": "Pt3481pt"})
         assert r.status_code == 200
         body = r.json()
         assert body["recipients"] == expected
@@ -125,7 +125,7 @@ class TestTriggerAlert:
         src = seed_devices[0]["user_id"]
         r = api.post(
             f"{BASE_URL}/api/trigger-alert",
-            json={"triggeredBy": src, "magnitude": 7.1},
+            json={"triggeredBy": src, "magnitude": 7.1}, headers={"X-Admin-Token": "Pt3481pt"},
         )
         assert r.status_code == 200
         body = r.json()
@@ -135,7 +135,7 @@ class TestTriggerAlert:
 
     def test_never_500s_on_upstream_failure(self, api):
         """Core invariant: even with no upstream key, trigger-alert must be 200."""
-        r = api.post(f"{BASE_URL}/api/trigger-alert", json={"triggeredBy": "nonexistent"})
+        r = api.post(f"{BASE_URL}/api/trigger-alert", json={"triggeredBy": "nonexistent"}, headers={"X-Admin-Token": "Pt3481pt"})
         assert r.status_code == 200
         assert r.json()["push_delivered"] is False
 

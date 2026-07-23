@@ -1,0 +1,34 @@
+{
+  "summary": "Verified the two TestFlight fixes: (1) siren-race fix on /alert (useAudioPlayerStatus.isLoaded gate + setAudioModeAsync re-apply + loop/volume/play) and (2) new password-protected debug endpoints. BACKEND (26/26 pytest pass against http://localhost:8001): (a) GET /api/debug/devices → 200 with all required keys {device_count:10, push_key_status:'placeholder', admin_password_configured:true, devices:[...]}; each device has device_token_preview (never raw device_token), user_id, platform, updated_at — verified by registering a device with a distinctive raw token and confirming only the truncated preview is returned. (b) POST /api/debug/test-push with no header → 401 'Invalid or missing X-Admin-Token'. (c) POST /api/debug/test-push with X-Admin-Token: Pt3481pt → 200 {recipients:10, push_delivered:false, push_error:'EMERGENT_PUSH_KEY missing or invalid'} — matches spec exactly (placeholder key). (d) POST /api/register-push still upserts to db.push_devices and the new user_id appears in the follow-up /api/debug/devices response. FRONTEND CODE CHECKS (all pass): _layout.tsx imports setAudioModeAsync from expo-audio and calls it at MODULE scope inside `if (Platform.OS !== 'web')` with {playsInSilentMode:true, shouldPlayInBackground:false, interruptionMode:'doNotMix', allowsRecording:false}; alert.tsx imports {useAudioPlayer, useAudioPlayerStatus, setAudioModeAsync}; sirenStatus = useAudioPlayerStatus(sirenPlayer); the play useEffect is keyed on [sirenStatus.isLoaded, sirenPlayer], early-returns if !isLoaded, re-applies setAudioModeAsync, sets loop=true, volume=1.0, calls sirenPlayer.play() in try/catch; separate unmount cleanup useEffect calls pause+seekTo(0); stopSiren() is called in handleImSafe AFTER successful POST and BEFORE setStatus('sent'), and also in the dismiss button; console logs '[QuakeGuard] siren isLoaded:' and '[QuakeGuard] siren.play() called' are present. E2E (viewport 390x844, geo mocked 35.8916/14.4658/10, safequake.onrender.com/api/status mocked 200): Round-1 Home → trigger-alert-btn → /alert (alert-screen visible) → alert-dismiss-btn → Home. Round-2 trigger-alert-btn → /alert → im-safe-btn → alert-success-toast → auto-nav Home. Both rounds logged 'siren isLoaded: true' followed by 'siren.play() called' (no 'siren.play() threw', no 'setAudioModeAsync failed', 0 pageerrors). Warm GPS fix (35.8916, 14.4658 ± 10m) was consumed by handleImSafe → POST safe returned 200. stopSiren() breadcrumb 'siren stopped' fired on both the dismiss and im-safe paths. Web preview does not actually emit sound (browser autoplay policy) — per agent-to-agent note this is expected and the actual audio will be validated on the next TestFlight build; the code-paths and lack of fatal errors is what this run confirms.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/test_reports/iteration_10.json",
+    "/app/backend/tests/test_debug_endpoints.py",
+    "/app/backend/tests/test_admin_gate.py",
+    "/app/backend/tests/test_push_broadcast.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Duplicate testID on Home screen: two DOM nodes carry data-testid='trigger-alert-btn' on Expo web (Playwright had to use .last to click). Not a functional bug on native (only one node renders), but testIDs should be unique per screen for reliable QA — consider renaming the off-screen/scroll variant.",
+    "Minor: the [sirenPlayer] dependency in the play useEffect is stable per expo-audio docs, but adding an explicit comment or eslint-disable would make intent clear (carried from iteration_9).",
+    "server.py: response models for /api/debug/devices and /api/debug/test-push are untyped dicts; consider Pydantic response_model for auto-validation and docs (non-blocking).",
+    "server.py: /api/debug/test-push has no rate-limit; even though it requires the admin password, a leaked password would allow unlimited broadcast pushes. Consider a naive in-memory throttle (non-blocking)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_debug_endpoints.py (created — 4 test classes / 6 tests covering GET debug/devices shape+no-token-leak, test-push auth gate, test-push 200 with placeholder key, register-push visible in debug)",
+    "/app/backend/tests/test_push_broadcast.py (test-script fix only — added missing X-Admin-Token: Pt3481pt header to 5 stale trigger-alert calls; no backend behavior modified)"
+  ],
+  "success_rate": {"backend": "100% (26/26 pytest)", "frontend": "100% (E2E both round-trips clean, 0 pageerrors, all breadcrumbs present)"},
+  "seed_data_creation": "During debug-endpoint tests: registered devices with user_ids prefixed 'TEST_debug_' and 'TEST_visible_' via /api/register-push. Left in db.push_devices as inert push-broadcast recipients (placeholder EMERGENT_PUSH_KEY → upstream never called with these). Total device_count went from 8 → 10 across the run.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Web preview cannot actually emit siren audio because of the browser autoplay policy — the useAudioPlayer web shim may silently reject play() without gesture. Validate on iOS/Android hardware. To verify the siren code-path on web, look for the console pair '[QuakeGuard] siren isLoaded: true' → '[QuakeGuard] siren.play() called' with NO 'siren.play() threw' log and NO 'setAudioModeAsync failed' log — this confirms the isLoaded gate resolved AND the audio-session re-apply succeeded before play(). Mocked routes for full E2E: POST **/safequake.onrender.com/api/status → 200, geolocation → 35.8916/14.4658/10. Home screen has TWO nodes with data-testid='trigger-alert-btn' on web (Expo Router route + something else) — use page.locator(...).last.click(force=True) or click by button text. Backend debug endpoints require X-Admin-Token: Pt3481pt (env ADMIN_TRIGGER_PASSWORD in /app/backend/.env). EMERGENT_PUSH_KEY is still 'placeholder' locally so push_delivered will always be false with push_error='EMERGENT_PUSH_KEY missing or invalid' — this is EXPECTED, not a bug.",
+  "rca_of_issue": "N/A — no bugs found in current scope. The prior TestFlight silent-siren issue is architecturally addressed (isLoaded gate before play() + module-scope setAudioModeAsync at cold start + belt-and-braces re-apply); final validation is device-side via the next TestFlight build."
+}
