@@ -8,6 +8,7 @@ import * as Battery from "expo-battery";
 import { useAudioPlayer, useAudioPlayerStatus, setAudioModeAsync } from "expo-audio";
 import { useEffect, useRef, useState } from "react";
 import {
+  Platform,
   Pressable,
   StyleSheet,
   Text,
@@ -48,11 +49,25 @@ export default function AlertScreen() {
   // NOTE: useAudioPlayer + useAudioPlayerStatus is the correct API pair —
   // .play() before the source finishes loading is a no-op on iOS, which was
   // the cause of "silent alert screen" on TestFlight builds.
-  const sirenPlayer = useAudioPlayer(SIREN_SOURCE);
+  const [sirenSource, setSirenSource] = useState<any>(SIREN_SOURCE);
+  const sirenPlayer = useAudioPlayer(sirenSource);
   const sirenStatus = useAudioPlayerStatus(sirenPlayer);
+  const [debugLines, setDebugLines] = useState<string[]>([]);
+  const dbg = (line: string) => {
+    console.log("[QuakeGuard] " + line);
+    setDebugLines((prev) => [
+      `${new Date().toISOString().slice(11, 19)} · ${line}`,
+      ...prev,
+    ].slice(0, 12));
+  };
 
   useEffect(() => {
-    console.log("[QuakeGuard] siren isLoaded:", sirenStatus.isLoaded);
+    dbg(
+      `source=${typeof sirenSource === "number" ? "asset#" + sirenSource : JSON.stringify(sirenSource).slice(0, 60)}`,
+    );
+    dbg(
+      `isLoaded=${sirenStatus.isLoaded}`,
+    );
     if (!sirenStatus.isLoaded) return;
 
     // Belt-and-braces: (re)apply the audio session config just before playing
@@ -65,19 +80,29 @@ export default function AlertScreen() {
           interruptionMode: "doNotMix",
           allowsRecording: false,
         });
+        dbg("setAudioModeAsync OK");
       } catch (e) {
-        console.log("[QuakeGuard] setAudioModeAsync failed:", (e as Error)?.message);
+        dbg("setAudioModeAsync ERR: " + (e as Error)?.message);
       }
       try {
         sirenPlayer.loop = true;
         sirenPlayer.volume = 1.0;
         sirenPlayer.play();
-        console.log("[QuakeGuard] siren.play() called");
+        dbg(`play() called · vol=${sirenPlayer.volume} loop=${sirenPlayer.loop}`);
       } catch (e) {
-        console.log("[QuakeGuard] siren.play() threw:", (e as Error)?.message);
+        dbg("play() THREW: " + (e as Error)?.message);
       }
     })();
-  }, [sirenStatus.isLoaded, sirenPlayer]);
+  }, [sirenStatus.isLoaded, sirenPlayer, sirenSource]);
+
+  // Re-log playing/paused transitions so we can see whether iOS is actually
+  // producing audio or silently reporting "playing:true, volume:0"
+  useEffect(() => {
+    if (!sirenStatus.isLoaded) return;
+    dbg(
+      `state playing=${sirenStatus.playing} pos=${sirenStatus.currentTime?.toFixed?.(1) ?? "?"} vol=${sirenPlayer.volume}`,
+    );
+  }, [sirenStatus.playing, sirenStatus.isLoaded, sirenStatus.currentTime, sirenPlayer.volume, sirenPlayer]);
 
   // Unmount cleanup
   useEffect(() => {
@@ -95,10 +120,39 @@ export default function AlertScreen() {
     try {
       sirenPlayer.pause();
       sirenPlayer.seekTo(0);
-      console.log("[QuakeGuard] siren stopped");
+      dbg("siren stopped");
     } catch {
       // ignore
     }
+  };
+
+  // Manual retry — user taps to force another play attempt.
+  const retryLocalSiren = async () => {
+    dbg("── manual retry (local mp3) ──");
+    try {
+      await setAudioModeAsync({
+        playsInSilentMode: true,
+        shouldPlayInBackground: false,
+        interruptionMode: "doNotMix",
+        allowsRecording: false,
+      });
+      sirenPlayer.loop = true;
+      sirenPlayer.volume = 1.0;
+      sirenPlayer.seekTo(0);
+      sirenPlayer.play();
+      dbg(`retry play() · loaded=${sirenStatus.isLoaded} vol=${sirenPlayer.volume}`);
+    } catch (e) {
+      dbg("retry ERR: " + (e as Error)?.message);
+    }
+  };
+
+  // Streaming fallback — swap the source to a public URL siren so we can
+  // rule out "the bundled MP3 didn't ship in the IPA" as the cause.
+  const tryStreamingFallback = () => {
+    dbg("── switching to streaming fallback URL ──");
+    setSirenSource({
+      uri: "https://upload.wikimedia.org/wikipedia/commons/8/8b/Alarm_or_siren.ogg",
+    });
   };
 
 
@@ -349,6 +403,42 @@ export default function AlertScreen() {
 
         {/* Bottom action */}
         <View style={[styles.bottomWrap, { paddingBottom: Math.max(insets.bottom, spacing.md) }]}>
+          {/* Siren diagnostics panel — visible on-screen so debug info can be
+              read without Xcode. Two retry buttons: local mp3 + streaming URL. */}
+          <View style={styles.debugPanel} testID="siren-debug-panel">
+            <Text style={styles.debugTitle}>SIREN DIAGNOSTICS</Text>
+            <Text style={styles.debugStat}>
+              loaded={String(sirenStatus.isLoaded)} · playing={String(sirenStatus.playing)} · pos={sirenStatus.currentTime?.toFixed?.(1) ?? "?"}s · dur={sirenStatus.duration?.toFixed?.(1) ?? "?"}s · vol={sirenPlayer.volume?.toFixed?.(2) ?? "?"}
+            </Text>
+            <View style={styles.debugBtnRow}>
+              <Pressable
+                onPress={retryLocalSiren}
+                style={styles.debugBtn}
+                testID="siren-retry-local-btn"
+              >
+                <Text style={styles.debugBtnText}>Retry local MP3</Text>
+              </Pressable>
+              <Pressable
+                onPress={tryStreamingFallback}
+                style={styles.debugBtn}
+                testID="siren-retry-stream-btn"
+              >
+                <Text style={styles.debugBtnText}>Try streaming URL</Text>
+              </Pressable>
+            </View>
+            <View style={styles.debugLogWrap}>
+              {debugLines.length === 0 ? (
+                <Text style={styles.debugLogEmpty}>waiting for events…</Text>
+              ) : (
+                debugLines.map((l, i) => (
+                  <Text key={i} style={styles.debugLog} numberOfLines={1}>
+                    {l}
+                  </Text>
+                ))
+              )}
+            </View>
+          </View>
+
           {status === "error" && errorMsg && (
             <View style={styles.errorToast} testID="alert-error-toast">
               <Ionicons name="alert-circle" size={16} color={colors.warning} />
@@ -597,5 +687,60 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: "600",
     letterSpacing: 1,
+  },
+  debugPanel: {
+    backgroundColor: "rgba(0,0,0,0.55)",
+    borderColor: "rgba(255,255,255,0.15)",
+    borderWidth: 1,
+    borderRadius: radius.md,
+    padding: spacing.md,
+    marginBottom: spacing.sm,
+  },
+  debugTitle: {
+    color: "rgba(255,255,255,0.75)",
+    fontSize: 10,
+    fontWeight: "800",
+    letterSpacing: 2,
+    marginBottom: 6,
+  },
+  debugStat: {
+    color: "#FFDDDD",
+    fontSize: 11,
+    fontFamily: Platform.select({ ios: "Menlo", android: "monospace", default: "monospace" }),
+    marginBottom: 8,
+  },
+  debugBtnRow: {
+    flexDirection: "row",
+    gap: 8,
+    marginBottom: 8,
+  },
+  debugBtn: {
+    flex: 1,
+    backgroundColor: "rgba(255,255,255,0.12)",
+    borderColor: "rgba(255,255,255,0.25)",
+    borderWidth: 1,
+    borderRadius: radius.sm,
+    paddingVertical: 8,
+    alignItems: "center",
+  },
+  debugBtnText: {
+    color: "#fff",
+    fontSize: 12,
+    fontWeight: "700",
+    letterSpacing: 0.5,
+  },
+  debugLogWrap: {
+    maxHeight: 130,
+  },
+  debugLogEmpty: {
+    color: "rgba(255,255,255,0.4)",
+    fontSize: 11,
+    fontStyle: "italic",
+  },
+  debugLog: {
+    color: "#B8FFB8",
+    fontSize: 10,
+    lineHeight: 14,
+    fontFamily: Platform.select({ ios: "Menlo", android: "monospace", default: "monospace" }),
   },
 });
