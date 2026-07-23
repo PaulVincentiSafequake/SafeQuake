@@ -6,6 +6,8 @@ from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import logging
 import httpx
+import html as _html
+from collections import deque
 from pathlib import Path
 from pydantic import BaseModel, Field
 from typing import List, Optional
@@ -33,6 +35,10 @@ _push_client = httpx.AsyncClient(
 # Admin password for the "Trigger Earthquake Alert" dashboard button.
 # Sent by the dashboard as `X-Admin-Token: <password>` on POST /api/trigger-alert.
 ADMIN_TRIGGER_PASSWORD = os.environ.get("ADMIN_TRIGGER_PASSWORD", "")
+
+# Bounded in-memory ring buffer of the last 20 push-provider interactions so
+# we can inspect raw APNs / relay error bodies via /api/debug/last-push-events.
+_last_push_events: "deque[dict]" = deque(maxlen=20)
 
 app = FastAPI()
 api_router = APIRouter(prefix="/api")
@@ -116,16 +122,40 @@ async def send_push(recipients: List[str], data: dict, idempotency_key: Optional
         payload = {"recipients": chunk, "data": data}
         if idempotency_key:
             payload["$idempotency_key"] = f"{idempotency_key}-{i // CHUNK}"
+
+        event = {
+            "at": datetime.now(timezone.utc).isoformat(),
+            "chunk_size": len(chunk),
+            "title": data.get("title"),
+            "message": data.get("message"),
+            "status_code": None,
+            "response_body": None,
+            "error": None,
+        }
         try:
             resp = await _push_client.post("/api/v1/push/trigger", json=payload)
+            event["status_code"] = resp.status_code
+            # Capture body (truncated) — this is where APNs error codes surface
+            try:
+                event["response_body"] = resp.text[:2000]
+            except Exception:
+                event["response_body"] = "<unreadable>"
+
             if resp.status_code == 401:
+                event["error"] = "EMERGENT_PUSH_KEY missing or invalid"
+                _last_push_events.appendleft(event)
                 raise HTTPException(500, "EMERGENT_PUSH_KEY missing or invalid")
             if resp.status_code >= 500:
+                event["error"] = f"upstream {resp.status_code}"
+                _last_push_events.appendleft(event)
                 raise HTTPException(502, "Push provider unavailable")
             resp.raise_for_status()
+            _last_push_events.appendleft(event)
         except HTTPException:
             raise
         except Exception as e:
+            event["error"] = str(e)
+            _last_push_events.appendleft(event)
             logging.warning(f"Push trigger failed (non-blocking): {e}")
 
 @api_router.post("/trigger-alert")
@@ -275,6 +305,68 @@ async def debug_test_push_browser(
 </div>
 </body></html>"""
     return HTMLResponse(html)
+
+@api_router.get("/debug/last-push-events", response_class=HTMLResponse)
+async def debug_last_push_events(token: str = Query(default="")):
+    """Browser-friendly view of the last ~20 push-relay interactions —
+    including the raw response body from the Emergent relay, which surfaces
+    Apple/APNs error codes (BadDeviceToken, TopicDisallowed, etc.) that
+    tell us why an accepted push never reached the device."""
+    if not ADMIN_TRIGGER_PASSWORD:
+        return HTMLResponse("<h2>Server error</h2>", status_code=500)
+    if token != ADMIN_TRIGGER_PASSWORD:
+        return HTMLResponse(
+            "<h2 style='color:#c21818'>Wrong password.</h2>"
+            "<p>Append <code>?token=&lt;password&gt;</code>.</p>",
+            status_code=401,
+        )
+    events = list(_last_push_events)
+    if not events:
+        rows_html = (
+            "<p style='color:#666'>No push events captured yet. "
+            "Trigger a broadcast or hit "
+            "<code>/api/debug/test-push?token=…</code> first, then reload.</p>"
+        )
+    else:
+        rows = []
+        for ev in events:
+            status = ev.get("status_code")
+            badge_color = (
+                "#1F8A3A" if status and 200 <= status < 300
+                else "#C21818" if status
+                else "#666"
+            )
+            body_esc = _html.escape((ev.get("response_body") or "")[:1500])
+            err_esc = _html.escape(ev.get("error") or "")
+            rows.append(f"""
+<div style="border:1px solid #ddd;border-radius:8px;padding:12px;margin-bottom:10px">
+  <div style="display:flex;justify-content:space-between;align-items:center">
+    <span style="background:{badge_color};color:#fff;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700">{status or '—'}</span>
+    <small style="color:#888">{_html.escape(ev.get('at',''))}</small>
+  </div>
+  <div style="margin-top:6px;font-size:12px;color:#333">
+    <b>title:</b> {_html.escape(str(ev.get('title')))} ·
+    <b>recipients in chunk:</b> {ev.get('chunk_size')}
+  </div>
+  {f'<div style="margin-top:6px;font-size:12px;color:#C21818"><b>error:</b> {err_esc}</div>' if err_esc else ''}
+  <pre style="background:#f4f4f6;padding:8px;border-radius:6px;font-size:11px;overflow:auto;max-height:220px;white-space:pre-wrap;word-break:break-all;margin-top:8px">{body_esc or '<i>(empty body)</i>'}</pre>
+</div>""")
+        rows_html = "".join(rows)
+
+    html_page = f"""<!doctype html><html><head>
+<title>QuakeGuard push events</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>body{{font-family:-apple-system,Segoe UI,sans-serif;padding:24px;max-width:720px;margin:0 auto;background:#fafafa}}
+h1{{font-size:20px;margin:0 0 4px}} .sub{{color:#666;font-size:13px;margin-bottom:16px}}</style>
+</head><body>
+<h1>QuakeGuard push events</h1>
+<p class="sub">Last {len(events)} interaction(s) with the Emergent push relay. Newest first. The <code>response_body</code> pre-block is the raw text the relay returned — APNs / Apple error codes surface here.</p>
+{rows_html}
+<p style="margin-top:24px;color:#888;font-size:12px">
+  Tip: reload this page after tapping "Trigger Earthquake Alert" or hitting the test-push URL.
+</p>
+</body></html>"""
+    return HTMLResponse(html_page)
 
 async def _run_test_push():
     devices = await db.push_devices.find({}, {"_id": 0, "user_id": 1}).to_list(10000)
