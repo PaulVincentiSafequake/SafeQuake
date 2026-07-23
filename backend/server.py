@@ -1,4 +1,5 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Header
+from fastapi import FastAPI, APIRouter, HTTPException, Header, Query
+from fastapi.responses import HTMLResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -213,6 +214,69 @@ async def debug_test_push(
         raise HTTPException(500, "ADMIN_TRIGGER_PASSWORD not configured on server")
     if x_admin_token != ADMIN_TRIGGER_PASSWORD:
         raise HTTPException(401, "Invalid or missing X-Admin-Token")
+    return await _run_test_push()
+
+@api_router.get("/debug/test-push", response_class=HTMLResponse)
+async def debug_test_push_browser(
+    token: str = Query(default=""),
+):
+    """Browser-friendly variant: open in a tab with ?token=<password>.
+    Renders an HTML page with the same result payload so it's readable
+    without curl / Postman. Query-string tokens ARE less secure than headers
+    (they leak into browser history and server logs) — rotate the password
+    if you use this outside a trusted operator device."""
+    if not ADMIN_TRIGGER_PASSWORD:
+        return HTMLResponse(
+            "<h2>Server error</h2><p>ADMIN_TRIGGER_PASSWORD not configured.</p>",
+            status_code=500,
+        )
+    if token != ADMIN_TRIGGER_PASSWORD:
+        return HTMLResponse(
+            "<h2 style='color:#c21818'>Wrong password.</h2>"
+            "<p>Append <code>?token=&lt;password&gt;</code> to the URL.</p>",
+            status_code=401,
+        )
+    result = await _run_test_push()
+    ok = result["push_delivered"]
+    color = "#1F8A3A" if ok else "#c21818"
+    err_line = (
+        f"<p><b>Error:</b> {result['push_error']}</p>" if result["push_error"] else ""
+    )
+    html = f"""<!doctype html>
+<html><head><title>QuakeGuard test push</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  body {{ font-family:-apple-system,Segoe UI,sans-serif; padding:24px; max-width:640px; margin:0 auto; }}
+  .card {{ border:1px solid #ddd; border-radius:12px; padding:20px; }}
+  h1 {{ font-size:22px; margin:0 0 8px; }}
+  .badge {{ display:inline-block; padding:4px 10px; border-radius:999px;
+           color:#fff; font-size:12px; letter-spacing:1px; font-weight:700;
+           background:{color}; }}
+  code {{ background:#f4f4f6; padding:2px 6px; border-radius:4px; }}
+  .kv {{ margin-top:12px; font-size:14px; line-height:1.6; }}
+  .kv b {{ display:inline-block; min-width:130px; color:#666; font-weight:600; }}
+</style></head>
+<body>
+<div class="card">
+  <h1>QuakeGuard test push</h1>
+  <span class="badge">{"delivered" if ok else "not delivered"}</span>
+  <div class="kv">
+    <div><b>Recipients:</b> {result['recipients']}</div>
+    <div><b>Push delivered:</b> {ok}</div>
+    {err_line}
+  </div>
+  <p style="margin-top:20px;color:#666;font-size:13px">
+    If <b>Push delivered = true</b> but no notification arrives on your device
+    within ~30 seconds, the problem is between the Emergent push relay and
+    Apple: either notifications are disabled for QuakeGuard in iOS Settings,
+    or the APNs .p8 key uploaded during Publish is wrong / for a different
+    bundle ID, or the app hasn't been foregrounded yet since install.
+  </p>
+</div>
+</body></html>"""
+    return HTMLResponse(html)
+
+async def _run_test_push():
     devices = await db.push_devices.find({}, {"_id": 0, "user_id": 1}).to_list(10000)
     recipients = [d["user_id"] for d in devices]
     push_delivered = True
