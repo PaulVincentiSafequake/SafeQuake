@@ -94,11 +94,27 @@ async def register_push(body: RegisterPushBody):
         }},
         upsert=True,
     )
+
+    event = {
+        "at": datetime.now(timezone.utc).isoformat(),
+        "kind": "register",
+        "user_id": body.user_id,
+        "platform": body.platform,
+        "status_code": None,
+        "response_body": None,
+        "error": None,
+    }
     try:
         resp = await _push_client.post(
             "/api/v1/push/users/register",
             json=body.model_dump(),
         )
+        event["status_code"] = resp.status_code
+        try:
+            event["response_body"] = resp.text[:2000]
+        except Exception:
+            event["response_body"] = "<unreadable>"
+        _last_push_events.appendleft(event)
         if resp.status_code == 401:
             raise HTTPException(500, "EMERGENT_PUSH_KEY missing or invalid")
         if resp.status_code >= 500:
@@ -107,6 +123,8 @@ async def register_push(body: RegisterPushBody):
     except HTTPException:
         raise
     except Exception as e:
+        event["error"] = str(e)
+        _last_push_events.appendleft(event)
         logging.warning(f"Push register failed (non-blocking): {e}")
     return {"status": "registered"}
 
@@ -125,6 +143,7 @@ async def send_push(recipients: List[str], data: dict, idempotency_key: Optional
 
         event = {
             "at": datetime.now(timezone.utc).isoformat(),
+            "kind": "trigger",
             "chunk_size": len(chunk),
             "title": data.get("title"),
             "message": data.get("message"),
@@ -331,6 +350,7 @@ async def debug_last_push_events(token: str = Query(default="")):
         rows = []
         for ev in events:
             status = ev.get("status_code")
+            kind = ev.get("kind", "trigger")
             badge_color = (
                 "#1F8A3A" if status and 200 <= status < 300
                 else "#C21818" if status
@@ -338,16 +358,26 @@ async def debug_last_push_events(token: str = Query(default="")):
             )
             body_esc = _html.escape((ev.get("response_body") or "")[:1500])
             err_esc = _html.escape(ev.get("error") or "")
+            if kind == "register":
+                detail_line = (
+                    f"<b>user_id:</b> {_html.escape(str(ev.get('user_id')))} · "
+                    f"<b>platform:</b> {_html.escape(str(ev.get('platform')))}"
+                )
+            else:
+                detail_line = (
+                    f"<b>title:</b> {_html.escape(str(ev.get('title')))} · "
+                    f"<b>recipients in chunk:</b> {ev.get('chunk_size')}"
+                )
             rows.append(f"""
 <div style="border:1px solid #ddd;border-radius:8px;padding:12px;margin-bottom:10px">
   <div style="display:flex;justify-content:space-between;align-items:center">
-    <span style="background:{badge_color};color:#fff;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700">{status or '—'}</span>
+    <div>
+      <span style="background:{badge_color};color:#fff;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700">{status or '—'}</span>
+      <span style="background:#333;color:#fff;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700;margin-left:6px">{kind}</span>
+    </div>
     <small style="color:#888">{_html.escape(ev.get('at',''))}</small>
   </div>
-  <div style="margin-top:6px;font-size:12px;color:#333">
-    <b>title:</b> {_html.escape(str(ev.get('title')))} ·
-    <b>recipients in chunk:</b> {ev.get('chunk_size')}
-  </div>
+  <div style="margin-top:6px;font-size:12px;color:#333">{detail_line}</div>
   {f'<div style="margin-top:6px;font-size:12px;color:#C21818"><b>error:</b> {err_esc}</div>' if err_esc else ''}
   <pre style="background:#f4f4f6;padding:8px;border-radius:6px;font-size:11px;overflow:auto;max-height:220px;white-space:pre-wrap;word-break:break-all;margin-top:8px">{body_esc or '<i>(empty body)</i>'}</pre>
 </div>""")
