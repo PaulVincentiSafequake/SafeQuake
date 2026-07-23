@@ -10,7 +10,7 @@
     "newArchEnabled": true,
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.emergent.quakealert.yjbyic",
+      "bundleIdentifier": "com.paulvincenti.quakeguard",
       "infoPlist": {
         "NSLocationWhenInUseUsageDescription": "Share your location to report you are safe",
         "NSLocationAlwaysAndWhenInUseUsageDescription": "Share your location to report you are safe"
@@ -22,7 +22,7 @@
         "backgroundColor": "#000000"
       },
       "edgeToEdgeEnabled": true,
-      "package": "com.emergent.quakealert.yjbyic",
+      "package": "com.paulvincenti.quakeguard",
       "permissions": [
         "ACCESS_COARSE_LOCATION",
         "ACCESS_FINE_LOCATION"
