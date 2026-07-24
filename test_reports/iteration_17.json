@@ -1,0 +1,30 @@
+{
+  "summary": "Backend-only verification of the new GET /api/debug/probe-push?variant=A..F diagnostic endpoint plus regression of the previously-shipped push/debug/status routes. 23 new tests in test_probe_push.py + 75 existing tests = 98/98 green against http://localhost:8001 with placeholder EMERGENT_PUSH_KEY. Verified all spec points (a-k): variant A renders baseline (title='QuakeGuard test push', message='If you see this, the push channel is working.', action_url='/', idempotency_key starts with 'quake-testpush-'); variants B/C/D/E each change EXACTLY ONE field vs baseline; variant F is the full trigger-alert payload; unknown variant → 400 'Unknown variant'; missing/wrong token → 401 'Wrong password'; each call appends a `trigger` event to _last_push_events, and variant B's newest event card shows title 'EARTHQUAKE ALERT' AND action_url '/' — proving only ONE field changed; badge is red (#c21818) with error string 'EMERGENT_PUSH_KEY missing or invalid' under placeholder key as expected; recipients list is unfiltered (chunk_size on newest event == total device count, matching test-push behaviour NOT the {$ne:triggeredBy} filter). Code checks on /app/backend/server.py: variant selector uses (variant or 'A').upper() for case-insensitivity (also tested against lowercase 'b'), baseline constants literally match /debug/test-push, alert constants literally match /trigger-alert, send_push is called with data={title,message,action_url} only, all user-controlled values are _html.escape'd, and nav bar contains all six variant=A..F links. Regressions: /api/debug/test-push (GET+POST), POST /api/trigger-alert (200 JSON with status/recipients/push_delivered/push_error), POST /api/register-push (upsert-first contract still holds even when relay 401s under placeholder key → endpoint returns 500 but DB row is written), GET /api/debug/devices, GET /api/debug/last-push-events ('first recipients:' + 'action_url:' rows present), and legacy /api/status GET+POST all pass. Ruff lint clean.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_probe_push.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py debug_probe_push (lines 434-549) is well-structured. Baseline constants (baseline_title/message/action/idem at lines 466-469) exactly mirror _run_test_push at lines 415-420. Alert override constants (lines 472-475) exactly mirror trigger_alert lines 209-219. Only one variable changes for B/C/D/E and all four for F — verified programmatically.",
+    "send_push is invoked with data={\"title\": title, \"message\": message, \"action_url\": action} (line 501) — no extra fields, so probe payload structurally matches both /debug/test-push and /trigger-alert. Only idempotency_key prefix differs across variants.",
+    "HTML escape via _html.escape is applied to title/message/action/idem/error and even the variant letter in the 400 response body and every nav-link token value. No XSS surface.",
+    "Nav bar renders exactly 6 links (variant=A through variant=F). Case-insensitivity of variant param is real: (variant or 'A').upper() handles missing / lowercase inputs identically.",
+    "Recipients query is {} (line 462) — matches _run_test_push at line 408; does NOT apply the {$ne: triggeredBy} filter from trigger-alert. Confirmed empirically: chunk_size on the newest event == full device_count.",
+    "server.py is 572 lines — under the 700 threshold; no refactor required. All URLs/credentials from env vars, MongoDB _id excluded via projection everywhere.",
+    "Non-blocking observation: register_push upserts BEFORE the relay call, then re-raises HTTPException(500) when the relay returns 401. Under placeholder EMERGENT_PUSH_KEY the endpoint responds 500 even though the DB row is written. This is existing behaviour (not introduced by this iteration) and does not affect probe-push; noted here for the next tester who might otherwise be surprised."
+  ],
+  "updated_files": ["/app/backend/tests/test_probe_push.py"],
+  "success_rate": {"backend": "100% (98/98, including 23 new)", "frontend": "N/A (not requested)"},
+  "seed_data_creation": "Module-scoped fixture writes a single row (user_id='TEST_probe_dev_1') directly into Mongo push_devices via pymongo, bypassing /api/register-push (which returns 500 under placeholder EMERGENT_PUSH_KEY). Also creates transient TEST_probe_upsert_<uuid> device via the register-push endpoint to prove upsert-first contract. No cleanup added — records are TEST_-prefixed and harmless to leave behind, matching pattern used by other test files in this suite.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Under placeholder EMERGENT_PUSH_KEY the Emergent relay returns 401 with body {\"error\":\"invalid X-Push-Key\"}, so send_push raises HTTPException(500, 'EMERGENT_PUSH_KEY missing or invalid') and /api/register-push responds 500 (but DB write already happened before the relay call — see register_push at server.py:87-96). To seed devices deterministically use pymongo direct-write (see _register_device helper in test_probe_push.py). Ring buffer _last_push_events is process-local deque(maxlen=20) — restart backend to clear if needed. recipients_sample on each event card is chunk[:5] of the FIRST 100-recipient chunk, so with many devices you can't verify individual uid membership from the HTML; instead compare chunk_size to /api/debug/devices device_count (used in test_recipients_unfiltered)."
+}

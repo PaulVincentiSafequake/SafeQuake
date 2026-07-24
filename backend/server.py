@@ -431,6 +431,123 @@ async def _run_test_push():
         "push_error": push_error,
     }
 
+@api_router.get("/debug/probe-push", response_class=HTMLResponse)
+async def debug_probe_push(
+    token: str = Query(default=""),
+    variant: str = Query(default="A"),
+):
+    """One-variable-at-a-time push probe. Same helper (`send_push`) and same
+    recipient list ({} — every registered device) as /debug/test-push. Only
+    ONE of {title, message, action_url, idempotency_key prefix} is swapped
+    to the "EARTHQUAKE ALERT" variant per invocation so we can bisect which
+    change is causing APNs to silently drop delivery.
+
+      A  = full baseline           (known-delivering test-push payload)
+      B  = title only              → "EARTHQUAKE ALERT"
+      C  = message only            → "Magnitude 6.4. Are you safe? ..."
+      D  = action_url only         → "/alert"
+      E  = idempotency prefix only → "quake-<uuid>" (no "-testpush-")
+      F  = full trigger-alert      (all four changes at once)
+
+    Fire each variant with the app on and phone unlocked, wait ~15s, and
+    note which variant(s) actually produce a notification on the device.
+    """
+    if not ADMIN_TRIGGER_PASSWORD:
+        return HTMLResponse("<h2>Server error</h2>", status_code=500)
+    if token != ADMIN_TRIGGER_PASSWORD:
+        return HTMLResponse(
+            "<h2 style='color:#c21818'>Wrong password.</h2>", status_code=401,
+        )
+
+    devices = await db.push_devices.find({}, {"_id": 0, "user_id": 1}).to_list(10000)
+    recipients = [d["user_id"] for d in devices]
+
+    # Baseline (matches /debug/test-push exactly):
+    baseline_title = "QuakeGuard test push"
+    baseline_message = "If you see this, the push channel is working."
+    baseline_action = "/"
+    baseline_idem = f"quake-testpush-{uuid.uuid4()}"
+
+    # trigger-alert-style overrides:
+    alert_title = "EARTHQUAKE ALERT"
+    alert_message = "Magnitude 6.4. Are you safe? Tap to check in."
+    alert_action = "/alert"
+    alert_idem = f"quake-{uuid.uuid4()}"
+
+    v = (variant or "A").upper()
+    if v == "A":
+        title, message, action, idem = baseline_title, baseline_message, baseline_action, baseline_idem
+    elif v == "B":
+        title, message, action, idem = alert_title, baseline_message, baseline_action, baseline_idem
+    elif v == "C":
+        title, message, action, idem = baseline_title, alert_message, baseline_action, baseline_idem
+    elif v == "D":
+        title, message, action, idem = baseline_title, baseline_message, alert_action, baseline_idem
+    elif v == "E":
+        title, message, action, idem = baseline_title, baseline_message, baseline_action, alert_idem
+    elif v == "F":
+        title, message, action, idem = alert_title, alert_message, alert_action, alert_idem
+    else:
+        return HTMLResponse(
+            f"<h2>Unknown variant '{_html.escape(v)}'</h2><p>Use A|B|C|D|E|F.</p>",
+            status_code=400,
+        )
+
+    push_delivered = True
+    push_error: Optional[str] = None
+    try:
+        await send_push(
+            recipients=recipients,
+            data={"title": title, "message": message, "action_url": action},
+            idempotency_key=idem,
+        )
+    except HTTPException as e:
+        push_delivered = False
+        push_error = e.detail
+    except Exception as e:
+        push_delivered = False
+        push_error = str(e)
+
+    color = "#1F8A3A" if push_delivered else "#c21818"
+    return HTMLResponse(f"""<!doctype html><html><head>
+<title>Probe {v}</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>body{{font-family:-apple-system,Segoe UI,sans-serif;padding:24px;max-width:640px;margin:0 auto}}
+.card{{border:1px solid #ddd;border-radius:12px;padding:20px;background:#fafafa}}
+h1{{font-size:20px;margin:0 0 8px}}
+.badge{{display:inline-block;padding:4px 10px;border-radius:999px;color:#fff;font-size:12px;font-weight:700;background:{color}}}
+.kv{{margin-top:14px;font-size:14px;line-height:1.7}}
+.kv b{{display:inline-block;min-width:110px;color:#666;font-weight:600}}
+code{{background:#f4f4f6;padding:2px 6px;border-radius:4px;font-size:12px}}
+.nav{{margin-top:20px;font-size:13px}}
+.nav a{{margin-right:10px;background:#eee;padding:6px 10px;border-radius:6px;text-decoration:none;color:#333}}</style>
+</head><body>
+<div class="card">
+  <h1>Probe variant {_html.escape(v)}</h1>
+  <span class="badge">{"queued to APNs" if push_delivered else "not delivered"}</span>
+  <div class="kv">
+    <div><b>Recipients:</b> {len(recipients)}</div>
+    <div><b>Title:</b> <code>{_html.escape(title)}</code></div>
+    <div><b>Message:</b> <code>{_html.escape(message)}</code></div>
+    <div><b>action_url:</b> <code>{_html.escape(action)}</code></div>
+    <div><b>idempotency_key:</b> <code>{_html.escape(idem)}</code></div>
+    {"<div><b>error:</b> " + _html.escape(str(push_error)) + "</div>" if push_error else ""}
+  </div>
+  <div class="nav">
+    <a href="?token={_html.escape(token)}&variant=A">A: baseline</a>
+    <a href="?token={_html.escape(token)}&variant=B">B: alert title</a>
+    <a href="?token={_html.escape(token)}&variant=C">C: alert message</a>
+    <a href="?token={_html.escape(token)}&variant=D">D: /alert URL</a>
+    <a href="?token={_html.escape(token)}&variant=E">E: short idem</a>
+    <a href="?token={_html.escape(token)}&variant=F">F: full alert</a>
+  </div>
+  <p style="margin-top:16px;color:#666;font-size:12px">
+    "Queued" only means the Emergent relay accepted it (HTTP 202). Whether the
+    phone actually rings depends on APNs — check your phone after each variant.
+  </p>
+</div>
+</body></html>""")
+
 # ---------- Wire up ----------
 app.include_router(api_router)
 
