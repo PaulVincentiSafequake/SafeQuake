@@ -38,6 +38,20 @@ export default function AlertScreen() {
   const [status, setStatus] = useState<Status>("idle");
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [elapsed, setElapsed] = useState(0);
+  // Hidden diagnostic panel — revealed by 5 taps on the "EARTHQUAKE
+  // DETECTED" heading within 2s. Not visible to regular users.
+  const [showDebug, setShowDebug] = useState(false);
+  const titleTapsRef = useRef<number[]>([]);
+  const onTitleTap = () => {
+    const now = Date.now();
+    titleTapsRef.current = [...titleTapsRef.current, now].filter(
+      (t) => now - t < 2000,
+    );
+    if (titleTapsRef.current.length >= 5) {
+      titleTapsRef.current = [];
+      setShowDebug((v) => !v);
+    }
+  };
 
   const pulse = useSharedValue(1);
   const ring = useSharedValue(0);
@@ -378,7 +392,9 @@ export default function AlertScreen() {
             </Animated.View>
           </View>
 
-          <Text style={styles.heading}>EARTHQUAKE{"\n"}DETECTED</Text>
+          <Pressable onPress={onTitleTap} hitSlop={10} testID="alert-title">
+            <Text style={styles.heading}>EARTHQUAKE{"\n"}DETECTED</Text>
+          </Pressable>
           <Text style={styles.subheading}>
             Drop. Cover. Hold on.{"\n"}Move to open space when shaking stops.
           </Text>
@@ -403,8 +419,9 @@ export default function AlertScreen() {
 
         {/* Bottom action */}
         <View style={[styles.bottomWrap, { paddingBottom: Math.max(insets.bottom, spacing.md) }]}>
-          {/* Siren diagnostics panel — visible on-screen so debug info can be
-              read without Xcode. Two retry buttons: local mp3 + streaming URL. */}
+          {/* Siren diagnostics panel — hidden by default. Reveal with 5
+              rapid taps on the EARTHQUAKE DETECTED heading. */}
+          {showDebug && (
           <View style={styles.debugPanel} testID="siren-debug-panel">
             <Text style={styles.debugTitle}>SIREN DIAGNOSTICS</Text>
             <Text style={styles.debugStat}>
@@ -438,6 +455,7 @@ export default function AlertScreen() {
               )}
             </View>
           </View>
+          )}
 
           {status === "error" && errorMsg && (
             <View style={styles.errorToast} testID="alert-error-toast">
