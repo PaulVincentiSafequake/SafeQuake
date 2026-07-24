@@ -145,8 +145,10 @@ async def send_push(recipients: List[str], data: dict, idempotency_key: Optional
             "at": datetime.now(timezone.utc).isoformat(),
             "kind": "trigger",
             "chunk_size": len(chunk),
+            "recipients_sample": chunk[:5],  # first 5 user_ids so we can eyeball who was targeted
             "title": data.get("title"),
             "message": data.get("message"),
+            "action_url": data.get("action_url"),
             "status_code": None,
             "response_body": None,
             "error": None,
@@ -364,9 +366,13 @@ async def debug_last_push_events(token: str = Query(default="")):
                     f"<b>platform:</b> {_html.escape(str(ev.get('platform')))}"
                 )
             else:
+                sample = ev.get("recipients_sample") or []
+                sample_html = ", ".join(_html.escape(str(s)) for s in sample) or "<i>—</i>"
                 detail_line = (
                     f"<b>title:</b> {_html.escape(str(ev.get('title')))} · "
-                    f"<b>recipients in chunk:</b> {ev.get('chunk_size')}"
+                    f"<b>recipients in chunk:</b> {ev.get('chunk_size')}<br>"
+                    f"<b>action_url:</b> {_html.escape(str(ev.get('action_url') or ''))}<br>"
+                    f"<b>first recipients:</b> <code style='font-size:11px'>{sample_html}</code>"
                 )
             rows.append(f"""
 <div style="border:1px solid #ddd;border-radius:8px;padding:12px;margin-bottom:10px">
