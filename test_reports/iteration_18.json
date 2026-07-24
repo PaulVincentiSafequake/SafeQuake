@@ -1,0 +1,41 @@
+{
+  "summary": "Backend-only verification of the expanded recipient-list rendering on GET /api/debug/last-push-events. Created /app/backend/tests/test_full_recipient_list.py (24 tests, 24 PASS). Seeded 7 devices (qg-1..qg-7) directly into Mongo push_devices (bypassing /api/register-push, which 500s under placeholder EMERGENT_PUSH_KEY), fired GET /api/debug/test-push, and confirmed against the /api/debug/last-push-events HTML that: (1) the new label 'recipient list:' is used (old 'first recipients:' is gone); (2) 'recipients:' shows total chunk_size=7; (3) ALL 7 user_ids render as separate <code> blocks joined by <br> inside a scrollable div (max-height:180px; overflow:auto); (4) 6 <br> separators for 7 IDs proves per-line rendering; (5) '(+N more not captured)' is absent when total==shown, and the render code path is guarded by 'if total > shown else \"\"' (verified via source inspection); (6) HTML escape works — seeded a rogue user_id '<script>alert(\"xss\")</script>', confirmed the recipient div contains '&lt;script&gt;' and NOT a raw <script> tag. Source-level checks on /app/backend/server.py: recipients_sample uses chunk[:200] (never chunk[:5] on any active line), render label is 'recipient list:', scrollable div style present, _html.escape(str(s)) applied per user_id, '(+N more not captured)' branch guarded correctly. Regressions all green: POST /api/trigger-alert 200 JSON (status/recipients/push_delivered/push_error), all 6 probe-push variants A-F append trigger events showing full 7-recipient list, register-push events still show user_id+platform, ring buffer bounded to 20, legacy /api/status GET+POST intact, send_push HTTPException(500) on upstream 401 contract holds, /api/debug/devices unchanged (token_preview only). Ruff lint clean.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "N/A (test suite hygiene)", "issue": "8 pre-existing tests in test_debug_last_push_events.py, test_probe_push.py, test_recipients_sample_diagnostic.py, and test_register_push_capture.py still assert against the OLD labels 'first recipients:' and 'recipients in chunk:', which have been intentionally renamed to 'recipient list:' and 'recipients:' per this iteration's spec. These are stale test assertions, NOT app bugs. Suggested fix: update or delete those four files' obsolete assertions."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_full_recipient_list.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "Optional cleanup: refresh stale label assertions in test_debug_last_push_events.py, test_probe_push.py (test_recipients_unfiltered, test_debug_last_push_events_renders), test_recipients_sample_diagnostic.py, and test_register_push_capture.py from 'first recipients:'/'recipients in chunk:' → 'recipient list:'/'recipients:'. Not blocking — the new spec is fully covered by test_full_recipient_list.py."
+  ],
+  "critical_code_review_comments": [
+    "server.py:151 → recipients_sample = chunk[:200]. Well within the 100-recipient CHUNK bound in send_push, so under normal ops the '(+N more not captured)' branch is unreachable (as documented in the spec). Confirmed empirically via test_no_more_not_captured_note_under_normal_ops.",
+    "server.py:389 → recipient list div style: 'margin-top:4px;padding:6px 8px;background:#f4f4f6;border-radius:4px;max-height:180px;overflow:auto'. Correct scrollable container spec.",
+    "server.py:377 → per-user_id HTML escape via `_html.escape(str(s)) for s in sample`. XSS-safe — verified with a real <script>alert('xss')</script> user_id: the raw tag is escaped to &lt;script&gt;, single-quote to &#x27;.",
+    "server.py:381-384 → '(+{total - shown} more not captured)' guarded by `if total > shown else \"\"`. Only reachable if chunk_size > 200 (impossible under CHUNK=100 unless CHUNK is manually raised); correctly absent under normal ops.",
+    "server.py is 586 lines — under the 700-line threshold, no refactor needed.",
+    "Pre-existing behaviour (not introduced this iteration): under placeholder EMERGENT_PUSH_KEY, /api/register-push returns 500 (relay 401 → HTTPException(500)) but the DB row is still upserted BEFORE the relay call, so downstream fan-out endpoints still find the device. Direct-Mongo seeding is used in tests to avoid the 500."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_full_recipient_list.py"
+  ],
+  "success_rate": {
+    "backend": "100% on new spec (24/24 in test_full_recipient_list.py). Full-suite: 114/122 pass — the 8 failures are all stale label assertions in older test files (see minor issue).",
+    "frontend": "N/A (backend-only per request)"
+  },
+  "seed_data_creation": "Module-scoped fixture in test_full_recipient_list.py: restarts backend to clear the in-memory _last_push_events ring buffer, snapshots+wipes existing push_devices, then directly upserts qg-1..qg-7 into Mongo. Teardown wipes test devices and restores originals. Test test_html_escape_on_user_ids transiently seeds '<script>alert(\\'xss\\')</script>' via pymongo and deletes it in finally.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "The recipient list label was renamed this iteration: 'first recipients:' → 'recipient list:' and 'recipients in chunk:' → 'recipients:'. The list is now rendered as a <br>-joined series of <code> blocks inside a scrollable div (max-height:180px; overflow:auto). Cap is chunk[:200], effectively unlimited given send_push's CHUNK=100 upper bound, so the '(+N more not captured)' branch never fires in production — it's guarded by `if total > shown else ''` and only reachable if CHUNK is raised above 200. 8 stale tests in other files (test_debug_last_push_events, test_probe_push, test_recipients_sample_diagnostic, test_register_push_capture) still target the OLD labels and will fail until updated — these are not app bugs. To seed devices deterministically use direct-Mongo upsert (see _seed_direct helper in test_full_recipient_list.py) because /api/register-push returns 500 under placeholder EMERGENT_PUSH_KEY (the DB write does happen first, but the 500 breaks naive test flows)."
+}

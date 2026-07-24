@@ -145,7 +145,10 @@ async def send_push(recipients: List[str], data: dict, idempotency_key: Optional
             "at": datetime.now(timezone.utc).isoformat(),
             "kind": "trigger",
             "chunk_size": len(chunk),
-            "recipients_sample": chunk[:5],  # first 5 user_ids so we can eyeball who was targeted
+            # Full list of user_ids in this chunk (capped to keep the ring
+            # buffer entry <5 KB — 200 IDs × ~30 chars = 6 KB max, and each
+            # chunk is already bounded to 100 IDs by CHUNK above).
+            "recipients_sample": chunk[:200],
             "title": data.get("title"),
             "message": data.get("message"),
             "action_url": data.get("action_url"),
@@ -367,12 +370,23 @@ async def debug_last_push_events(token: str = Query(default="")):
                 )
             else:
                 sample = ev.get("recipients_sample") or []
-                sample_html = ", ".join(_html.escape(str(s)) for s in sample) or "<i>—</i>"
+                shown = len(sample)
+                total = ev.get("chunk_size") or shown
+                sample_html = (
+                    "<br>".join(
+                        f"<code style='font-size:11px'>{_html.escape(str(s))}</code>"
+                        for s in sample
+                    ) or "<i>—</i>"
+                )
+                more_note = (
+                    f" <small style='color:#888'>(+{total - shown} more not captured)</small>"
+                    if total > shown else ""
+                )
                 detail_line = (
                     f"<b>title:</b> {_html.escape(str(ev.get('title')))} · "
-                    f"<b>recipients in chunk:</b> {ev.get('chunk_size')}<br>"
+                    f"<b>recipients:</b> {total}<br>"
                     f"<b>action_url:</b> {_html.escape(str(ev.get('action_url') or ''))}<br>"
-                    f"<b>first recipients:</b> <code style='font-size:11px'>{sample_html}</code>"
+                    f"<b>recipient list:</b>{more_note}<div style='margin-top:4px;padding:6px 8px;background:#f4f4f6;border-radius:4px;max-height:180px;overflow:auto'>{sample_html}</div>"
                 )
             rows.append(f"""
 <div style="border:1px solid #ddd;border-radius:8px;padding:12px;margin-bottom:10px">
