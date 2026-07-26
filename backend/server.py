@@ -1,13 +1,10 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Header, Query
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, APIRouter, HTTPException, Header
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import logging
 import httpx
-import html as _html
-from collections import deque
 from pathlib import Path
 from pydantic import BaseModel, Field
 from typing import List, Optional
@@ -32,18 +29,14 @@ _push_client = httpx.AsyncClient(
     timeout=10.0,
 )
 
-# Admin password for the "Trigger Earthquake Alert" dashboard button.
-# Sent by the dashboard as `X-Admin-Token: <password>` on POST /api/trigger-alert.
+# Admin password for the "Trigger Earthquake Alert" dashboard button and the
+# maintenance purge endpoint. Sent as `X-Admin-Token: <password>`.
 ADMIN_TRIGGER_PASSWORD = os.environ.get("ADMIN_TRIGGER_PASSWORD", "")
-
-# Bounded in-memory ring buffer of the last 20 push-provider interactions so
-# we can inspect raw APNs / relay error bodies via /api/debug/last-push-events.
-_last_push_events: "deque[dict]" = deque(maxlen=20)
 
 app = FastAPI()
 api_router = APIRouter(prefix="/api")
 
-# ---------- Legacy status-check demo endpoints (kept as-is) ----------
+# ---------- Legacy status-check demo endpoints ----------
 class StatusCheck(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     client_name: str
@@ -74,16 +67,15 @@ class RegisterPushBody(BaseModel):
     device_token: str
 
 class TriggerAlertBody(BaseModel):
-    triggeredBy: Optional[str] = None       # deviceId of the trigger source
+    triggeredBy: Optional[str] = None
     magnitude: Optional[float] = None
     distance_km: Optional[float] = None
     intensity: Optional[str] = None
 
 @api_router.post("/register-push", status_code=201)
 async def register_push(body: RegisterPushBody):
-    """Register a device native push token with the Emergent push relay,
+    """Register a device's native push token with the Emergent push relay,
     and remember it locally so we can broadcast alerts to every device."""
-    # Store locally so we know who to fan out to
     await db.push_devices.update_one(
         {"user_id": body.user_id},
         {"$set": {
@@ -94,27 +86,11 @@ async def register_push(body: RegisterPushBody):
         }},
         upsert=True,
     )
-
-    event = {
-        "at": datetime.now(timezone.utc).isoformat(),
-        "kind": "register",
-        "user_id": body.user_id,
-        "platform": body.platform,
-        "status_code": None,
-        "response_body": None,
-        "error": None,
-    }
     try:
         resp = await _push_client.post(
             "/api/v1/push/users/register",
             json=body.model_dump(),
         )
-        event["status_code"] = resp.status_code
-        try:
-            event["response_body"] = resp.text[:2000]
-        except Exception:
-            event["response_body"] = "<unreadable>"
-        _last_push_events.appendleft(event)
         if resp.status_code == 401:
             raise HTTPException(500, "EMERGENT_PUSH_KEY missing or invalid")
         if resp.status_code >= 500:
@@ -123,8 +99,6 @@ async def register_push(body: RegisterPushBody):
     except HTTPException:
         raise
     except Exception as e:
-        event["error"] = str(e)
-        _last_push_events.appendleft(event)
         logging.warning(f"Push register failed (non-blocking): {e}")
     return {"status": "registered"}
 
@@ -133,53 +107,22 @@ async def send_push(recipients: List[str], data: dict, idempotency_key: Optional
         return
     if "title" not in data or "message" not in data:
         raise ValueError("data must include title and message")
-    # Chunk to 100 per Emergent relay contract
     CHUNK = 100
     for i in range(0, len(recipients), CHUNK):
         chunk = recipients[i:i + CHUNK]
         payload = {"recipients": chunk, "data": data}
         if idempotency_key:
             payload["$idempotency_key"] = f"{idempotency_key}-{i // CHUNK}"
-
-        event = {
-            "at": datetime.now(timezone.utc).isoformat(),
-            "kind": "trigger",
-            "chunk_size": len(chunk),
-            # Full list of user_ids in this chunk (capped to keep the ring
-            # buffer entry <5 KB — 200 IDs × ~30 chars = 6 KB max, and each
-            # chunk is already bounded to 100 IDs by CHUNK above).
-            "recipients_sample": chunk[:200],
-            "title": data.get("title"),
-            "message": data.get("message"),
-            "action_url": data.get("action_url"),
-            "status_code": None,
-            "response_body": None,
-            "error": None,
-        }
         try:
             resp = await _push_client.post("/api/v1/push/trigger", json=payload)
-            event["status_code"] = resp.status_code
-            # Capture body (truncated) — this is where APNs error codes surface
-            try:
-                event["response_body"] = resp.text[:2000]
-            except Exception:
-                event["response_body"] = "<unreadable>"
-
             if resp.status_code == 401:
-                event["error"] = "EMERGENT_PUSH_KEY missing or invalid"
-                _last_push_events.appendleft(event)
                 raise HTTPException(500, "EMERGENT_PUSH_KEY missing or invalid")
             if resp.status_code >= 500:
-                event["error"] = f"upstream {resp.status_code}"
-                _last_push_events.appendleft(event)
                 raise HTTPException(502, "Push provider unavailable")
             resp.raise_for_status()
-            _last_push_events.appendleft(event)
         except HTTPException:
             raise
         except Exception as e:
-            event["error"] = str(e)
-            _last_push_events.appendleft(event)
             logging.warning(f"Push trigger failed (non-blocking): {e}")
 
 @api_router.post("/trigger-alert")
@@ -188,15 +131,12 @@ async def trigger_alert(
     x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
 ):
     """Broadcast a QuakeGuard alert to every registered device (except the
-    device that triggered it, if provided). Returns count of recipients.
-    Push delivery failure is logged but never blocks the response.
+    device that triggered it, if provided). Push delivery failure is logged
+    but never blocks the response.
 
-    Requires header `X-Admin-Token` matching the ADMIN_TRIGGER_PASSWORD env
-    var. This protects the dashboard button from random visitors.
+    Requires header `X-Admin-Token` matching ADMIN_TRIGGER_PASSWORD.
     """
     if not ADMIN_TRIGGER_PASSWORD:
-        # Fail-closed: refuse to broadcast if the operator hasn't set a
-        # password. Better than silently allowing anonymous triggers.
         raise HTTPException(500, "ADMIN_TRIGGER_PASSWORD not configured on server")
     if x_admin_token != ADMIN_TRIGGER_PASSWORD:
         raise HTTPException(401, "Invalid or missing X-Admin-Token")
@@ -226,11 +166,9 @@ async def trigger_alert(
     except HTTPException as e:
         push_delivered = False
         push_error = e.detail
-        logging.warning(f"trigger-alert push non-fatal: {e.detail}")
     except Exception as e:
         push_delivered = False
         push_error = str(e)
-        logging.warning(f"trigger-alert push non-fatal: {e}")
     return {
         "status": "broadcast",
         "recipients": len(recipients),
@@ -238,329 +176,28 @@ async def trigger_alert(
         "push_error": push_error,
     }
 
-@api_router.get("/debug/devices")
-async def debug_devices():
-    """Diagnostic: list every device that has registered a push token.
-    Returned tokens are truncated to 8 chars each so they can't be reused
-    but you can still tell whether YOUR device made it into the list.
-    Also reports whether EMERGENT_PUSH_KEY is a real value or the
-    build-time 'placeholder'."""
-    devices = await db.push_devices.find({}, {"_id": 0}).to_list(1000)
-    for d in devices:
-        tok = d.get("device_token", "") or ""
-        d["device_token_preview"] = (tok[:8] + "…" + tok[-4:]) if len(tok) > 12 else tok
-        d.pop("device_token", None)
-    return {
-        "device_count": len(devices),
-        "push_key_status": "placeholder" if PUSH_KEY == "placeholder" else "real",
-        "admin_password_configured": bool(ADMIN_TRIGGER_PASSWORD),
-        "devices": devices,
-    }
-
-@api_router.post("/debug/test-push")
-async def debug_test_push(
+# ---------- Maintenance: purge leftover test / diagnostic rows ----------
+@api_router.post("/admin/purge-test-devices")
+async def purge_test_devices(
     x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
 ):
-    """Send a plain test push to every registered device — bypasses the
-    'not_responding' bookkeeping so you can isolate whether the push
-    channel itself is delivering. Password-protected same as trigger-alert."""
+    """Remove device rows whose user_id looks like a testing artifact
+    (TEST_*, test-*, diag-*, dashboard). Password-protected."""
     if not ADMIN_TRIGGER_PASSWORD:
         raise HTTPException(500, "ADMIN_TRIGGER_PASSWORD not configured on server")
     if x_admin_token != ADMIN_TRIGGER_PASSWORD:
         raise HTTPException(401, "Invalid or missing X-Admin-Token")
-    return await _run_test_push()
 
-@api_router.get("/debug/test-push", response_class=HTMLResponse)
-async def debug_test_push_browser(
-    token: str = Query(default=""),
-):
-    """Browser-friendly variant: open in a tab with ?token=<password>.
-    Renders an HTML page with the same result payload so it's readable
-    without curl / Postman. Query-string tokens ARE less secure than headers
-    (they leak into browser history and server logs) — rotate the password
-    if you use this outside a trusted operator device."""
-    if not ADMIN_TRIGGER_PASSWORD:
-        return HTMLResponse(
-            "<h2>Server error</h2><p>ADMIN_TRIGGER_PASSWORD not configured.</p>",
-            status_code=500,
-        )
-    if token != ADMIN_TRIGGER_PASSWORD:
-        return HTMLResponse(
-            "<h2 style='color:#c21818'>Wrong password.</h2>"
-            "<p>Append <code>?token=&lt;password&gt;</code> to the URL.</p>",
-            status_code=401,
-        )
-    result = await _run_test_push()
-    ok = result["push_delivered"]
-    color = "#1F8A3A" if ok else "#c21818"
-    err_line = (
-        f"<p><b>Error:</b> {result['push_error']}</p>" if result["push_error"] else ""
-    )
-    html = f"""<!doctype html>
-<html><head><title>QuakeGuard test push</title>
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<style>
-  body {{ font-family:-apple-system,Segoe UI,sans-serif; padding:24px; max-width:640px; margin:0 auto; }}
-  .card {{ border:1px solid #ddd; border-radius:12px; padding:20px; }}
-  h1 {{ font-size:22px; margin:0 0 8px; }}
-  .badge {{ display:inline-block; padding:4px 10px; border-radius:999px;
-           color:#fff; font-size:12px; letter-spacing:1px; font-weight:700;
-           background:{color}; }}
-  code {{ background:#f4f4f6; padding:2px 6px; border-radius:4px; }}
-  .kv {{ margin-top:12px; font-size:14px; line-height:1.6; }}
-  .kv b {{ display:inline-block; min-width:130px; color:#666; font-weight:600; }}
-</style></head>
-<body>
-<div class="card">
-  <h1>QuakeGuard test push</h1>
-  <span class="badge">{"delivered" if ok else "not delivered"}</span>
-  <div class="kv">
-    <div><b>Recipients:</b> {result['recipients']}</div>
-    <div><b>Push delivered:</b> {ok}</div>
-    {err_line}
-  </div>
-  <p style="margin-top:20px;color:#666;font-size:13px">
-    If <b>Push delivered = true</b> but no notification arrives on your device
-    within ~30 seconds, the problem is between the Emergent push relay and
-    Apple: either notifications are disabled for QuakeGuard in iOS Settings,
-    or the APNs .p8 key uploaded during Publish is wrong / for a different
-    bundle ID, or the app hasn't been foregrounded yet since install.
-  </p>
-</div>
-</body></html>"""
-    return HTMLResponse(html)
-
-@api_router.get("/debug/last-push-events", response_class=HTMLResponse)
-async def debug_last_push_events(token: str = Query(default="")):
-    """Browser-friendly view of the last ~20 push-relay interactions —
-    including the raw response body from the Emergent relay, which surfaces
-    Apple/APNs error codes (BadDeviceToken, TopicDisallowed, etc.) that
-    tell us why an accepted push never reached the device."""
-    if not ADMIN_TRIGGER_PASSWORD:
-        return HTMLResponse("<h2>Server error</h2>", status_code=500)
-    if token != ADMIN_TRIGGER_PASSWORD:
-        return HTMLResponse(
-            "<h2 style='color:#c21818'>Wrong password.</h2>"
-            "<p>Append <code>?token=&lt;password&gt;</code>.</p>",
-            status_code=401,
-        )
-    events = list(_last_push_events)
-    if not events:
-        rows_html = (
-            "<p style='color:#666'>No push events captured yet. "
-            "Trigger a broadcast or hit "
-            "<code>/api/debug/test-push?token=…</code> first, then reload.</p>"
-        )
-    else:
-        rows = []
-        for ev in events:
-            status = ev.get("status_code")
-            kind = ev.get("kind", "trigger")
-            badge_color = (
-                "#1F8A3A" if status and 200 <= status < 300
-                else "#C21818" if status
-                else "#666"
-            )
-            body_esc = _html.escape((ev.get("response_body") or "")[:1500])
-            err_esc = _html.escape(ev.get("error") or "")
-            if kind == "register":
-                detail_line = (
-                    f"<b>user_id:</b> {_html.escape(str(ev.get('user_id')))} · "
-                    f"<b>platform:</b> {_html.escape(str(ev.get('platform')))}"
-                )
-            else:
-                sample = ev.get("recipients_sample") or []
-                shown = len(sample)
-                total = ev.get("chunk_size") or shown
-                sample_html = (
-                    "<br>".join(
-                        f"<code style='font-size:11px'>{_html.escape(str(s))}</code>"
-                        for s in sample
-                    ) or "<i>—</i>"
-                )
-                more_note = (
-                    f" <small style='color:#888'>(+{total - shown} more not captured)</small>"
-                    if total > shown else ""
-                )
-                detail_line = (
-                    f"<b>title:</b> {_html.escape(str(ev.get('title')))} · "
-                    f"<b>recipients:</b> {total}<br>"
-                    f"<b>action_url:</b> {_html.escape(str(ev.get('action_url') or ''))}<br>"
-                    f"<b>recipient list:</b>{more_note}<div style='margin-top:4px;padding:6px 8px;background:#f4f4f6;border-radius:4px;max-height:180px;overflow:auto'>{sample_html}</div>"
-                )
-            rows.append(f"""
-<div style="border:1px solid #ddd;border-radius:8px;padding:12px;margin-bottom:10px">
-  <div style="display:flex;justify-content:space-between;align-items:center">
-    <div>
-      <span style="background:{badge_color};color:#fff;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700">{status or '—'}</span>
-      <span style="background:#333;color:#fff;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700;margin-left:6px">{kind}</span>
-    </div>
-    <small style="color:#888">{_html.escape(ev.get('at',''))}</small>
-  </div>
-  <div style="margin-top:6px;font-size:12px;color:#333">{detail_line}</div>
-  {f'<div style="margin-top:6px;font-size:12px;color:#C21818"><b>error:</b> {err_esc}</div>' if err_esc else ''}
-  <pre style="background:#f4f4f6;padding:8px;border-radius:6px;font-size:11px;overflow:auto;max-height:220px;white-space:pre-wrap;word-break:break-all;margin-top:8px">{body_esc or '<i>(empty body)</i>'}</pre>
-</div>""")
-        rows_html = "".join(rows)
-
-    html_page = f"""<!doctype html><html><head>
-<title>QuakeGuard push events</title>
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<style>body{{font-family:-apple-system,Segoe UI,sans-serif;padding:24px;max-width:720px;margin:0 auto;background:#fafafa}}
-h1{{font-size:20px;margin:0 0 4px}} .sub{{color:#666;font-size:13px;margin-bottom:16px}}</style>
-</head><body>
-<h1>QuakeGuard push events</h1>
-<p class="sub">Last {len(events)} interaction(s) with the Emergent push relay. Newest first. The <code>response_body</code> pre-block is the raw text the relay returned — APNs / Apple error codes surface here.</p>
-{rows_html}
-<p style="margin-top:24px;color:#888;font-size:12px">
-  Tip: reload this page after tapping "Trigger Earthquake Alert" or hitting the test-push URL.
-</p>
-</body></html>"""
-    return HTMLResponse(html_page)
-
-async def _run_test_push():
-    devices = await db.push_devices.find({}, {"_id": 0, "user_id": 1}).to_list(10000)
-    recipients = [d["user_id"] for d in devices]
-    push_delivered = True
-    push_error: Optional[str] = None
-    try:
-        await send_push(
-            recipients=recipients,
-            data={
-                "title": "QuakeGuard test push",
-                "message": "If you see this, the push channel is working.",
-                "action_url": "/",
-            },
-            idempotency_key=f"quake-testpush-{uuid.uuid4()}",
-        )
-    except HTTPException as e:
-        push_delivered = False
-        push_error = e.detail
-    except Exception as e:
-        push_delivered = False
-        push_error = str(e)
-    return {
-        "recipients": len(recipients),
-        "push_delivered": push_delivered,
-        "push_error": push_error,
-    }
-
-@api_router.get("/debug/probe-push", response_class=HTMLResponse)
-async def debug_probe_push(
-    token: str = Query(default=""),
-    variant: str = Query(default="A"),
-):
-    """One-variable-at-a-time push probe. Same helper (`send_push`) and same
-    recipient list ({} — every registered device) as /debug/test-push. Only
-    ONE of {title, message, action_url, idempotency_key prefix} is swapped
-    to the "EARTHQUAKE ALERT" variant per invocation so we can bisect which
-    change is causing APNs to silently drop delivery.
-
-      A  = full baseline           (known-delivering test-push payload)
-      B  = title only              → "EARTHQUAKE ALERT"
-      C  = message only            → "Magnitude 6.4. Are you safe? ..."
-      D  = action_url only         → "/alert"
-      E  = idempotency prefix only → "quake-<uuid>" (no "-testpush-")
-      F  = full trigger-alert      (all four changes at once)
-
-    Fire each variant with the app on and phone unlocked, wait ~15s, and
-    note which variant(s) actually produce a notification on the device.
-    """
-    if not ADMIN_TRIGGER_PASSWORD:
-        return HTMLResponse("<h2>Server error</h2>", status_code=500)
-    if token != ADMIN_TRIGGER_PASSWORD:
-        return HTMLResponse(
-            "<h2 style='color:#c21818'>Wrong password.</h2>", status_code=401,
-        )
-
-    devices = await db.push_devices.find({}, {"_id": 0, "user_id": 1}).to_list(10000)
-    recipients = [d["user_id"] for d in devices]
-
-    # Baseline (matches /debug/test-push exactly):
-    baseline_title = "QuakeGuard test push"
-    baseline_message = "If you see this, the push channel is working."
-    baseline_action = "/"
-    baseline_idem = f"quake-testpush-{uuid.uuid4()}"
-
-    # trigger-alert-style overrides:
-    alert_title = "EARTHQUAKE ALERT"
-    alert_message = "Magnitude 6.4. Are you safe? Tap to check in."
-    alert_action = "/alert"
-    alert_idem = f"quake-{uuid.uuid4()}"
-
-    v = (variant or "A").upper()
-    if v == "A":
-        title, message, action, idem = baseline_title, baseline_message, baseline_action, baseline_idem
-    elif v == "B":
-        title, message, action, idem = alert_title, baseline_message, baseline_action, baseline_idem
-    elif v == "C":
-        title, message, action, idem = baseline_title, alert_message, baseline_action, baseline_idem
-    elif v == "D":
-        title, message, action, idem = baseline_title, baseline_message, alert_action, baseline_idem
-    elif v == "E":
-        title, message, action, idem = baseline_title, baseline_message, baseline_action, alert_idem
-    elif v == "F":
-        title, message, action, idem = alert_title, alert_message, alert_action, alert_idem
-    else:
-        return HTMLResponse(
-            f"<h2>Unknown variant '{_html.escape(v)}'</h2><p>Use A|B|C|D|E|F.</p>",
-            status_code=400,
-        )
-
-    push_delivered = True
-    push_error: Optional[str] = None
-    try:
-        await send_push(
-            recipients=recipients,
-            data={"title": title, "message": message, "action_url": action},
-            idempotency_key=idem,
-        )
-    except HTTPException as e:
-        push_delivered = False
-        push_error = e.detail
-    except Exception as e:
-        push_delivered = False
-        push_error = str(e)
-
-    color = "#1F8A3A" if push_delivered else "#c21818"
-    return HTMLResponse(f"""<!doctype html><html><head>
-<title>Probe {v}</title>
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<style>body{{font-family:-apple-system,Segoe UI,sans-serif;padding:24px;max-width:640px;margin:0 auto}}
-.card{{border:1px solid #ddd;border-radius:12px;padding:20px;background:#fafafa}}
-h1{{font-size:20px;margin:0 0 8px}}
-.badge{{display:inline-block;padding:4px 10px;border-radius:999px;color:#fff;font-size:12px;font-weight:700;background:{color}}}
-.kv{{margin-top:14px;font-size:14px;line-height:1.7}}
-.kv b{{display:inline-block;min-width:110px;color:#666;font-weight:600}}
-code{{background:#f4f4f6;padding:2px 6px;border-radius:4px;font-size:12px}}
-.nav{{margin-top:20px;font-size:13px}}
-.nav a{{margin-right:10px;background:#eee;padding:6px 10px;border-radius:6px;text-decoration:none;color:#333}}</style>
-</head><body>
-<div class="card">
-  <h1>Probe variant {_html.escape(v)}</h1>
-  <span class="badge">{"queued to APNs" if push_delivered else "not delivered"}</span>
-  <div class="kv">
-    <div><b>Recipients:</b> {len(recipients)}</div>
-    <div><b>Title:</b> <code>{_html.escape(title)}</code></div>
-    <div><b>Message:</b> <code>{_html.escape(message)}</code></div>
-    <div><b>action_url:</b> <code>{_html.escape(action)}</code></div>
-    <div><b>idempotency_key:</b> <code>{_html.escape(idem)}</code></div>
-    {"<div><b>error:</b> " + _html.escape(str(push_error)) + "</div>" if push_error else ""}
-  </div>
-  <div class="nav">
-    <a href="?token={_html.escape(token)}&variant=A">A: baseline</a>
-    <a href="?token={_html.escape(token)}&variant=B">B: alert title</a>
-    <a href="?token={_html.escape(token)}&variant=C">C: alert message</a>
-    <a href="?token={_html.escape(token)}&variant=D">D: /alert URL</a>
-    <a href="?token={_html.escape(token)}&variant=E">E: short idem</a>
-    <a href="?token={_html.escape(token)}&variant=F">F: full alert</a>
-  </div>
-  <p style="margin-top:16px;color:#666;font-size:12px">
-    "Queued" only means the Emergent relay accepted it (HTTP 202). Whether the
-    phone actually rings depends on APNs — check your phone after each variant.
-  </p>
-</div>
-</body></html>""")
+    result = await db.push_devices.delete_many({
+        "$or": [
+            {"user_id": {"$regex": "^TEST_"}},
+            {"user_id": {"$regex": "^test-"}},
+            {"user_id": {"$regex": "^diag-"}},
+            {"user_id": "dashboard"},
+        ]
+    })
+    remaining = await db.push_devices.count_documents({})
+    return {"deleted": result.deleted_count, "remaining": remaining}
 
 # ---------- Wire up ----------
 app.include_router(api_router)
