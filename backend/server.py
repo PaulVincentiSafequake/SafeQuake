@@ -6,6 +6,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import logging
 import httpx
+import html as _html
 from pathlib import Path
 from pydantic import BaseModel, Field
 from typing import List, Optional
@@ -236,12 +237,14 @@ async def purge_test_devices_browser(
 
     if confirm != "yes":
         rows_html = "".join(
-            f"<li><code>{m.get('user_id')}</code> <small style='color:#888'>({m.get('platform') or '?'})</small></li>"
+            f"<li><code>{_html.escape(str(m.get('user_id') or ''))}</code> "
+            f"<small style='color:#888'>({_html.escape(str(m.get('platform') or '?'))})</small></li>"
             for m in matches
         ) or "<li style='color:#666;font-style:italic'>Nothing matching to delete.</li>"
         return HTMLResponse(f"""<!doctype html><html><head>
 <title>Purge test devices — preview</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer">
 <style>body{{font-family:-apple-system,Segoe UI,sans-serif;padding:24px;max-width:640px;margin:0 auto;background:#fafafa}}
 .card{{border:1px solid #ddd;border-radius:12px;padding:20px;background:#fff}}
 h1{{font-size:20px;margin:0 0 8px}}
@@ -255,7 +258,7 @@ small{{color:#888}}</style>
 <h1>Preview: {len(matches)} test row(s) will be deleted</h1>
 <p><small>Matches user_ids starting with <code>TEST_</code>, <code>test-</code>, <code>diag-</code>, or exactly <code>dashboard</code>. Currently {total_before} total device rows in the DB.</small></p>
 <ul>{rows_html}</ul>
-<a class="btn" href="?token={token}&confirm=yes">Confirm delete {len(matches)} row(s)</a>
+<a class="btn" href="?token={_html.escape(token)}&amp;confirm=yes">Confirm delete {len(matches)} row(s)</a>
 <p><small style="margin-top:14px;display:block">Tap the red button to actually purge. Just opening this URL does nothing destructive — you have to confirm.</small></p>
 </div></body></html>""")
 
@@ -263,6 +266,7 @@ small{{color:#888}}</style>
     return HTMLResponse(f"""<!doctype html><html><head>
 <title>Purged</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer">
 <style>body{{font-family:-apple-system,Segoe UI,sans-serif;padding:24px;max-width:640px;margin:0 auto;background:#fafafa}}
 .card{{border:1px solid #ddd;border-radius:12px;padding:20px;background:#fff}}
 h1{{font-size:20px;margin:0 0 8px}}

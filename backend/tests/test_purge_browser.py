@@ -89,8 +89,17 @@ class TestPreview:
         # Each of the 4 test uids present in <li><code>
         for uid, _ in TEST_ROWS:
             assert f"<li><code>{uid}</code>" in body, f"missing row {uid}"
-        # Confirm anchor with correct href
-        assert f'href="?token={ADMIN_PWD}&confirm=yes"' in body
+        # Confirm anchor with correct href — ampersand MUST be HTML-encoded as &amp;
+        assert f'href="?token={ADMIN_PWD}&amp;confirm=yes"' in body, (
+            "confirm anchor href should HTML-encode the ampersand between query params"
+        )
+        assert f'href="?token={ADMIN_PWD}&confirm=yes"' not in body, (
+            "confirm anchor href must not use raw '&' between query params"
+        )
+        # Preview page must carry the no-referrer meta tag
+        assert '<meta name="referrer" content="no-referrer">' in body, (
+            "preview page missing <meta name='referrer' content='no-referrer'>"
+        )
         # Legit row NOT listed as a match
         assert f"<li><code>{LEGIT_ROW[0]}</code>" not in body
 
@@ -107,6 +116,10 @@ class TestConfirmDelete:
         assert "Deleted:</b> 4" in r.text, r.text[:400]
         # 1 legit remaining
         assert "Remaining:</b> 1" in r.text
+        # Result HTML must also carry the no-referrer meta tag
+        assert '<meta name="referrer" content="no-referrer">' in r.text, (
+            "result page missing <meta name='referrer' content='no-referrer'>"
+        )
 
     def test_idempotent_second_confirm(self, s):
         r = s.get(f"{BASE_URL}/api/admin/purge-test-devices",
@@ -146,23 +159,56 @@ class TestPostVariant:
         assert data["remaining"] >= 1  # legit row still there
 
 
-# ---------- HTML escaping (rogue user_id) ----------
+# ---------- HTML escaping (rogue user_id + platform) ----------
 class TestHtmlEscaping:
     def test_script_tag_in_user_id_not_executed(self, s):
-        rogue = "TEST_<script>alert(1)</script>"
-        r = _register(s, rogue, "android")
-        _assert_registered(r, rogue)
+        rogue_uid = "TEST_<script>alert(1)</script>"
+        rogue_plat = "<img src=x onerror=alert(2)>"
+        r = _register(s, rogue_uid, rogue_plat)
+        _assert_registered(r, rogue_uid)
         try:
             r = s.get(f"{BASE_URL}/api/admin/purge-test-devices",
                       params={"token": ADMIN_PWD})
             assert r.status_code == 200
-            # The raw <script> substring appearing verbatim in HTML is an XSS vuln.
-            assert "<script>alert(1)</script>" not in r.text, (
-                "SECURITY: user_id containing <script> was rendered unescaped -> XSS risk"
+            body = r.text
+
+            # (b) Raw dangerous substrings MUST NOT appear
+            assert "<script>alert(1)</script>" not in body, (
+                "SECURITY: user_id containing <script> was rendered unescaped -> XSS"
             )
+            assert "onerror=alert(2)>" not in body, (
+                "SECURITY: platform containing raw '<img ... onerror=...>' rendered "
+                "unescaped -> XSS. The closing '>' after onerror=alert(2) must be encoded."
+            )
+
+            # (b) HTML-encoded equivalents MUST appear
+            assert "&lt;script&gt;alert(1)&lt;/script&gt;" in body, (
+                "expected HTML-encoded <script> substring in preview HTML"
+            )
+            # platform is inside (...) — the '<' before img must be &lt; and '>' &gt;
+            assert "&lt;img src=x onerror=alert(2)&gt;" in body, (
+                "expected HTML-encoded <img ...> substring in preview HTML"
+            )
+
+            # (d) preview meta referrer tag still present with rogue data too
+            assert '<meta name="referrer" content="no-referrer">' in body
         finally:
             s.post(f"{BASE_URL}/api/admin/purge-test-devices",
                    headers={"X-Admin-Token": ADMIN_PWD})
+
+    def test_confirm_href_escapes_token(self, s):
+        """(c) Confirm anchor href must HTML-escape the token substring itself.
+        We can't change ADMIN_TRIGGER_PASSWORD at runtime, so instead we verify
+        the code path uses html.escape on the token by asserting the exact
+        escape() output for the current token appears in the href (identity for
+        alphanumeric passwords) AND that the '&amp;' separator is present.
+        """
+        import html as _h
+        r = s.get(f"{BASE_URL}/api/admin/purge-test-devices",
+                  params={"token": ADMIN_PWD})
+        assert r.status_code == 200
+        expected = f'href="?token={_h.escape(ADMIN_PWD)}&amp;confirm=yes"'
+        assert expected in r.text, f"expected escaped href not found: {expected}"
 
 
 # ---------- Regression on neighbouring endpoints ----------
