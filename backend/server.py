@@ -1,4 +1,5 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Header
+from fastapi import FastAPI, APIRouter, HTTPException, Header, Query
+from fastapi.responses import HTMLResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -177,17 +178,7 @@ async def trigger_alert(
     }
 
 # ---------- Maintenance: purge leftover test / diagnostic rows ----------
-@api_router.post("/admin/purge-test-devices")
-async def purge_test_devices(
-    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
-):
-    """Remove device rows whose user_id looks like a testing artifact
-    (TEST_*, test-*, diag-*, dashboard). Password-protected."""
-    if not ADMIN_TRIGGER_PASSWORD:
-        raise HTTPException(500, "ADMIN_TRIGGER_PASSWORD not configured on server")
-    if x_admin_token != ADMIN_TRIGGER_PASSWORD:
-        raise HTTPException(401, "Invalid or missing X-Admin-Token")
-
+async def _run_purge_test_devices() -> dict:
     result = await db.push_devices.delete_many({
         "$or": [
             {"user_id": {"$regex": "^TEST_"}},
@@ -198,6 +189,95 @@ async def purge_test_devices(
     })
     remaining = await db.push_devices.count_documents({})
     return {"deleted": result.deleted_count, "remaining": remaining}
+
+@api_router.post("/admin/purge-test-devices")
+async def purge_test_devices(
+    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
+):
+    """Programmatic variant. Password-protected via X-Admin-Token header."""
+    if not ADMIN_TRIGGER_PASSWORD:
+        raise HTTPException(500, "ADMIN_TRIGGER_PASSWORD not configured on server")
+    if x_admin_token != ADMIN_TRIGGER_PASSWORD:
+        raise HTTPException(401, "Invalid or missing X-Admin-Token")
+    return await _run_purge_test_devices()
+
+@api_router.get("/admin/purge-test-devices", response_class=HTMLResponse)
+async def purge_test_devices_browser(
+    token: str = Query(default=""),
+    confirm: str = Query(default=""),
+):
+    """Browser-openable variant. Two-step to prevent accidents when the URL
+    is shared:
+      /api/admin/purge-test-devices?token=<pwd>              → preview page
+      /api/admin/purge-test-devices?token=<pwd>&confirm=yes  → actually delete
+    """
+    if not ADMIN_TRIGGER_PASSWORD:
+        return HTMLResponse("<h2>Server error</h2>", status_code=500)
+    if token != ADMIN_TRIGGER_PASSWORD:
+        return HTMLResponse(
+            "<h2 style='color:#c21818'>Wrong password.</h2>"
+            "<p>Append <code>?token=&lt;password&gt;</code>.</p>",
+            status_code=401,
+        )
+
+    # Preview matching rows without deleting
+    filt = {
+        "$or": [
+            {"user_id": {"$regex": "^TEST_"}},
+            {"user_id": {"$regex": "^test-"}},
+            {"user_id": {"$regex": "^diag-"}},
+            {"user_id": "dashboard"},
+        ]
+    }
+    matches = await db.push_devices.find(
+        filt, {"_id": 0, "user_id": 1, "platform": 1}
+    ).to_list(500)
+    total_before = await db.push_devices.count_documents({})
+
+    if confirm != "yes":
+        rows_html = "".join(
+            f"<li><code>{m.get('user_id')}</code> <small style='color:#888'>({m.get('platform') or '?'})</small></li>"
+            for m in matches
+        ) or "<li style='color:#666;font-style:italic'>Nothing matching to delete.</li>"
+        return HTMLResponse(f"""<!doctype html><html><head>
+<title>Purge test devices — preview</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>body{{font-family:-apple-system,Segoe UI,sans-serif;padding:24px;max-width:640px;margin:0 auto;background:#fafafa}}
+.card{{border:1px solid #ddd;border-radius:12px;padding:20px;background:#fff}}
+h1{{font-size:20px;margin:0 0 8px}}
+ul{{padding-left:20px;max-height:280px;overflow:auto;background:#f4f4f6;border-radius:6px;padding:12px 12px 12px 32px}}
+.btn{{display:inline-block;background:#C21818;color:#fff;padding:12px 20px;border-radius:8px;
+       text-decoration:none;font-weight:700;font-size:14px;margin-top:16px}}
+.btn:active{{opacity:.85}}
+small{{color:#888}}</style>
+</head><body>
+<div class="card">
+<h1>Preview: {len(matches)} test row(s) will be deleted</h1>
+<p><small>Matches user_ids starting with <code>TEST_</code>, <code>test-</code>, <code>diag-</code>, or exactly <code>dashboard</code>. Currently {total_before} total device rows in the DB.</small></p>
+<ul>{rows_html}</ul>
+<a class="btn" href="?token={token}&confirm=yes">Confirm delete {len(matches)} row(s)</a>
+<p><small style="margin-top:14px;display:block">Tap the red button to actually purge. Just opening this URL does nothing destructive — you have to confirm.</small></p>
+</div></body></html>""")
+
+    result = await _run_purge_test_devices()
+    return HTMLResponse(f"""<!doctype html><html><head>
+<title>Purged</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>body{{font-family:-apple-system,Segoe UI,sans-serif;padding:24px;max-width:640px;margin:0 auto;background:#fafafa}}
+.card{{border:1px solid #ddd;border-radius:12px;padding:20px;background:#fff}}
+h1{{font-size:20px;margin:0 0 8px}}
+.badge{{display:inline-block;padding:4px 10px;border-radius:999px;color:#fff;font-size:12px;font-weight:700;background:#1F8A3A}}
+.kv{{margin-top:14px;font-size:14px;line-height:1.7}}
+.kv b{{display:inline-block;min-width:110px;color:#666;font-weight:600}}</style>
+</head><body>
+<div class="card">
+<h1>Purged</h1>
+<span class="badge">done</span>
+<div class="kv">
+<div><b>Deleted:</b> {result['deleted']}</div>
+<div><b>Remaining:</b> {result['remaining']} real device row(s)</div>
+</div>
+</div></body></html>""")
 
 # ---------- Wire up ----------
 app.include_router(api_router)
