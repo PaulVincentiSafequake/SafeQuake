@@ -2,7 +2,7 @@
   "expo": {
     "name": "QuakeGuard",
     "slug": "frontend",
-    "version": "1.0.4",
+    "version": "1.0.5",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "frontend",
@@ -11,9 +11,6 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.paulvincenti.quakeguard",
-      "entitlements": {
-        "aps-environment": "production"
-      },
       "infoPlist": {
         "NSLocationWhenInUseUsageDescription": "Share your location to report you are safe",
         "NSLocationAlwaysAndWhenInUseUsageDescription": "Share your location to report you are safe"
