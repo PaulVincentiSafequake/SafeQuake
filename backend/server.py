@@ -201,11 +201,13 @@ async def trigger_alert(
                 "title": title,
                 "message": message,
                 "action_url": "/alert",
-                # Critical-alert hints for iOS. Emergent's SuprSend relay
-                # forwards these into the APNs aps.sound + interruption-level
-                # fields. Requires the critical-alerts entitlement on the app.
-                "interruption_level": "critical",
-                "sound": {"critical": 1, "name": "default", "volume": 1.0},
+                # NOTE: Emergent SuprSend relay's `data` schema does NOT accept
+                # `interruption_level` or a sound object — it wants a plain
+                # `sound` filename string (iOS aps.sound) at most. Adding
+                # either field made the relay 400 the whole chunk. iOS
+                # Critical Alerts (bypass silent switch / DND / Focus) are
+                # therefore not achievable through this relay today; the
+                # remote push falls back to a normal high-priority alert.
             },
             idempotency_key=idem,
         )
