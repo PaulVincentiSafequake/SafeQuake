@@ -9,9 +9,10 @@ const BACKEND_URL =
   Constants.expoConfig?.extra?.EXPO_PUBLIC_BACKEND_URL;
 
 /**
- * Ask for notification permission (regular loud alerts, NOT critical alerts —
- * those need Apple's separate entitlement) and register this device's native
- * push token with our FastAPI backend so it can broadcast alerts.
+ * Ask for notification permission (including iOS Critical Alerts — the app
+ * has Apple's com.apple.developer.usernotifications.critical-alerts
+ * entitlement) and register this device's native push token with our
+ * FastAPI backend so it can broadcast alerts.
  */
 export async function registerForPushNotifications(): Promise<void> {
   if (Platform.OS === "web") return;
