@@ -1,0 +1,48 @@
+{
+  "summary": "Iteration 22 — Critical Alerts entitlement verification for v1.0.8. All 27 pytest checks pass in 0.52s. Verified: (1) app.json expo.version=='1.0.8', ios.entitlements has BOTH 'aps-environment':'production' AND 'com.apple.developer.usernotifications.critical-alerts':true, ios.bundleIdentifier=='com.paulvincenti.quakeguard', expo-notifications plugin still {mode:'production'}. (2) reminders.ts has allowCriticalAlerts:true (no stale :false), interruptionLevel:'critical' (no stale 'timeSensitive'), sound:'default' preserved. (3) push.ts has allowCriticalAlerts:true. (4) server.py send_push data in /api/trigger-alert now includes '\"interruption_level\": \"critical\"' AND '\"sound\": {\"critical\": 1, \"name\": \"default\", \"volume\": 1.0}' alongside title/message/action_url. (5) POST /api/trigger-alert with X-Admin-Token:Pt3481pt → 200 JSON with {status,recipients,push_delivered,push_error}; POST without token → 401; wrong token → 401. (6) send_push helper interface unchanged (still enforces title+message keys). (7) Regression: /api/status GET+POST OK, /api/register-push upserts (201-or-500 tolerated because EMERGENT_PUSH_KEY=placeholder), /api/admin/purge-test-devices POST/GET behave as before, all 6 debug endpoints still 404. (8) Frontend E2E on https://quake-alert-18.preview.emergentagent.com @390x844: Home renders with trigger-alert-btn → tap opens /alert with EARTHQUAKE DETECTED (M6.4 / 12km / VII) and im-safe-btn → tap I'M SAFE → auto-navigation back to Home confirmed. TS compile of reminders.ts and push.ts clean. Backend lint clean. Critical-alerts OS-level bypass behaviour is untestable on web/Playwright (device-only), which matches the agent-to-agent context note.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "POST /api/register-push",
+        "issue": "Still returns 500 in this env because EMERGENT_PUSH_KEY=placeholder (relay 401 -> HTTPException(500)). DB upsert still lands first, so no data loss, but callers cannot distinguish 'never saved' from 'saved but relay unavailable'. Same as iteration_21."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {
+        "component": "trigger-alert-btn (Home)",
+        "issue": "After auto-nav from /alert back to Home the DOM contains TWO elements with data-testid='trigger-alert-btn' (Playwright strict-mode violation). Likely a lingering RN-Web mount from the previous route. Not related to critical-alerts change; pre-existing regression noise only visible via multi-match selectors. UI itself renders correctly (screenshot confirms single visible button).",
+        "testID": "trigger-alert-btn",
+        "priority": "LOW"
+      }
+    ],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_critical_alerts.py",
+    "/app/test_reports/pytest/iteration_22.xml"
+  ],
+  "action_items": [
+    "(Optional, carried over from iter_21) Make POST /api/register-push return 201 even when the Emergent relay is unavailable, since the local DB write already succeeded.",
+    "(Optional, low-priority) Investigate why two data-testid='trigger-alert-btn' nodes coexist in the DOM after auto-nav from /alert back to Home. On device this is harmless (RN native only mounts the active screen), but it breaks strict-mode Playwright selectors. Consider .first() usage in future tests or ensure /alert route unmounts fully."
+  ],
+  "critical_code_review_comments": [
+    "app.json:14-17 — ios.entitlements correctly contains BOTH 'aps-environment':'production' and 'com.apple.developer.usernotifications.critical-alerts':true. Bundle id unchanged.",
+    "reminders.ts:51 — allowCriticalAlerts:true (was false). reminders.ts:84 — interruptionLevel:'critical' (was 'timeSensitive'). reminders.ts:80 — sound:'default' preserved. Comments clearly document the Apple-approved entitlement.",
+    "push.ts:34 — allowCriticalAlerts:true (was false). Docstring at push.ts:11-15 still says 'NOT critical alerts' which is now STALE — please update the comment to match the code (minor doc drift).",
+    "server.py:159-172 — trigger-alert send_push data now carries interruption_level:'critical' and sound:{critical:1, name:'default', volume:1.0}. send_push helper contract (server.py:110-111) unchanged; still enforces title+message. Response schema at server.py:179-184 unchanged."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_critical_alerts.py (new — 27 tests: app.json config, reminders.ts / push.ts static checks, server.py grep, live /api/trigger-alert 200/401 with schema, /api/status regression, /api/register-push upsert, /api/admin/purge-test-devices, 6 debug endpoint 404 checks)"
+  ],
+  "success_rate": {"backend": "100% (27/27)", "frontend": "100% (E2E safe-check flow completed end-to-end)"},
+  "seed_data_creation": "test_status_post_ok inserts one TEST_iter22 status_check row via public POST /api/status (no cleanup, minimal footprint). test_register_push_still_upserts_row inserts TEST_iter22_reg push_device (will be scrubbed on next /api/admin/purge-test-devices run since it starts with TEST_).",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Critical-alerts config + code + backend payload verified. OS-level critical-alert bypass (silent switch / DND / Focus) is device-only and NOT observable on web/Playwright. Backend URL: http://localhost:8001. Frontend URL: https://quake-alert-18.preview.emergentagent.com. ADMIN_TRIGGER_PASSWORD=Pt3481pt. Rerun: `pytest backend/tests/test_critical_alerts.py -v`. If /app/frontend/app.json, /app/frontend/src/utils/reminders.ts, /app/frontend/src/utils/push.ts, or the /api/trigger-alert data dict in /app/backend/server.py change, rerun this suite. Minor doc drift in push.ts:11-15 (comment says 'NOT critical alerts' but code now requests them) — non-blocking.",
+  "rca_of_issue": "N/A — this is a feature-verification iteration, not a bug fix. All requested changes (v1.0.8, both iOS entitlements, allowCriticalAlerts:true in both utils, interruptionLevel:'critical' in reminders, interruption_level+sound-dict in server.py trigger-alert) are present and correct. Regression suite green."
+}

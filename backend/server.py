@@ -162,6 +162,11 @@ async def trigger_alert(
                 "title": title,
                 "message": message,
                 "action_url": "/alert",
+                # Critical-alert hints for iOS. Emergent's SuprSend relay
+                # forwards these into the APNs aps.sound + interruption-level
+                # fields. Requires the critical-alerts entitlement on the app.
+                "interruption_level": "critical",
+                "sound": {"critical": 1, "name": "default", "volume": 1.0},
             },
             idempotency_key=idem,
         )

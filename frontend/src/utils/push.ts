@@ -29,9 +29,9 @@ export async function registerForPushNotifications(): Promise<void> {
           allowAlert: true,
           allowSound: true,
           allowBadge: false,
-          // NOTE: allowCriticalAlerts intentionally OFF until Apple approves
-          // the com.apple.developer.usernotifications.critical-alerts entitlement.
-          allowCriticalAlerts: false,
+          // Critical alerts entitlement approved by Apple — the remote
+          // "EARTHQUAKE ALERT" push can now punch through silent/DND/Focus.
+          allowCriticalAlerts: true,
           allowProvisional: false,
         },
         android: {},

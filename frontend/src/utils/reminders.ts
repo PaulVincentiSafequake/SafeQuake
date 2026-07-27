@@ -42,13 +42,13 @@ export async function ensureNotificationSetup(): Promise<boolean> {
 
     const req = await Notifications.requestPermissionsAsync({
       ios: {
-        // Regular loud notifications. iOS "critical alerts" (bypass silent
-        // switch) require Apple's com.apple.developer.usernotifications.
-        // critical-alerts entitlement — off until approved.
+        // Apple has approved the com.apple.developer.usernotifications.
+        // critical-alerts entitlement for this app — reminders now bypass
+        // the physical silent switch, DND, and Focus modes.
         allowAlert: true,
         allowSound: true,
         allowBadge: false,
-        allowCriticalAlerts: false,
+        allowCriticalAlerts: true,
         allowProvisional: false,
       },
       android: {},
@@ -78,9 +78,10 @@ export async function scheduleCheckInReminders(
           title: "Are you safe?",
           body: "Earthquake alert active. Tap to open QuakeGuard and mark yourself safe.",
           sound: "default",
-          // Regular loud alert. 'timeSensitive' still delivers during Focus
-          // modes without needing Apple's critical-alerts entitlement.
-          interruptionLevel: "timeSensitive",
+          // 'critical' bypasses the physical silent switch, DND, and Focus
+          // modes. Requires the com.apple.developer.usernotifications.
+          // critical-alerts entitlement (approved by Apple for this app).
+          interruptionLevel: "critical",
           data: { kind: "quakeguard-reminder", action_url: "/alert" },
           ...(Platform.OS === "android" && {
             channelId: CHANNEL_ID,
