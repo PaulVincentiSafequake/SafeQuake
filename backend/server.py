@@ -104,9 +104,18 @@ async def register_push(body: RegisterPushBody):
         logging.warning(f"Push register failed (non-blocking): {e}")
     return {"status": "registered"}
 
-async def send_push(recipients: List[str], data: dict, idempotency_key: Optional[str] = None) -> None:
+async def send_push(
+    recipients: List[str],
+    data: dict,
+    idempotency_key: Optional[str] = None,
+) -> List[dict]:
+    """Send a push in chunks via the Emergent (SuprSend) relay. Returns a list
+    of per-chunk diagnostic events so callers can log/inspect what the relay
+    (and downstream APNs/FCM) actually responded with. Never raises for 4xx
+    at the relay — those are captured into the event list with ok=false."""
+    events: List[dict] = []
     if not recipients:
-        return
+        return events
     if "title" not in data or "message" not in data:
         raise ValueError("data must include title and message")
     CHUNK = 100
@@ -115,17 +124,46 @@ async def send_push(recipients: List[str], data: dict, idempotency_key: Optional
         payload = {"recipients": chunk, "data": data}
         if idempotency_key:
             payload["$idempotency_key"] = f"{idempotency_key}-{i // CHUNK}"
+
+        event: dict = {
+            "chunk_index": i // CHUNK,
+            "chunk_size": len(chunk),
+            "recipients_sample": chunk[:20],
+            "recipients_total": len(chunk),
+            "ok": False,
+            "status_code": None,
+            "body": None,
+            "error": None,
+        }
         try:
             resp = await _push_client.post("/api/v1/push/trigger", json=payload)
+            event["status_code"] = resp.status_code
+            # Capture body regardless of status so we can see relay-level errors
+            # like "invalid device token" or "APNs Unregistered".
+            try:
+                event["body"] = resp.json()
+            except Exception:
+                event["body"] = resp.text[:2000]
+            event["ok"] = 200 <= resp.status_code < 300
             if resp.status_code == 401:
+                event["error"] = "EMERGENT_PUSH_KEY missing or invalid"
                 raise HTTPException(500, "EMERGENT_PUSH_KEY missing or invalid")
             if resp.status_code >= 500:
+                event["error"] = f"Push provider {resp.status_code}"
                 raise HTTPException(502, "Push provider unavailable")
-            resp.raise_for_status()
+            if not event["ok"]:
+                event["error"] = f"Relay HTTP {resp.status_code}"
+                logging.warning(
+                    f"Push trigger relay {resp.status_code}: {str(event['body'])[:500]}"
+                )
         except HTTPException:
+            events.append(event)
             raise
         except Exception as e:
+            event["error"] = str(e)
             logging.warning(f"Push trigger failed (non-blocking): {e}")
+        events.append(event)
+    return events
 
 @api_router.post("/trigger-alert")
 async def trigger_alert(
@@ -155,8 +193,9 @@ async def trigger_alert(
     message = f"Magnitude {magnitude}. Are you safe? Tap to check in."
     push_delivered = True
     push_error: Optional[str] = None
+    events: List[dict] = []
     try:
-        await send_push(
+        events = await send_push(
             recipients=recipients,
             data={
                 "title": title,
@@ -176,11 +215,38 @@ async def trigger_alert(
     except Exception as e:
         push_delivered = False
         push_error = str(e)
+
+    # If every chunk actually failed at the relay, mark the overall trigger
+    # as not delivered (previous code returned true even on 400s).
+    if events and not any(ev.get("ok") for ev in events):
+        push_delivered = False
+        if not push_error:
+            first_err = next((ev.get("error") for ev in events if ev.get("error")), None)
+            push_error = first_err or "All chunks failed at push relay"
+
+    # Persist diagnostic record so /api/admin/last-push-events can show it.
+    try:
+        await db.push_events.insert_one({
+            "idempotency_key": idem,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "triggered_by": body.triggeredBy,
+            "magnitude": magnitude,
+            "recipients_total": len(recipients),
+            "recipients_sample": recipients[:20],
+            "push_delivered": push_delivered,
+            "push_error": push_error,
+            "chunks": events,
+        })
+    except Exception as e:
+        logging.warning(f"Failed to persist push_events: {e}")
+
     return {
         "status": "broadcast",
         "recipients": len(recipients),
         "push_delivered": push_delivered,
         "push_error": push_error,
+        "idempotency_key": idem,
+        "chunks": events,
     }
 
 # ---------- Maintenance: purge leftover test / diagnostic rows ----------
@@ -287,6 +353,96 @@ h1{{font-size:20px;margin:0 0 8px}}
 <div><b>Remaining:</b> {result['remaining']} real device row(s)</div>
 </div>
 </div></body></html>""")
+
+# ---------- Diagnostics: view last N push relay responses ----------
+import json as _json
+
+@api_router.get("/admin/last-push-events", response_class=HTMLResponse)
+async def last_push_events_browser(
+    token: str = Query(default=""),
+    limit: int = Query(default=10, ge=1, le=50),
+):
+    """Browser-viewable diagnostic. Renders the most recent /api/trigger-alert
+    attempts with the full raw SuprSend response body per chunk, so we can
+    tell whether APNs accepted or rejected each push."""
+    if not ADMIN_TRIGGER_PASSWORD:
+        return HTMLResponse("<h2>Server error</h2>", status_code=500)
+    if token != ADMIN_TRIGGER_PASSWORD:
+        return HTMLResponse(
+            "<h2 style='color:#c21818'>Wrong password.</h2>"
+            "<p>Append <code>?token=&lt;password&gt;</code>.</p>",
+            status_code=401,
+        )
+
+    events = await db.push_events.find(
+        {}, {"_id": 0}
+    ).sort("created_at", -1).to_list(limit)
+
+    def render_event(ev: dict) -> str:
+        delivered = ev.get("push_delivered")
+        badge_color = "#1F8A3A" if delivered else "#C21818"
+        badge_text = "delivered" if delivered else "failed"
+        chunks_html = ""
+        for ch in ev.get("chunks") or []:
+            ok = ch.get("ok")
+            ok_color = "#1F8A3A" if ok else "#C21818"
+            body_pretty = _html.escape(
+                _json.dumps(ch.get("body"), indent=2, default=str)
+                if isinstance(ch.get("body"), (dict, list))
+                else str(ch.get("body") or "")
+            )
+            sample = ", ".join(ch.get("recipients_sample") or [])
+            if len(ch.get("recipients_sample") or []) < (ch.get("chunk_size") or 0):
+                sample += f" …(+{(ch.get('chunk_size') or 0) - len(ch.get('recipients_sample') or [])} more)"
+            chunks_html += f"""
+<div style="border:1px solid #eee;border-radius:8px;padding:12px;margin-top:10px;background:#fbfbfd">
+  <div><b>chunk {_html.escape(str(ch.get('chunk_index')))}</b> — status
+    <span style="color:{ok_color};font-weight:700">{_html.escape(str(ch.get('status_code')))}</span>
+    · {_html.escape(str(ch.get('chunk_size')))} recipient(s)
+    {"· error: <code>" + _html.escape(str(ch.get('error'))) + "</code>" if ch.get("error") else ""}
+  </div>
+  <div style="font-size:12px;color:#666;margin-top:4px"><b>recipients:</b> {_html.escape(sample)}</div>
+  <pre style="background:#0e1116;color:#d5dae0;padding:10px;border-radius:6px;font-size:11px;overflow:auto;max-height:280px;white-space:pre-wrap;word-break:break-word;margin-top:8px">{body_pretty}</pre>
+</div>"""
+        return f"""
+<div class="card" style="margin-top:14px">
+  <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+    <span class="badge" style="background:{badge_color}">{badge_text}</span>
+    <span style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;color:#666">{_html.escape(str(ev.get('idempotency_key') or ''))}</span>
+  </div>
+  <div class="kv" style="margin-top:8px">
+    <div><b>When:</b> {_html.escape(str(ev.get('created_at') or ''))}</div>
+    <div><b>Triggered by:</b> <code>{_html.escape(str(ev.get('triggered_by') or 'dashboard'))}</code></div>
+    <div><b>Magnitude:</b> {_html.escape(str(ev.get('magnitude') or ''))}</div>
+    <div><b>Recipients:</b> {ev.get('recipients_total')}</div>
+    {f'<div><b>Error:</b> <code style="color:#c21818">{_html.escape(str(ev.get("push_error")))}</code></div>' if ev.get('push_error') else ''}
+  </div>
+  {chunks_html or '<div style="color:#666;font-size:12px;margin-top:8px">No chunk events recorded.</div>'}
+</div>"""
+
+    if not events:
+        body_html = "<div class='card'><p style='color:#666'>No push events recorded yet. Trigger an alert first.</p></div>"
+    else:
+        body_html = "".join(render_event(ev) for ev in events)
+
+    return HTMLResponse(f"""<!doctype html><html><head>
+<title>QuakeGuard — last push events</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<style>body{{font-family:-apple-system,Segoe UI,sans-serif;padding:24px;max-width:760px;margin:0 auto;background:#f4f4f7}}
+.card{{border:1px solid #ddd;border-radius:12px;padding:16px 18px;background:#fff}}
+h1{{font-size:20px;margin:0 0 6px}}
+.badge{{display:inline-block;padding:4px 10px;border-radius:999px;color:#fff;font-size:12px;font-weight:700}}
+.kv{{font-size:14px;line-height:1.7}}
+.kv b{{display:inline-block;min-width:110px;color:#666;font-weight:600}}
+code{{background:#f4f4f6;padding:1px 6px;border-radius:4px;font-size:12px}}</style>
+</head><body>
+<div class="card">
+  <h1>Last {len(events)} push event(s)</h1>
+  <p style="margin:0;color:#666;font-size:13px">Most recent first. Raw SuprSend/APNs response per chunk is shown below each event.</p>
+</div>
+{body_html}
+</body></html>""")
 
 # ---------- Wire up ----------
 app.include_router(api_router)
