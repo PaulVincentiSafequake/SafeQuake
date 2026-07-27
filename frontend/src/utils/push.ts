@@ -1,12 +1,65 @@
 import * as Notifications from "expo-notifications";
 import Constants from "expo-constants";
 import { Platform } from "react-native";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 
 import { getDeviceId } from "@/src/utils/checkin";
 
 const BACKEND_URL =
   process.env.EXPO_PUBLIC_BACKEND_URL ??
   Constants.expoConfig?.extra?.EXPO_PUBLIC_BACKEND_URL;
+
+const LAST_TOKEN_KEY = "quakeguard_last_push_token";
+const LAST_REGISTER_KEY = "quakeguard_last_register_meta";
+
+export interface DiagInfo {
+  user_id: string;
+  platform: string;
+  device_token: string | null;
+  token_length: number;
+  token_fingerprint: string | null;
+  last_registered_at: string | null;
+  last_register_status: string | null;
+  backend_url: string;
+  app_version: string | null;
+  build_number: string | null;
+}
+
+function fingerprint(token: string | null): string | null {
+  if (!token) return null;
+  if (token.length <= 16) return token;
+  return `${token.slice(0, 8)}…${token.slice(-8)}`;
+}
+
+export async function getDiagInfo(): Promise<DiagInfo> {
+  const user_id = await getDeviceId();
+  const device_token = await AsyncStorage.getItem(LAST_TOKEN_KEY);
+  const meta = await AsyncStorage.getItem(LAST_REGISTER_KEY);
+  let last_registered_at: string | null = null;
+  let last_register_status: string | null = null;
+  if (meta) {
+    try {
+      const parsed = JSON.parse(meta);
+      last_registered_at = parsed.at ?? null;
+      last_register_status = parsed.status ?? null;
+    } catch {}
+  }
+  return {
+    user_id,
+    platform: Platform.OS,
+    device_token,
+    token_length: device_token?.length ?? 0,
+    token_fingerprint: fingerprint(device_token),
+    last_registered_at,
+    last_register_status,
+    backend_url: BACKEND_URL ?? "(not set)",
+    app_version: (Constants.expoConfig?.version as string) ?? null,
+    build_number:
+      (Constants.expoConfig?.ios?.buildNumber as string) ??
+      (Constants.expoConfig?.android?.versionCode as unknown as string) ??
+      null,
+  };
+}
 
 /**
  * Ask for notification permission (including iOS Critical Alerts — the app
@@ -39,25 +92,50 @@ export async function registerForPushNotifications(): Promise<void> {
       });
       granted = req.granted || req.status === "granted";
     }
-    if (!granted) return;
+    if (!granted) {
+      await AsyncStorage.setItem(
+        LAST_REGISTER_KEY,
+        JSON.stringify({ at: new Date().toISOString(), status: "permission_denied" }),
+      );
+      return;
+    }
 
     // Native FCM (Android) / APNs (iOS) token via Emergent push relay
     const tokenResp = await Notifications.getDevicePushTokenAsync();
     const device_token = tokenResp.data;
     const user_id = await getDeviceId();
 
-    await fetch(`${BACKEND_URL}/api/register-push`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        user_id,
-        platform: Platform.OS,
-        device_token,
-      }),
-    });
-    console.log("[QuakeGuard] push token registered for", user_id);
+    await AsyncStorage.setItem(LAST_TOKEN_KEY, device_token);
+
+    let statusLabel = "unknown";
+    try {
+      const resp = await fetch(`${BACKEND_URL}/api/register-push`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          user_id,
+          platform: Platform.OS,
+          device_token,
+        }),
+      });
+      statusLabel = `HTTP ${resp.status}`;
+    } catch (e) {
+      statusLabel = `network error: ${(e as Error)?.message ?? "unknown"}`;
+    }
+    await AsyncStorage.setItem(
+      LAST_REGISTER_KEY,
+      JSON.stringify({ at: new Date().toISOString(), status: statusLabel }),
+    );
+    console.log("[QuakeGuard] push token registered for", user_id, statusLabel);
   } catch (e) {
     console.log("[QuakeGuard] registerForPush failed:", (e as Error)?.message);
+    await AsyncStorage.setItem(
+      LAST_REGISTER_KEY,
+      JSON.stringify({
+        at: new Date().toISOString(),
+        status: `error: ${(e as Error)?.message ?? "unknown"}`,
+      }),
+    );
   }
 }
 

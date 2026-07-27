@@ -251,6 +251,16 @@ export default function HomeScreen() {
             </Text>
           </View>
         </View>
+
+        {/* Diagnostics link (discrete) */}
+        <Pressable
+          onPress={() => router.push("/diag")}
+          style={styles.diagLinkRow}
+          testID="open-diag"
+        >
+          <Ionicons name="pulse" size={14} color={colors.onSurfaceTertiary} />
+          <Text style={styles.diagLinkText}>Diagnostics</Text>
+        </Pressable>
       </ScrollView>
 
       {/* Sticky trigger */}
@@ -440,5 +450,20 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: "800",
     letterSpacing: 2,
+  },
+  diagLinkRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+    paddingVertical: 14,
+    marginTop: 4,
+  },
+  diagLinkText: {
+    color: colors.onSurfaceTertiary,
+    fontSize: 12,
+    fontWeight: "600",
+    letterSpacing: 1,
+    textTransform: "uppercase",
   },
 });

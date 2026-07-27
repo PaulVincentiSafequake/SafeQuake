@@ -78,30 +78,69 @@ class TriggerAlertBody(BaseModel):
 async def register_push(body: RegisterPushBody):
     """Register a device's native push token with the Emergent push relay,
     and remember it locally so we can broadcast alerts to every device."""
+    now = datetime.now(timezone.utc).isoformat()
     await db.push_devices.update_one(
         {"user_id": body.user_id},
         {"$set": {
             "user_id": body.user_id,
             "platform": body.platform,
             "device_token": body.device_token,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        }},
+            "updated_at": now,
+        },
+         "$setOnInsert": {"created_at": now}},
         upsert=True,
     )
+    relay_status: Optional[int] = None
+    relay_body = None
+    relay_error: Optional[str] = None
     try:
         resp = await _push_client.post(
             "/api/v1/push/users/register",
             json=body.model_dump(),
         )
+        relay_status = resp.status_code
+        try:
+            relay_body = resp.json()
+        except Exception:
+            relay_body = resp.text[:2000]
         if resp.status_code == 401:
-            raise HTTPException(500, "EMERGENT_PUSH_KEY missing or invalid")
+            relay_error = "EMERGENT_PUSH_KEY missing or invalid"
+            raise HTTPException(500, relay_error)
         if resp.status_code >= 500:
+            relay_error = f"Push provider {resp.status_code}"
             raise HTTPException(502, "Push provider unavailable")
-        resp.raise_for_status()
+        if not (200 <= resp.status_code < 300):
+            relay_error = f"Relay HTTP {resp.status_code}"
+            logging.warning(
+                f"Push register relay {resp.status_code}: {str(relay_body)[:500]}"
+            )
     except HTTPException:
         raise
     except Exception as e:
+        relay_error = str(e)
         logging.warning(f"Push register failed (non-blocking): {e}")
+    finally:
+        # Persist a diagnostic row regardless of outcome, so we can see what
+        # SuprSend actually said when a specific device tried to register.
+        try:
+            token_len = len(body.device_token or "")
+            fingerprint = None
+            if token_len > 0:
+                head = body.device_token[:8]
+                tail = body.device_token[-8:] if token_len > 16 else ""
+                fingerprint = f"{head}…{tail}" if tail else head
+            await db.push_registrations_log.insert_one({
+                "user_id": body.user_id,
+                "platform": body.platform,
+                "token_length": token_len,
+                "token_fingerprint": fingerprint,
+                "created_at": now,
+                "relay_status": relay_status,
+                "relay_body": relay_body,
+                "relay_error": relay_error,
+            })
+        except Exception as e:
+            logging.warning(f"Failed to persist push_registrations_log: {e}")
     return {"status": "registered"}
 
 async def send_push(
@@ -445,6 +484,267 @@ code{{background:#f4f4f6;padding:1px 6px;border-radius:4px;font-size:12px}}</sty
 </div>
 {body_html}
 </body></html>""")
+
+# ---------- Diagnostics: devices, registrations, self-test push ----------
+def _fingerprint(token: Optional[str]) -> str:
+    if not token:
+        return ""
+    n = len(token)
+    if n <= 16:
+        return _html.escape(token)
+    return f"{_html.escape(token[:8])}…{_html.escape(token[-8:])}"
+
+
+@api_router.get("/admin/devices", response_class=HTMLResponse)
+async def devices_browser(token: str = Query(default="")):
+    """List every registered device with token metadata for diagnosis."""
+    if not ADMIN_TRIGGER_PASSWORD:
+        return HTMLResponse("<h2>Server error</h2>", status_code=500)
+    if token != ADMIN_TRIGGER_PASSWORD:
+        return HTMLResponse(
+            "<h2 style='color:#c21818'>Wrong password.</h2>"
+            "<p>Append <code>?token=&lt;password&gt;</code>.</p>",
+            status_code=401,
+        )
+    rows = await db.push_devices.find({}, {"_id": 0}).sort("updated_at", -1).to_list(1000)
+    total = len(rows)
+
+    def render(r: dict) -> str:
+        tok = r.get("device_token") or ""
+        fp = _fingerprint(tok)
+        return f"""<tr>
+<td style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px">{_html.escape(r.get('user_id') or '')}</td>
+<td>{_html.escape((r.get('platform') or '').upper())}</td>
+<td style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px">{fp}</td>
+<td>{len(tok)}</td>
+<td style="font-size:11px;color:#666">{_html.escape(r.get('created_at') or '')}</td>
+<td style="font-size:11px;color:#666">{_html.escape(r.get('updated_at') or '')}</td>
+</tr>"""
+
+    body_html = "".join(render(r) for r in rows) or (
+        "<tr><td colspan='6' style='padding:16px;color:#666'>No devices registered.</td></tr>"
+    )
+    return HTMLResponse(f"""<!doctype html><html><head>
+<title>QuakeGuard — registered devices</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<style>
+body{{font-family:-apple-system,Segoe UI,sans-serif;padding:20px;max-width:1000px;margin:0 auto;background:#f4f4f7}}
+h1{{font-size:20px;margin:0 0 6px}}
+.card{{border:1px solid #ddd;border-radius:12px;padding:16px 18px;background:#fff;margin-bottom:14px}}
+table{{width:100%;border-collapse:collapse;background:#fff;border:1px solid #ddd;border-radius:8px;overflow:hidden}}
+th,td{{padding:8px 10px;text-align:left;border-bottom:1px solid #eee;vertical-align:top}}
+th{{background:#fafafa;font-size:12px;color:#666;font-weight:600;text-transform:uppercase;letter-spacing:.03em}}
+tr:last-child td{{border-bottom:0}}
+</style></head><body>
+<div class="card">
+  <h1>{total} registered device row(s)</h1>
+  <p style="margin:0;color:#666;font-size:13px">Sorted by most recently updated. Token fingerprint = first 8 + last 8 chars. Valid iOS APNs tokens should be ~64 hex chars.</p>
+</div>
+<table>
+<thead><tr><th>user_id</th><th>platform</th><th>token fingerprint</th><th>len</th><th>created</th><th>updated</th></tr></thead>
+<tbody>{body_html}</tbody>
+</table>
+</body></html>""")
+
+
+@api_router.get("/admin/last-registrations", response_class=HTMLResponse)
+async def last_registrations_browser(
+    token: str = Query(default=""),
+    limit: int = Query(default=20, ge=1, le=100),
+):
+    """Show the last N /api/register-push calls with the raw SuprSend response."""
+    if not ADMIN_TRIGGER_PASSWORD:
+        return HTMLResponse("<h2>Server error</h2>", status_code=500)
+    if token != ADMIN_TRIGGER_PASSWORD:
+        return HTMLResponse(
+            "<h2 style='color:#c21818'>Wrong password.</h2>"
+            "<p>Append <code>?token=&lt;password&gt;</code>.</p>",
+            status_code=401,
+        )
+    import json as _json
+    logs = await db.push_registrations_log.find(
+        {}, {"_id": 0}
+    ).sort("created_at", -1).to_list(limit)
+
+    def render(row: dict) -> str:
+        ok = row.get("relay_status") and 200 <= (row.get("relay_status") or 0) < 300
+        badge_color = "#1F8A3A" if ok else "#C21818"
+        badge_text = f"HTTP {row.get('relay_status') or '—'}"
+        body_pretty = _html.escape(
+            _json.dumps(row.get("relay_body"), indent=2, default=str)
+            if isinstance(row.get("relay_body"), (dict, list))
+            else str(row.get("relay_body") or "")
+        )
+        return f"""
+<div class="card">
+  <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+    <span class="badge" style="background:{badge_color}">{badge_text}</span>
+    <span style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;color:#666">{_html.escape(row.get('user_id') or '')}</span>
+    <span style="color:#999;font-size:12px">· {_html.escape((row.get('platform') or '').upper())}</span>
+  </div>
+  <div class="kv" style="margin-top:8px">
+    <div><b>When:</b> {_html.escape(row.get('created_at') or '')}</div>
+    <div><b>Token fp:</b> <code>{_fingerprint(None) if not row.get('token_fingerprint') else _html.escape(row.get('token_fingerprint') or '')}</code> (len: {row.get('token_length')})</div>
+    {f'<div><b>Error:</b> <code style="color:#c21818">{_html.escape(str(row.get("relay_error")))}</code></div>' if row.get('relay_error') else ''}
+  </div>
+  <pre style="background:#0e1116;color:#d5dae0;padding:10px;border-radius:6px;font-size:11px;overflow:auto;max-height:280px;white-space:pre-wrap;word-break:break-word;margin-top:8px">{body_pretty or '(empty)'}</pre>
+</div>"""
+
+    body_html = "".join(render(r) for r in logs) or (
+        "<div class='card'><p style='color:#666'>No registration logs yet. Reopen the app to trigger a re-register.</p></div>"
+    )
+    return HTMLResponse(f"""<!doctype html><html><head>
+<title>QuakeGuard — last registrations</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<style>body{{font-family:-apple-system,Segoe UI,sans-serif;padding:20px;max-width:760px;margin:0 auto;background:#f4f4f7}}
+.card{{border:1px solid #ddd;border-radius:12px;padding:14px 16px;background:#fff;margin-bottom:14px}}
+h1{{font-size:20px;margin:0 0 6px}}
+.badge{{display:inline-block;padding:4px 10px;border-radius:999px;color:#fff;font-size:12px;font-weight:700}}
+.kv{{font-size:14px;line-height:1.7}}
+.kv b{{display:inline-block;min-width:100px;color:#666;font-weight:600}}
+code{{background:#f4f4f6;padding:1px 6px;border-radius:4px;font-size:12px}}</style>
+</head><body>
+<div class="card">
+  <h1>Last {len(logs)} registration(s)</h1>
+  <p style="margin:0;color:#666;font-size:13px">Raw SuprSend response body captured per call.</p>
+</div>
+{body_html}
+</body></html>""")
+
+
+class SelfTestPushBody(BaseModel):
+    user_id: str
+
+
+@api_router.post("/admin/self-test-push")
+async def self_test_push(
+    body: SelfTestPushBody,
+    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
+    token: str = Query(default=""),
+):
+    """Send a push to exactly one user_id. Auth via X-Admin-Token header OR
+    ?token= query for browser convenience. Returns per-chunk relay events."""
+    if not ADMIN_TRIGGER_PASSWORD:
+        raise HTTPException(500, "ADMIN_TRIGGER_PASSWORD not configured")
+    provided = x_admin_token or token
+    if provided != ADMIN_TRIGGER_PASSWORD:
+        raise HTTPException(401, "Invalid admin token")
+
+    target = (body.user_id or "").strip()
+    if not target:
+        raise HTTPException(400, "user_id is required")
+    device = await db.push_devices.find_one({"user_id": target}, {"_id": 0})
+    if not device:
+        raise HTTPException(404, f"No device row found for user_id={target}")
+
+    idem = f"selftest-{uuid.uuid4()}"
+    events: List[dict] = []
+    push_delivered = True
+    push_error: Optional[str] = None
+    try:
+        events = await send_push(
+            recipients=[target],
+            data={
+                "title": "QuakeGuard self-test",
+                "message": "If you see this, APNs delivery to this device is working.",
+                "action_url": "/",
+            },
+            idempotency_key=idem,
+        )
+    except HTTPException as e:
+        push_delivered = False
+        push_error = e.detail
+    except Exception as e:
+        push_delivered = False
+        push_error = str(e)
+    if events and not any(ev.get("ok") for ev in events):
+        push_delivered = False
+        if not push_error:
+            first_err = next((ev.get("error") for ev in events if ev.get("error")), None)
+            push_error = first_err or "All chunks failed at push relay"
+
+    try:
+        await db.push_events.insert_one({
+            "idempotency_key": idem,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "triggered_by": "self-test",
+            "magnitude": None,
+            "recipients_total": 1,
+            "recipients_sample": [target],
+            "push_delivered": push_delivered,
+            "push_error": push_error,
+            "chunks": events,
+        })
+    except Exception as e:
+        logging.warning(f"Failed to persist self-test push_events: {e}")
+
+    return {
+        "status": "sent",
+        "user_id": target,
+        "device_platform": device.get("platform"),
+        "device_token_fingerprint": _fingerprint(device.get("device_token")),
+        "device_token_length": len(device.get("device_token") or ""),
+        "push_delivered": push_delivered,
+        "push_error": push_error,
+        "idempotency_key": idem,
+        "chunks": events,
+    }
+
+
+@api_router.get("/admin/self-test-push", response_class=HTMLResponse)
+async def self_test_push_browser(
+    token: str = Query(default=""),
+    user_id: str = Query(default=""),
+):
+    """Browser form for firing a single-recipient test push."""
+    if not ADMIN_TRIGGER_PASSWORD:
+        return HTMLResponse("<h2>Server error</h2>", status_code=500)
+    if token != ADMIN_TRIGGER_PASSWORD:
+        return HTMLResponse(
+            "<h2 style='color:#c21818'>Wrong password.</h2>"
+            "<p>Append <code>?token=&lt;password&gt;</code>.</p>",
+            status_code=401,
+        )
+
+    import json as _json
+    result_html = ""
+    if user_id.strip():
+        try:
+            result = await self_test_push(
+                SelfTestPushBody(user_id=user_id.strip()),
+                x_admin_token=ADMIN_TRIGGER_PASSWORD,
+                token=ADMIN_TRIGGER_PASSWORD,
+            )
+            body_str = _html.escape(_json.dumps(result, indent=2, default=str))
+            result_html = f'<div class="card"><h3 style="margin-top:0">Result</h3><pre style="background:#0e1116;color:#d5dae0;padding:10px;border-radius:6px;font-size:11px;overflow:auto;max-height:400px;white-space:pre-wrap;word-break:break-word">{body_str}</pre></div>'
+        except HTTPException as e:
+            result_html = f'<div class="card" style="border-color:#c21818"><h3 style="margin-top:0;color:#c21818">Error {e.status_code}</h3><p>{_html.escape(str(e.detail))}</p></div>'
+
+    return HTMLResponse(f"""<!doctype html><html><head>
+<title>QuakeGuard — self-test push</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<style>body{{font-family:-apple-system,Segoe UI,sans-serif;padding:20px;max-width:760px;margin:0 auto;background:#f4f4f7}}
+.card{{border:1px solid #ddd;border-radius:12px;padding:16px;background:#fff;margin-bottom:14px}}
+h1{{font-size:20px;margin:0 0 6px}}
+input{{width:100%;padding:10px;border:1px solid #ccc;border-radius:8px;font-size:14px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}}
+button{{background:#c21818;color:#fff;border:0;padding:10px 20px;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;margin-top:10px}}
+</style></head><body>
+<div class="card">
+  <h1>Self-test push</h1>
+  <p style="margin:0 0 12px;color:#666;font-size:13px">Send a single-recipient push to identify whether a specific device row reaches its device. Grab the exact user_id from the Diagnostics screen in the app, or from <a href="/api/admin/devices?token={_html.escape(token)}">/admin/devices</a>.</p>
+  <form method="GET" action="/api/admin/self-test-push">
+    <input type="hidden" name="token" value="{_html.escape(token)}">
+    <label style="font-size:12px;color:#666">user_id</label>
+    <input type="text" name="user_id" value="{_html.escape(user_id)}" placeholder="qg-xxxxxxxx" autocapitalize="off" autocorrect="off">
+    <button type="submit">Send test push</button>
+  </form>
+</div>
+{result_html}
+</body></html>""")
+
 
 # ---------- Wire up ----------
 app.include_router(api_router)
