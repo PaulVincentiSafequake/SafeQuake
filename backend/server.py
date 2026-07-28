@@ -13,6 +13,14 @@ from typing import List, Optional
 import uuid
 from datetime import datetime, timezone
 
+from apns import (
+    aclose as apns_aclose,
+    apns_config_status,
+    load_apns_config,
+    save_apns_config,
+    send_critical_alerts,
+)
+
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -223,47 +231,80 @@ async def trigger_alert(
     query = {}
     if body.triggeredBy:
         query = {"user_id": {"$ne": body.triggeredBy}}
-    devices = await db.push_devices.find(query, {"_id": 0, "user_id": 1}).to_list(10000)
-    recipients = [d["user_id"] for d in devices]
+    devices = await db.push_devices.find(
+        query,
+        {"_id": 0, "user_id": 1, "platform": 1, "device_token": 1},
+    ).to_list(10000)
+
+    ios_devices = [
+        d for d in devices
+        if (d.get("platform") or "").lower() == "ios" and d.get("device_token")
+    ]
+    android_devices = [
+        d for d in devices
+        if (d.get("platform") or "").lower() != "ios"
+    ]
+    android_recipients = [d["user_id"] for d in android_devices]
 
     idem = f"quake-{uuid.uuid4()}"
     magnitude = body.magnitude or 6.4
     title = "EARTHQUAKE ALERT"
     message = f"Magnitude {magnitude}. Are you safe? Tap to check in."
-    push_delivered = True
     push_error: Optional[str] = None
-    events: List[dict] = []
+    events: List[dict] = []      # Android/SuprSend chunk events
+    apns_events: List[dict] = [] # iOS per-recipient APNs events
+
+    # ---- iOS: direct APNs with true critical-alert payload ----
     try:
-        events = await send_push(
-            recipients=recipients,
-            data={
-                "title": title,
-                "message": message,
-                "action_url": "/alert",
-                # NOTE: Emergent SuprSend relay's `data` schema does NOT accept
-                # `interruption_level` or a sound object — it wants a plain
-                # `sound` filename string (iOS aps.sound) at most. Adding
-                # either field made the relay 400 the whole chunk. iOS
-                # Critical Alerts (bypass silent switch / DND / Focus) are
-                # therefore not achievable through this relay today; the
-                # remote push falls back to a normal high-priority alert.
-            },
+        apns_events = await send_critical_alerts(
+            db=db,
+            devices=ios_devices,
+            title=title,
+            body=message,
+            action_url="/alert",
             idempotency_key=idem,
         )
-    except HTTPException as e:
-        push_delivered = False
-        push_error = e.detail
     except Exception as e:
-        push_delivered = False
-        push_error = str(e)
+        push_error = f"APNs pipeline: {e}"
+        logging.warning(push_error)
 
-    # If every chunk actually failed at the relay, mark the overall trigger
-    # as not delivered (previous code returned true even on 400s).
-    if events and not any(ev.get("ok") for ev in events):
-        push_delivered = False
-        if not push_error:
-            first_err = next((ev.get("error") for ev in events if ev.get("error")), None)
-            push_error = first_err or "All chunks failed at push relay"
+    # ---- Android: SuprSend relay (regular high-priority push) ----
+    if android_recipients:
+        try:
+            events = await send_push(
+                recipients=android_recipients,
+                data={
+                    "title": title,
+                    "message": message,
+                    "action_url": "/alert",
+                },
+                idempotency_key=idem,
+            )
+        except HTTPException as e:
+            push_error = push_error or e.detail
+        except Exception as e:
+            push_error = push_error or str(e)
+
+    ios_delivered = any(ev.get("delivered") for ev in apns_events)
+    android_delivered = any(ev.get("ok") for ev in events) if events else False
+
+    if ios_devices and not ios_delivered and apns_events:
+        # Every APNs attempt failed — bubble a useful reason up.
+        first = next(
+            (ev.get("reason") or ev.get("error") for ev in apns_events
+             if ev.get("reason") or ev.get("error")),
+            None,
+        )
+        if first and not push_error:
+            push_error = f"iOS APNs: {first}"
+    if android_recipients and not android_delivered and events:
+        first = next((ev.get("error") for ev in events if ev.get("error")), None)
+        if first and not push_error:
+            push_error = f"Android relay: {first}"
+
+    push_delivered = ios_delivered or android_delivered or (
+        len(ios_devices) == 0 and len(android_recipients) == 0
+    )
 
     # Persist diagnostic record so /api/admin/last-push-events can show it.
     try:
@@ -272,22 +313,28 @@ async def trigger_alert(
             "created_at": datetime.now(timezone.utc).isoformat(),
             "triggered_by": body.triggeredBy,
             "magnitude": magnitude,
-            "recipients_total": len(recipients),
-            "recipients_sample": recipients[:20],
+            "recipients_total": len(devices),
+            "recipients_sample": [d["user_id"] for d in devices][:20],
+            "ios_count": len(ios_devices),
+            "android_count": len(android_recipients),
             "push_delivered": push_delivered,
             "push_error": push_error,
-            "chunks": events,
+            "chunks": events,             # legacy field (Android)
+            "apns_events": apns_events,   # new: per-recipient iOS results
         })
     except Exception as e:
         logging.warning(f"Failed to persist push_events: {e}")
 
     return {
         "status": "broadcast",
-        "recipients": len(recipients),
+        "recipients": len(devices),
+        "ios_count": len(ios_devices),
+        "android_count": len(android_recipients),
         "push_delivered": push_delivered,
         "push_error": push_error,
         "idempotency_key": idem,
         "chunks": events,
+        "apns_events": apns_events,
     }
 
 # ---------- Maintenance: purge leftover test / diagnostic rows ----------
@@ -423,6 +470,43 @@ async def last_push_events_browser(
         delivered = ev.get("push_delivered")
         badge_color = "#1F8A3A" if delivered else "#C21818"
         badge_text = "delivered" if delivered else "failed"
+
+        # ---- iOS APNs per-recipient rows ----
+        apns_rows = ""
+        for a in ev.get("apns_events") or []:
+            ok = a.get("delivered")
+            code_color = "#1F8A3A" if ok else "#C21818"
+            reason = a.get("reason") or a.get("error") or ""
+            env_badge = a.get("environment") or "?"
+            env_color = "#1F8A3A" if env_badge == "production" else ("#F0A500" if env_badge == "sandbox" else "#888")
+            apns_rows += f"""
+<tr>
+<td style="font-family:ui-monospace,Menlo,monospace;font-size:11px">{_html.escape(str(a.get('user_id') or ''))}</td>
+<td style="font-family:ui-monospace,Menlo,monospace;font-size:11px">{_html.escape(str(a.get('token_fingerprint') or ''))}</td>
+<td><span style="background:{env_color};color:#fff;padding:2px 8px;border-radius:999px;font-size:11px">{_html.escape(env_badge)}</span></td>
+<td style="color:{code_color};font-weight:700">{_html.escape(str(a.get('status_code') or '—'))}</td>
+<td style="font-size:11px;color:#c21818">{_html.escape(str(reason))}</td>
+<td style="font-size:11px;color:#666">{_html.escape(str(a.get('duration_ms') or ''))}ms</td>
+</tr>"""
+        apns_block = ""
+        if apns_rows:
+            apns_block = f"""
+<div style="margin-top:12px">
+  <div style="font-size:12px;color:#666;font-weight:700;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">iOS (direct APNs)</div>
+  <table style="width:100%;border-collapse:collapse;font-size:12px">
+    <thead><tr style="background:#fafafa">
+      <th style="text-align:left;padding:6px 8px;border-bottom:1px solid #eee">user_id</th>
+      <th style="text-align:left;padding:6px 8px;border-bottom:1px solid #eee">token fp</th>
+      <th style="text-align:left;padding:6px 8px;border-bottom:1px solid #eee">env</th>
+      <th style="text-align:left;padding:6px 8px;border-bottom:1px solid #eee">HTTP</th>
+      <th style="text-align:left;padding:6px 8px;border-bottom:1px solid #eee">reason</th>
+      <th style="text-align:left;padding:6px 8px;border-bottom:1px solid #eee">time</th>
+    </tr></thead>
+    <tbody>{apns_rows}</tbody>
+  </table>
+</div>"""
+
+        # ---- Android SuprSend chunk rows (legacy) ----
         chunks_html = ""
         for ch in ev.get("chunks") or []:
             ok = ch.get("ok")
@@ -437,7 +521,7 @@ async def last_push_events_browser(
                 sample += f" …(+{(ch.get('chunk_size') or 0) - len(ch.get('recipients_sample') or [])} more)"
             chunks_html += f"""
 <div style="border:1px solid #eee;border-radius:8px;padding:12px;margin-top:10px;background:#fbfbfd">
-  <div><b>chunk {_html.escape(str(ch.get('chunk_index')))}</b> — status
+  <div><b>Android chunk {_html.escape(str(ch.get('chunk_index')))}</b> — status
     <span style="color:{ok_color};font-weight:700">{_html.escape(str(ch.get('status_code')))}</span>
     · {_html.escape(str(ch.get('chunk_size')))} recipient(s)
     {"· error: <code>" + _html.escape(str(ch.get('error'))) + "</code>" if ch.get("error") else ""}
@@ -445,6 +529,11 @@ async def last_push_events_browser(
   <div style="font-size:12px;color:#666;margin-top:4px"><b>recipients:</b> {_html.escape(sample)}</div>
   <pre style="background:#0e1116;color:#d5dae0;padding:10px;border-radius:6px;font-size:11px;overflow:auto;max-height:280px;white-space:pre-wrap;word-break:break-word;margin-top:8px">{body_pretty}</pre>
 </div>"""
+
+        counts = ""
+        if ev.get("ios_count") is not None or ev.get("android_count") is not None:
+            counts = f" · iOS: {ev.get('ios_count') or 0} · Android: {ev.get('android_count') or 0}"
+
         return f"""
 <div class="card" style="margin-top:14px">
   <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
@@ -455,10 +544,11 @@ async def last_push_events_browser(
     <div><b>When:</b> {_html.escape(str(ev.get('created_at') or ''))}</div>
     <div><b>Triggered by:</b> <code>{_html.escape(str(ev.get('triggered_by') or 'dashboard'))}</code></div>
     <div><b>Magnitude:</b> {_html.escape(str(ev.get('magnitude') or ''))}</div>
-    <div><b>Recipients:</b> {ev.get('recipients_total')}</div>
+    <div><b>Recipients:</b> {ev.get('recipients_total')}{counts}</div>
     {f'<div><b>Error:</b> <code style="color:#c21818">{_html.escape(str(ev.get("push_error")))}</code></div>' if ev.get('push_error') else ''}
   </div>
-  {chunks_html or '<div style="color:#666;font-size:12px;margin-top:8px">No chunk events recorded.</div>'}
+  {apns_block}
+  {chunks_html or ('<div style="color:#666;font-size:12px;margin-top:8px">No Android chunks (all iOS).</div>' if apns_rows else '<div style="color:#666;font-size:12px;margin-top:8px">No chunk events recorded.</div>')}
 </div>"""
 
     if not events:
@@ -746,6 +836,151 @@ button{{background:#c21818;color:#fff;border:0;padding:10px 20px;border-radius:8
 </body></html>""")
 
 
+# ---------- APNs auth key management ----------
+class ApnsKeyUpload(BaseModel):
+    key_id: str = Field(min_length=6, max_length=32)
+    team_id: str = Field(min_length=6, max_length=32)
+    bundle_id: str = Field(min_length=3, max_length=200)
+    private_key_pem: str
+
+
+@api_router.get("/admin/apns-key", response_class=HTMLResponse)
+async def apns_key_form(token: str = Query(default="")):
+    """Browser form to upload the APNs .p8 key. Password-protected."""
+    if not ADMIN_TRIGGER_PASSWORD:
+        return HTMLResponse("<h2>Server error</h2>", status_code=500)
+    if token != ADMIN_TRIGGER_PASSWORD:
+        return HTMLResponse(
+            "<h2 style='color:#c21818'>Wrong password.</h2>"
+            "<p>Append <code>?token=&lt;password&gt;</code>.</p>",
+            status_code=401,
+        )
+    status = await apns_config_status(db)
+    status_html = ""
+    if status.get("configured"):
+        status_html = f"""
+<div class="card" style="border-color:#1F8A3A;background:#f0faf3">
+  <div><b>Currently configured</b></div>
+  <div class="kv" style="margin-top:6px">
+    <div><b>Key ID:</b> <code>{_html.escape(str(status.get('key_id')))}</code></div>
+    <div><b>Team ID:</b> <code>{_html.escape(str(status.get('team_id')))}</code></div>
+    <div><b>Bundle ID:</b> <code>{_html.escape(str(status.get('bundle_id')))}</code></div>
+    <div><b>Updated:</b> {_html.escape(str(status.get('updated_at')))}</div>
+  </div>
+  <p style="margin:8px 0 0;font-size:12px;color:#666">Submitting the form below will overwrite the existing key.</p>
+</div>"""
+    else:
+        status_html = '<div class="card" style="border-color:#c21818;background:#fdf1f1"><b>APNs key not yet configured.</b> Uploading below enables direct APNs Critical Alerts.</div>'
+
+    return HTMLResponse(f"""<!doctype html><html><head>
+<title>QuakeGuard — upload APNs key</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<style>body{{font-family:-apple-system,Segoe UI,sans-serif;padding:20px;max-width:760px;margin:0 auto;background:#f4f4f7}}
+.card{{border:1px solid #ddd;border-radius:12px;padding:16px 18px;background:#fff;margin-bottom:14px}}
+h1{{font-size:20px;margin:0 0 6px}}
+label{{display:block;font-size:12px;color:#666;margin:12px 0 4px;text-transform:uppercase;letter-spacing:.05em;font-weight:600}}
+input,textarea{{width:100%;padding:10px;border:1px solid #ccc;border-radius:8px;font-size:14px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;box-sizing:border-box}}
+textarea{{min-height:280px;font-size:12px}}
+button{{background:#c21818;color:#fff;border:0;padding:12px 24px;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;margin-top:14px;width:100%}}
+button:disabled{{opacity:.5}}
+.kv{{font-size:14px;line-height:1.7}}
+.kv b{{display:inline-block;min-width:100px;color:#666;font-weight:600}}
+code{{background:#f4f4f6;padding:1px 6px;border-radius:4px;font-size:12px}}
+.msg{{padding:12px;border-radius:8px;margin-top:12px;font-size:13px}}
+.ok{{background:#eaf6ee;color:#1F8A3A;border:1px solid #b6dcc0}}
+.err{{background:#fdecec;color:#c21818;border:1px solid #f2b8b8}}
+</style></head><body>
+<div class="card">
+  <h1>Upload APNs Auth Key</h1>
+  <p style="margin:0;color:#666;font-size:13px">The .p8 key you downloaded from Apple Developer → Keys. This lets QuakeGuard send true iOS Critical Alerts by talking to APNs directly.</p>
+</div>
+{status_html}
+<form method="POST" action="/api/admin/apns-key" enctype="application/x-www-form-urlencoded" id="f" class="card">
+  <input type="hidden" name="token" value="{_html.escape(token)}">
+  <label>Key ID</label>
+  <input name="key_id" value="{_html.escape(status.get('key_id') or '2SRU7Q5Y27')}" required>
+  <label>Team ID</label>
+  <input name="team_id" value="{_html.escape(status.get('team_id') or '8H45BC6U2F')}" required>
+  <label>Bundle ID</label>
+  <input name="bundle_id" value="{_html.escape(status.get('bundle_id') or 'com.paulvincenti.quakeguard')}" required>
+  <label>Private key (.p8 contents — paste including BEGIN/END lines)</label>
+  <textarea name="private_key_pem" placeholder="-----BEGIN PRIVATE KEY-----&#10;...&#10;-----END PRIVATE KEY-----" required></textarea>
+  <button type="submit">Save APNs key</button>
+</form>
+<p style="font-size:12px;color:#666;text-align:center">The key is stored base64-encoded in MongoDB. It's never logged.</p>
+</body></html>""")
+
+
+from fastapi import Form as _Form
+
+
+@api_router.post("/admin/apns-key")
+async def apns_key_upload(
+    token: str = _Form(default=""),
+    key_id: str = _Form(...),
+    team_id: str = _Form(...),
+    bundle_id: str = _Form(...),
+    private_key_pem: str = _Form(...),
+    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
+):
+    """Persist the APNs auth key. Auth via form ?token= or X-Admin-Token header."""
+    if not ADMIN_TRIGGER_PASSWORD:
+        raise HTTPException(500, "ADMIN_TRIGGER_PASSWORD not configured")
+    provided = x_admin_token or token
+    if provided != ADMIN_TRIGGER_PASSWORD:
+        raise HTTPException(401, "Invalid admin token")
+    pem = private_key_pem.strip()
+    if "BEGIN PRIVATE KEY" not in pem or "END PRIVATE KEY" not in pem:
+        return HTMLResponse(
+            "<h2 style='color:#c21818'>Invalid .p8</h2>"
+            "<p>The pasted content is missing <code>BEGIN PRIVATE KEY</code> / "
+            "<code>END PRIVATE KEY</code> markers.</p>"
+            f"<p><a href='/api/admin/apns-key?token={_html.escape(token)}'>← back</a></p>",
+            status_code=400,
+        )
+    # Validate the key can actually be loaded before persisting.
+    try:
+        import jwt as _jwt
+        _jwt.encode({"iss": team_id, "iat": 0}, key=pem, algorithm="ES256",
+                    headers={"kid": key_id, "alg": "ES256", "typ": "JWT"})
+    except Exception as e:
+        return HTMLResponse(
+            f"<h2 style='color:#c21818'>Key rejected</h2>"
+            f"<p>Could not sign a test JWT with the provided key: <code>{_html.escape(str(e))}</code></p>"
+            f"<p><a href='/api/admin/apns-key?token={_html.escape(token)}'>← back</a></p>",
+            status_code=400,
+        )
+    await save_apns_config(db, key_id, team_id, bundle_id, pem)
+    return HTMLResponse(f"""<!doctype html><html><head>
+<title>APNs key saved</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>body{{font-family:-apple-system,Segoe UI,sans-serif;padding:24px;max-width:600px;margin:0 auto;background:#f4f4f7}}
+.card{{border:1px solid #1F8A3A;border-radius:12px;padding:20px;background:#f0faf3}}
+h1{{color:#1F8A3A;margin:0 0 8px}}
+a.btn{{display:inline-block;margin-top:12px;background:#c21818;color:#fff;padding:10px 20px;border-radius:8px;text-decoration:none;font-weight:600}}
+</style></head><body>
+<div class="card">
+  <h1>✅ APNs key saved</h1>
+  <p><b>Key ID:</b> <code>{_html.escape(key_id)}</code></p>
+  <p><b>Team ID:</b> <code>{_html.escape(team_id)}</code></p>
+  <p><b>Bundle ID:</b> <code>{_html.escape(bundle_id)}</code></p>
+  <p style="margin-top:14px">Direct APNs delivery is now active for <code>/api/trigger-alert</code>. Fire a self-test push to verify.</p>
+  <a class="btn" href="/api/admin/self-test-push?token={_html.escape(token)}">Send self-test push →</a>
+</div>
+</body></html>""")
+
+
+@api_router.get("/admin/apns-status")
+async def apns_status_json(
+    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
+    token: str = Query(default=""),
+):
+    if (x_admin_token or token) != ADMIN_TRIGGER_PASSWORD:
+        raise HTTPException(401, "Invalid admin token")
+    return await apns_config_status(db)
+
+
 # ---------- Wire up ----------
 app.include_router(api_router)
 
@@ -767,3 +1002,4 @@ logger = logging.getLogger(__name__)
 async def shutdown_db_client():
     client.close()
     await _push_client.aclose()
+    await apns_aclose()
