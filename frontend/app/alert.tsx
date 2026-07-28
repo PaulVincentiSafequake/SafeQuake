@@ -49,9 +49,14 @@ export default function AlertScreen() {
   // .play() before the source finishes loading is a no-op on iOS.
   const sirenPlayer = useAudioPlayer(SIREN_SOURCE);
   const sirenStatus = useAudioPlayerStatus(sirenPlayer);
+  // Latching guard: once the user silences the siren (I'm Safe / Dismiss /
+  // unmount), this flips permanently to false so no subsequent re-render or
+  // player-status blip can restart playback.
+  const shouldPlayRef = useRef(true);
 
   useEffect(() => {
     if (!sirenStatus.isLoaded) return;
+    if (!shouldPlayRef.current) return;
     (async () => {
       try {
         // Belt-and-braces: (re)apply the audio session config just before
@@ -65,6 +70,9 @@ export default function AlertScreen() {
       } catch {
         // ignore — session may still be in a playable state
       }
+      // Re-check the guard: setAudioModeAsync is awaited, and the user may
+      // have tapped "I'm Safe" while we were setting the session.
+      if (!shouldPlayRef.current) return;
       try {
         sirenPlayer.loop = true;
         sirenPlayer.volume = 1.0;
@@ -78,9 +86,9 @@ export default function AlertScreen() {
   // Unmount cleanup
   useEffect(() => {
     return () => {
+      shouldPlayRef.current = false;
       try {
         sirenPlayer.pause();
-        sirenPlayer.seekTo(0);
       } catch {
         // ignore
       }
@@ -88,8 +96,27 @@ export default function AlertScreen() {
   }, [sirenPlayer]);
 
   const stopSiren = () => {
+    // Flip the guard FIRST so any in-flight play effect bails out before
+    // touching the hardware. Then forcibly silence: loop=false so any
+    // buffered loop iteration doesn't wrap, volume=0 so residual samples
+    // are inaudible, pause() to actually halt.
+    shouldPlayRef.current = false;
+    try {
+      sirenPlayer.loop = false;
+    } catch {
+      // ignore
+    }
+    try {
+      sirenPlayer.volume = 0;
+    } catch {
+      // ignore
+    }
     try {
       sirenPlayer.pause();
+    } catch {
+      // ignore
+    }
+    try {
       sirenPlayer.seekTo(0);
     } catch {
       // ignore

@@ -16,8 +16,6 @@ from datetime import datetime, timezone
 from apns import (
     aclose as apns_aclose,
     apns_config_status,
-    load_apns_config,
-    save_apns_config,
     send_critical_alerts,
 )
 
@@ -836,139 +834,12 @@ button{{background:#c21818;color:#fff;border:0;padding:10px 20px;border-radius:8
 </body></html>""")
 
 
-# ---------- APNs auth key management ----------
-class ApnsKeyUpload(BaseModel):
-    key_id: str = Field(min_length=6, max_length=32)
-    team_id: str = Field(min_length=6, max_length=32)
-    bundle_id: str = Field(min_length=3, max_length=200)
-    private_key_pem: str
-
-
-@api_router.get("/admin/apns-key", response_class=HTMLResponse)
-async def apns_key_form(token: str = Query(default="")):
-    """Browser form to upload the APNs .p8 key. Password-protected."""
-    if not ADMIN_TRIGGER_PASSWORD:
-        return HTMLResponse("<h2>Server error</h2>", status_code=500)
-    if token != ADMIN_TRIGGER_PASSWORD:
-        return HTMLResponse(
-            "<h2 style='color:#c21818'>Wrong password.</h2>"
-            "<p>Append <code>?token=&lt;password&gt;</code>.</p>",
-            status_code=401,
-        )
-    status = await apns_config_status(db)
-    status_html = ""
-    if status.get("configured"):
-        status_html = f"""
-<div class="card" style="border-color:#1F8A3A;background:#f0faf3">
-  <div><b>Currently configured</b></div>
-  <div class="kv" style="margin-top:6px">
-    <div><b>Key ID:</b> <code>{_html.escape(str(status.get('key_id')))}</code></div>
-    <div><b>Team ID:</b> <code>{_html.escape(str(status.get('team_id')))}</code></div>
-    <div><b>Bundle ID:</b> <code>{_html.escape(str(status.get('bundle_id')))}</code></div>
-    <div><b>Updated:</b> {_html.escape(str(status.get('updated_at')))}</div>
-  </div>
-  <p style="margin:8px 0 0;font-size:12px;color:#666">Submitting the form below will overwrite the existing key.</p>
-</div>"""
-    else:
-        status_html = '<div class="card" style="border-color:#c21818;background:#fdf1f1"><b>APNs key not yet configured.</b> Uploading below enables direct APNs Critical Alerts.</div>'
-
-    return HTMLResponse(f"""<!doctype html><html><head>
-<title>QuakeGuard — upload APNs key</title>
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="referrer" content="no-referrer">
-<style>body{{font-family:-apple-system,Segoe UI,sans-serif;padding:20px;max-width:760px;margin:0 auto;background:#f4f4f7}}
-.card{{border:1px solid #ddd;border-radius:12px;padding:16px 18px;background:#fff;margin-bottom:14px}}
-h1{{font-size:20px;margin:0 0 6px}}
-label{{display:block;font-size:12px;color:#666;margin:12px 0 4px;text-transform:uppercase;letter-spacing:.05em;font-weight:600}}
-input,textarea{{width:100%;padding:10px;border:1px solid #ccc;border-radius:8px;font-size:14px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;box-sizing:border-box}}
-textarea{{min-height:280px;font-size:12px}}
-button{{background:#c21818;color:#fff;border:0;padding:12px 24px;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;margin-top:14px;width:100%}}
-button:disabled{{opacity:.5}}
-.kv{{font-size:14px;line-height:1.7}}
-.kv b{{display:inline-block;min-width:100px;color:#666;font-weight:600}}
-code{{background:#f4f4f6;padding:1px 6px;border-radius:4px;font-size:12px}}
-.msg{{padding:12px;border-radius:8px;margin-top:12px;font-size:13px}}
-.ok{{background:#eaf6ee;color:#1F8A3A;border:1px solid #b6dcc0}}
-.err{{background:#fdecec;color:#c21818;border:1px solid #f2b8b8}}
-</style></head><body>
-<div class="card">
-  <h1>Upload APNs Auth Key</h1>
-  <p style="margin:0;color:#666;font-size:13px">The .p8 key you downloaded from Apple Developer → Keys. This lets QuakeGuard send true iOS Critical Alerts by talking to APNs directly.</p>
-</div>
-{status_html}
-<form method="POST" action="/api/admin/apns-key" enctype="application/x-www-form-urlencoded" id="f" class="card">
-  <input type="hidden" name="token" value="{_html.escape(token)}">
-  <label>Key ID</label>
-  <input name="key_id" value="{_html.escape(status.get('key_id') or '2SRU7Q5Y27')}" required>
-  <label>Team ID</label>
-  <input name="team_id" value="{_html.escape(status.get('team_id') or '8H45BC6U2F')}" required>
-  <label>Bundle ID</label>
-  <input name="bundle_id" value="{_html.escape(status.get('bundle_id') or 'com.paulvincenti.quakeguard')}" required>
-  <label>Private key (.p8 contents — paste including BEGIN/END lines)</label>
-  <textarea name="private_key_pem" placeholder="-----BEGIN PRIVATE KEY-----&#10;...&#10;-----END PRIVATE KEY-----" required></textarea>
-  <button type="submit">Save APNs key</button>
-</form>
-<p style="font-size:12px;color:#666;text-align:center">The key is stored base64-encoded in MongoDB. It's never logged.</p>
-</body></html>""")
-
-
-from fastapi import Form as _Form
-
-
-@api_router.post("/admin/apns-key")
-async def apns_key_upload(
-    token: str = _Form(default=""),
-    key_id: str = _Form(...),
-    team_id: str = _Form(...),
-    bundle_id: str = _Form(...),
-    private_key_pem: str = _Form(...),
-    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
-):
-    """Persist the APNs auth key. Auth via form ?token= or X-Admin-Token header."""
-    if not ADMIN_TRIGGER_PASSWORD:
-        raise HTTPException(500, "ADMIN_TRIGGER_PASSWORD not configured")
-    provided = x_admin_token or token
-    if provided != ADMIN_TRIGGER_PASSWORD:
-        raise HTTPException(401, "Invalid admin token")
-    pem = private_key_pem.strip()
-    if "BEGIN PRIVATE KEY" not in pem or "END PRIVATE KEY" not in pem:
-        return HTMLResponse(
-            "<h2 style='color:#c21818'>Invalid .p8</h2>"
-            "<p>The pasted content is missing <code>BEGIN PRIVATE KEY</code> / "
-            "<code>END PRIVATE KEY</code> markers.</p>"
-            f"<p><a href='/api/admin/apns-key?token={_html.escape(token)}'>← back</a></p>",
-            status_code=400,
-        )
-    # Validate the key can actually be loaded before persisting.
-    try:
-        import jwt as _jwt
-        _jwt.encode({"iss": team_id, "iat": 0}, key=pem, algorithm="ES256",
-                    headers={"kid": key_id, "alg": "ES256", "typ": "JWT"})
-    except Exception as e:
-        return HTMLResponse(
-            f"<h2 style='color:#c21818'>Key rejected</h2>"
-            f"<p>Could not sign a test JWT with the provided key: <code>{_html.escape(str(e))}</code></p>"
-            f"<p><a href='/api/admin/apns-key?token={_html.escape(token)}'>← back</a></p>",
-            status_code=400,
-        )
-    await save_apns_config(db, key_id, team_id, bundle_id, pem)
-    return HTMLResponse(f"""<!doctype html><html><head>
-<title>APNs key saved</title>
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<style>body{{font-family:-apple-system,Segoe UI,sans-serif;padding:24px;max-width:600px;margin:0 auto;background:#f4f4f7}}
-.card{{border:1px solid #1F8A3A;border-radius:12px;padding:20px;background:#f0faf3}}
-h1{{color:#1F8A3A;margin:0 0 8px}}
-a.btn{{display:inline-block;margin-top:12px;background:#c21818;color:#fff;padding:10px 20px;border-radius:8px;text-decoration:none;font-weight:600}}
-</style></head><body>
-<div class="card">
-  <h1>✅ APNs key saved</h1>
-  <p><b>Key ID:</b> <code>{_html.escape(key_id)}</code></p>
-  <p><b>Team ID:</b> <code>{_html.escape(team_id)}</code></p>
-  <p><b>Bundle ID:</b> <code>{_html.escape(bundle_id)}</code></p>
-  <p style="margin-top:14px">Direct APNs delivery is now active for <code>/api/trigger-alert</code>. Fire a self-test push to verify.</p>
-  <a class="btn" href="/api/admin/self-test-push?token={_html.escape(token)}">Send self-test push →</a>
-</div>
-</body></html>""")
+# ---------- APNs auth key status (read-only) ----------
+# NOTE: The one-time upload endpoints (GET /admin/apns-key form + POST
+# /admin/apns-key) have been removed after the key was successfully
+# persisted, to reduce lingering attack surface. If the key ever needs to
+# be rotated, restore the upload handler from git history for a single
+# session, then remove it again.
 
 
 @api_router.get("/admin/apns-status")
