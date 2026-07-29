@@ -8,8 +8,9 @@
 <style>
   :root {
     --safe: #2e7d32;
+    --trapped: #c62828;
     --waiting: #f9a825;
-    --danger: #c62828;
+    --danger: #757575;
     --bg: #f4f5f7;
   }
   * { box-sizing: border-box; }
@@ -41,9 +42,9 @@
     overflow-y: auto;
     border-left: 1px solid #e0e0e0;
   }
-  .stat-row { display: flex; gap: 10px; margin-bottom: 16px; }
+  .stat-row { display: flex; gap: 10px; margin-bottom: 16px; flex-wrap: wrap; }
   .stat {
-    flex: 1;
+    flex: 1 1 calc(50% - 5px);
     background: var(--bg);
     border-radius: 8px;
     padding: 10px;
@@ -51,6 +52,7 @@
   }
   .stat .num { font-size: 22px; font-weight: 700; }
   .stat.safe .num { color: var(--safe); }
+  .stat.trapped .num { color: var(--trapped); }
   .stat.waiting .num { color: var(--waiting); }
   .stat.danger .num { color: var(--danger); }
   .stat .label { font-size: 11px; color: #666; text-transform: uppercase; }
@@ -64,6 +66,9 @@
     font-size: 13px;
   }
   li.safe { border-color: var(--safe); }
+  li.trapped-red { border-color: var(--trapped); background: #fdecea; }
+  li.trapped-yellow { border-color: var(--waiting); }
+  li.trapped-green { border-color: var(--safe); }
   li.waiting { border-color: var(--waiting); }
   li.danger { border-color: var(--danger); }
   li .id { font-weight: 700; }
@@ -78,6 +83,16 @@
     margin-left: 6px;
   }
   .badge.bt { background: #455a64; }
+  .badge.sos { background: #c62828; }
+  .sos-label {
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    color: #c62828;
+    font-weight: 800;
+    font-size: 11px;
+    text-shadow: 0 0 3px #fff, 0 0 3px #fff, 0 0 3px #fff;
+  }
   button.demo {
     background: #1c2b36;
     color: #fff;
@@ -135,7 +150,7 @@
 <header>
   <div>
     <h1>Earthquake Safety — Emergency Response Dashboard (PILOT / DEMO)</h1>
-    <p>Not a production system. In-memory data only. Refreshes every 4 seconds.</p>
+    <p>Live device data. Refreshes every 4 seconds.</p>
   </div>
   <button class="demo" onclick="seedDemoData()">Load demo test users</button>
 </header>
@@ -145,7 +160,8 @@
   <div class="sidebar">
     <div class="stat-row">
       <div class="stat safe"><div class="num" id="count-safe">0</div><div class="label">Safe</div></div>
-      <div class="stat waiting"><div class="num" id="count-waiting">0</div><div class="label">Awaiting</div></div>
+      <div class="stat trapped"><div class="num" id="count-trapped">0</div><div class="label">Trapped</div></div>
+      <div class="stat waiting"><div class="num" id="count-waiting">0</div><div class="label">Unknown</div></div>
       <div class="stat danger"><div class="num" id="count-danger">0</div><div class="label">Not Responding</div></div>
     </div>
     <ul class="userlist" id="userlist"></ul>
