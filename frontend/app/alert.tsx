@@ -8,6 +8,7 @@ import * as Battery from "expo-battery";
 import { useAudioPlayer, useAudioPlayerStatus, setAudioModeAsync } from "expo-audio";
 import { useEffect, useRef, useState } from "react";
 import {
+  Modal,
   Pressable,
   StyleSheet,
   Text,
@@ -24,17 +25,22 @@ import Animated, {
 } from "react-native-reanimated";
 
 import { colors, radius, spacing } from "@/src/theme";
-import { postStatus } from "@/src/utils/checkin";
+import { postStatus, type TriageSeverity } from "@/src/utils/checkin";
 import { cancelCheckInReminders } from "@/src/utils/reminders";
 
 const SIREN_SOURCE = require("../assets/audio/siren.mp3");
 
 type Status = "idle" | "sending" | "sent" | "error";
+type OutcomeKind = "safe" | "trapped";
 
 export default function AlertScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const [status, setStatus] = useState<Status>("idle");
+  const [outcome, setOutcome] = useState<OutcomeKind>("safe");
+  const [chosenSeverity, setChosenSeverity] =
+    useState<TriageSeverity | null>(null);
+  const [triageOpen, setTriageOpen] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [elapsed, setElapsed] = useState(0);
 
@@ -195,25 +201,36 @@ export default function AlertScreen() {
 
   useEffect(() => {
     if (status !== "sent") return;
+    // For "safe" check-ins, return to home after a moment.
+    // For "trapped", stay on this screen — the user needs a persistent
+    // "help is coming" confirmation, not an automatic redirect.
+    if (outcome !== "safe") return;
     const nav = setTimeout(() => router.replace("/"), 1200);
     return () => clearTimeout(nav);
-  }, [status, router]);
+  }, [status, outcome, router]);
 
-  const handleImSafe = async () => {
+  const submitCheckIn = async (
+    kind: OutcomeKind,
+    severity: TriageSeverity | null = null,
+  ) => {
     if (status === "sending" || status === "sent") return;
     // 1) IMMEDIATELY silence the siren and cancel pending reminders. The user
-    //    tapping "I'm Safe" is an explicit, unambiguous intent to stop the
-    //    alarm — it must not wait for GPS acquisition, battery read, or the
-    //    network round-trip. shouldPlayRef is latched inside stopSiren() so
-    //    even a network failure (status → "error") won't restart the siren.
+    //    tapping I'm Safe / a triage option is an explicit, unambiguous
+    //    intent to stop the alarm — it must not wait for GPS acquisition,
+    //    battery read, or the network round-trip. shouldPlayRef is latched
+    //    inside stopSiren() so a network failure won't restart the siren.
     stopSiren();
     cancelCheckInReminders().catch(() => {});
 
+    setOutcome(kind);
+    setChosenSeverity(severity);
     setStatus("sending");
     setErrorMsg(null);
-    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(
-      () => {},
-    );
+    Haptics.notificationAsync(
+      kind === "safe"
+        ? Haptics.NotificationFeedbackType.Success
+        : Haptics.NotificationFeedbackType.Warning,
+    ).catch(() => {});
 
     // Gather location (with timeout guard) — force a fresh high-accuracy GPS fix
     let latitude: number | null = null;
@@ -305,18 +322,39 @@ export default function AlertScreen() {
 
     try {
       const res = await postStatus({
-        status: "safe",
+        status: kind === "safe" ? "safe" : "trapped",
+        severity: kind === "trapped" ? severity : null,
         location: { latitude, longitude, accuracy, error: locationError },
         battery: { level: batteryLevel, state: batteryState },
       });
-      console.log("[QuakeGuard] I'm Safe → response status:", res.status);
+      console.log(
+        `[QuakeGuard] ${kind}${severity ? "/" + severity : ""} → response status:`,
+        res.status,
+      );
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       setStatus("sent");
     } catch (e: any) {
-      console.log("[QuakeGuard] I'm Safe → error:", e?.message);
+      console.log("[QuakeGuard] check-in error:", e?.message);
       setErrorMsg(e?.message ?? "Network error");
       setStatus("error");
     }
+  };
+
+  const handleImSafe = () => submitCheckIn("safe");
+
+  const openTriage = () => {
+    if (status === "sending" || status === "sent") return;
+    // Silence the siren the moment the user commits to opening triage — they
+    // are actively responding, so the alarm has served its purpose.
+    stopSiren();
+    cancelCheckInReminders().catch(() => {});
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
+    setTriageOpen(true);
+  };
+
+  const chooseTriage = (severity: TriageSeverity) => {
+    setTriageOpen(false);
+    submitCheckIn("trapped", severity);
   };
 
   const mm = String(Math.floor(elapsed / 60)).padStart(2, "0");
@@ -381,36 +419,74 @@ export default function AlertScreen() {
               <Text style={styles.errorText}>{errorMsg}. Tap again to retry.</Text>
             </View>
           )}
-          {status === "sent" && (
+          {status === "sent" && outcome === "safe" && (
             <View style={styles.successToast} testID="alert-success-toast">
               <Ionicons name="checkmark-circle" size={16} color={colors.onSuccess} />
               <Text style={styles.successText}>Report received. Stay safe.</Text>
             </View>
           )}
+          {status === "sent" && outcome === "trapped" && (
+            <View
+              style={[styles.trappedToast, severityToastStyle(chosenSeverity)]}
+              testID="alert-trapped-toast"
+            >
+              <Ionicons name="megaphone" size={16} color="#fff" />
+              <Text style={styles.trappedToastText}>
+                Rescuers alerted. Stay calm. Conserve battery.
+              </Text>
+            </View>
+          )}
 
-          <Pressable
-            onPress={handleImSafe}
-            disabled={status === "sending" || status === "sent"}
-            style={({ pressed }) => [
-              styles.safeBtn,
-              (status === "sent") && styles.safeBtnDone,
-              pressed && { opacity: 0.9, transform: [{ scale: 0.98 }] },
-            ]}
-            testID="im-safe-btn"
-          >
-            <Ionicons
-              name={status === "sent" ? "checkmark" : "shield-checkmark"}
-              size={26}
-              color={colors.onSuccess}
-            />
-            <Text style={styles.safeBtnText}>
-              {status === "sending"
-                ? "SENDING…"
-                : status === "sent"
-                  ? "MARKED SAFE"
-                  : "I'M SAFE"}
-            </Text>
-          </Pressable>
+          {/* Primary: I'M SAFE (green) — hidden once a trapped report was sent */}
+          {!(status === "sent" && outcome === "trapped") && (
+            <Pressable
+              onPress={handleImSafe}
+              disabled={status === "sending" || status === "sent"}
+              style={({ pressed }) => [
+                styles.safeBtn,
+                (status === "sent") && styles.safeBtnDone,
+                pressed && { opacity: 0.9, transform: [{ scale: 0.98 }] },
+              ]}
+              testID="im-safe-btn"
+            >
+              <Ionicons
+                name={
+                  status === "sent" && outcome === "safe"
+                    ? "checkmark"
+                    : "shield-checkmark"
+                }
+                size={26}
+                color={colors.onSuccess}
+              />
+              <Text style={styles.safeBtnText}>
+                {status === "sending" && outcome === "safe"
+                  ? "SENDING…"
+                  : status === "sent" && outcome === "safe"
+                    ? "MARKED SAFE"
+                    : "I'M SAFE"}
+              </Text>
+            </Pressable>
+          )}
+
+          {/* Secondary: TRAPPED / NEED HELP (amber) — opens triage sheet */}
+          {status !== "sent" && (
+            <Pressable
+              onPress={openTriage}
+              disabled={status === "sending"}
+              style={({ pressed }) => [
+                styles.trappedBtn,
+                pressed && { opacity: 0.9, transform: [{ scale: 0.98 }] },
+              ]}
+              testID="im-trapped-btn"
+            >
+              <Ionicons name="warning" size={22} color="#fff" />
+              <Text style={styles.trappedBtnText}>
+                {status === "sending" && outcome === "trapped"
+                  ? "SENDING…"
+                  : "I'M TRAPPED / NEED HELP"}
+              </Text>
+            </Pressable>
+          )}
 
           <Pressable
             onPress={() => {
@@ -426,12 +502,127 @@ export default function AlertScreen() {
             hitSlop={12}
             testID="alert-dismiss-btn"
           >
-            <Text style={styles.dismissText}>Dismiss alert</Text>
+            <Text style={styles.dismissText}>
+              {status === "sent" && outcome === "trapped"
+                ? "Back to home"
+                : "Dismiss alert"}
+            </Text>
           </Pressable>
         </View>
+
+        {/* Triage sheet — plain-language mapping to START triage colours.
+            Never offers a "black/deceased" option; that determination is
+            reserved for human first responders on scene. */}
+        <Modal
+          visible={triageOpen}
+          animationType="slide"
+          transparent
+          onRequestClose={() => setTriageOpen(false)}
+        >
+          <View style={styles.triageBackdrop}>
+            <View
+              style={[
+                styles.triageSheet,
+                { paddingBottom: Math.max(insets.bottom + spacing.md, spacing.xl) },
+              ]}
+            >
+              <View style={styles.triageHandle} />
+              <Text style={styles.triageTitle}>How badly are you hurt?</Text>
+              <Text style={styles.triageSubtitle}>
+                Rescuers will prioritise responses based on your answer.
+              </Text>
+
+              <TriageOption
+                color="#2E7D32"
+                label="I can walk and I&apos;m not badly hurt"
+                sublabel="Minor injuries · walking wounded"
+                icon="walk"
+                onPress={() => chooseTriage("green")}
+                testID="triage-green"
+              />
+              <TriageOption
+                color="#EA9500"
+                label="I&apos;m hurt but stable, waiting for help"
+                sublabel="Delayed · not immediately life-threatening"
+                icon="medkit"
+                onPress={() => chooseTriage("yellow")}
+                testID="triage-yellow"
+              />
+              <TriageOption
+                color="#C21818"
+                label="I&apos;m seriously injured / can&apos;t move"
+                sublabel="Immediate · life-threatening"
+                icon="pulse"
+                onPress={() => chooseTriage("red")}
+                testID="triage-red"
+              />
+
+              <Pressable
+                onPress={() => setTriageOpen(false)}
+                style={styles.triageCancel}
+                hitSlop={8}
+                testID="triage-cancel"
+              >
+                <Text style={styles.triageCancelText}>Back</Text>
+              </Pressable>
+            </View>
+          </View>
+        </Modal>
       </SafeAreaView>
     </View>
   );
+}
+
+/* ---------- Triage sheet row ---------- */
+
+function TriageOption({
+  color,
+  label,
+  sublabel,
+  icon,
+  onPress,
+  testID,
+}: {
+  color: string;
+  label: string;
+  sublabel: string;
+  icon: React.ComponentProps<typeof Ionicons>["name"];
+  onPress: () => void;
+  testID?: string;
+}) {
+  return (
+    <Pressable
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.triageOption,
+        { backgroundColor: color },
+        pressed && { opacity: 0.9, transform: [{ scale: 0.99 }] },
+      ]}
+      testID={testID}
+      hitSlop={4}
+    >
+      <View style={styles.triageIconWrap}>
+        <Ionicons name={icon} size={26} color="#fff" />
+      </View>
+      <View style={{ flex: 1 }}>
+        <Text style={styles.triageOptionLabel}>{label}</Text>
+        <Text style={styles.triageOptionSublabel}>{sublabel}</Text>
+      </View>
+      <Ionicons name="chevron-forward" size={22} color="rgba(255,255,255,0.85)" />
+    </Pressable>
+  );
+}
+
+function severityToastStyle(sev: TriageSeverity | null) {
+  switch (sev) {
+    case "green":
+      return { backgroundColor: "#2E7D32", borderColor: "#1F5A24" };
+    case "yellow":
+      return { backgroundColor: "#EA9500", borderColor: "#B77400" };
+    case "red":
+    default:
+      return { backgroundColor: "#C21818", borderColor: "#8E1010" };
+  }
 }
 
 const styles = StyleSheet.create({
@@ -622,6 +813,116 @@ const styles = StyleSheet.create({
     color: "rgba(255,255,255,0.55)",
     fontSize: 13,
     fontWeight: "600",
+    letterSpacing: 1,
+  },
+
+  /* Trapped / triage — secondary CTA on the alert screen */
+  trappedBtn: {
+    marginTop: spacing.sm,
+    borderRadius: radius.lg,
+    paddingVertical: spacing.md + 2,
+    paddingHorizontal: spacing.lg,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 10,
+    backgroundColor: "#EA9500",
+    borderWidth: 1.5,
+    borderColor: "#B77400",
+  },
+  trappedBtnText: {
+    color: "#fff",
+    fontSize: 16,
+    fontWeight: "900",
+    letterSpacing: 1.5,
+  },
+  trappedToast: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    marginBottom: spacing.sm,
+  },
+  trappedToastText: {
+    color: "#fff",
+    fontSize: 13,
+    fontWeight: "700",
+    flex: 1,
+  },
+
+  /* Triage modal */
+  triageBackdrop: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.6)",
+    justifyContent: "flex-end",
+  },
+  triageSheet: {
+    backgroundColor: "#1a0d0d",
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    paddingTop: spacing.sm,
+    paddingHorizontal: spacing.lg,
+  },
+  triageHandle: {
+    alignSelf: "center",
+    width: 44,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: "rgba(255,255,255,0.35)",
+    marginBottom: spacing.md,
+  },
+  triageTitle: {
+    color: "#fff",
+    fontSize: 22,
+    fontWeight: "800",
+    marginBottom: 4,
+  },
+  triageSubtitle: {
+    color: "rgba(255,255,255,0.65)",
+    fontSize: 13,
+    marginBottom: spacing.lg,
+  },
+  triageOption: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 14,
+    borderRadius: radius.lg,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.md + 2,
+    marginBottom: spacing.sm,
+    minHeight: 72,
+  },
+  triageIconWrap: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: "rgba(255,255,255,0.18)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  triageOptionLabel: {
+    color: "#fff",
+    fontSize: 15,
+    fontWeight: "800",
+    lineHeight: 20,
+  },
+  triageOptionSublabel: {
+    color: "rgba(255,255,255,0.82)",
+    fontSize: 12,
+    marginTop: 2,
+  },
+  triageCancel: {
+    alignItems: "center",
+    paddingVertical: spacing.md,
+    marginTop: 4,
+  },
+  triageCancelText: {
+    color: "rgba(255,255,255,0.65)",
+    fontSize: 14,
+    fontWeight: "700",
     letterSpacing: 1,
   },
 });

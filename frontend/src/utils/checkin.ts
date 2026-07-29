@@ -1,8 +1,16 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import Constants from "expo-constants";
 
 import { SAFE_ENDPOINT } from "@/src/theme";
 
 const DEVICE_ID_KEY = "quakeguard_device_id";
+
+// Our own backend — the rescuer dashboard fetches real device data from here.
+// The app dual-posts to both the external Render endpoint (SAFE_ENDPOINT) and
+// this backend so nothing on the Render side breaks during cutover.
+const BACKEND_URL =
+  process.env.EXPO_PUBLIC_BACKEND_URL ??
+  (Constants.expoConfig?.extra?.EXPO_PUBLIC_BACKEND_URL as string | undefined);
 
 export async function getDeviceId(): Promise<string> {
   let id = await AsyncStorage.getItem(DEVICE_ID_KEY);
@@ -13,7 +21,8 @@ export async function getDeviceId(): Promise<string> {
   return id;
 }
 
-export type CheckInStatus = "not_responding" | "safe";
+export type CheckInStatus = "not_responding" | "safe" | "trapped";
+export type TriageSeverity = "green" | "yellow" | "red";
 
 export interface LocationPayload {
   latitude: number | null;
@@ -28,20 +37,30 @@ export interface BatteryPayload {
 }
 
 /**
- * POST a status update to the external safequake endpoint. Fans lat/lng
- * across all common field names so any dashboard schema will find them.
+ * POST a status update. Dual-posts to:
+ *   1) The external safequake.onrender.com endpoint (SAFE_ENDPOINT) — legacy
+ *      receiver, unchanged.
+ *   2) Our own backend (${BACKEND_URL}/api/status) — the source of truth for
+ *      the rescuer dashboard's GET /api/devices call.
+ *
+ * Returns the response from the primary (Render) endpoint so callers that
+ * inspect res.ok / res.status keep working identically. The backend post
+ * runs in parallel and its outcome is logged but never blocks the caller.
  */
 export async function postStatus(opts: {
   status: CheckInStatus;
+  severity?: TriageSeverity | null;
   location?: LocationPayload;
   battery?: BatteryPayload;
 }): Promise<Response> {
   const deviceId = await getDeviceId();
-  const { status, location, battery } = opts;
+  const { status, severity, location, battery } = opts;
 
   const payload: Record<string, any> = {
     deviceId,
     status,
+    // severity is only meaningful for `trapped`; backend also enforces this.
+    severity: status === "trapped" ? (severity ?? null) : null,
     client_name: "quakeguard-mobile",
     timestamp: new Date().toISOString(),
     location: location ?? {
@@ -64,16 +83,41 @@ export async function postStatus(opts: {
     payload.lng = lng;
     payload.lon = lng;
     payload.accuracy = location?.accuracy ?? null;
-    payload.coords = { latitude: lat, longitude: lng, accuracy: location?.accuracy ?? null };
+    payload.coords = {
+      latitude: lat,
+      longitude: lng,
+      accuracy: location?.accuracy ?? null,
+    };
     payload.coordinates = [lng, lat];
     payload.geo = { type: "Point", coordinates: [lng, lat] };
   }
 
-  console.log(`[QuakeGuard] POST (${status}) →`, JSON.stringify(payload));
+  console.log(
+    `[QuakeGuard] POST (${status}${severity ? "/" + severity : ""}) →`,
+    JSON.stringify(payload),
+  );
 
-  return fetch(SAFE_ENDPOINT, {
+  // Fire both in parallel. The primary response (Render) is what we return —
+  // the backend post is fire-and-forget and its outcome is only logged.
+  const renderReq = fetch(SAFE_ENDPOINT, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
+
+  if (BACKEND_URL) {
+    fetch(`${BACKEND_URL}/api/status`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    })
+      .then((r) => {
+        console.log("[QuakeGuard] backend /api/status →", r.status);
+      })
+      .catch((e: Error) => {
+        console.log("[QuakeGuard] backend /api/status failed:", e?.message);
+      });
+  }
+
+  return renderReq;
 }

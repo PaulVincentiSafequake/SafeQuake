@@ -50,19 +50,177 @@ class StatusCheck(BaseModel):
     client_name: str
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
-class StatusCheckCreate(BaseModel):
-    client_name: str
-
 @api_router.get("/")
 async def root():
     return {"message": "Hello World"}
 
-@api_router.post("/status", response_model=StatusCheck)
-async def create_status_check(input: StatusCheckCreate):
-    status_obj = StatusCheck(**input.dict())
-    await db.status_checks.insert_one(status_obj.dict())
-    return status_obj
 
+# ---------- Device check-in status + dashboard read endpoint ----------
+# Accepts the same payload the app has been posting to
+# https://safequake.onrender.com/api/status (mobile now dual-posts to both).
+# Upserts into `device_status` collection so the dashboard can fetch real
+# device state via GET /api/devices.
+
+class LocationPayload(BaseModel):
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    accuracy: Optional[float] = None
+    error: Optional[str] = None
+
+class BatteryPayload(BaseModel):
+    level: Optional[float] = None      # 0..1
+    state: Optional[str] = None        # charging | full | unplugged | unknown
+
+class StatusInPayload(BaseModel):
+    # Permissive: accepts everything the app sends today plus new triage fields.
+    # Extra unknown keys are ignored, so this is forward-compatible.
+    model_config = {"extra": "ignore"}
+
+    # Device identity — accept both `deviceId` (app format) and `device_id`.
+    deviceId: Optional[str] = None
+    device_id: Optional[str] = None
+
+    # Status + triage
+    status: str = Field(pattern=r"^(safe|trapped|not_responding)$")
+    severity: Optional[str] = Field(default=None, pattern=r"^(green|yellow|red)$")
+
+    # Structured shapes
+    location: Optional[LocationPayload] = None
+    battery: Optional[BatteryPayload] = None
+
+    # Flat aliases (the app fans lat/lng across multiple field names)
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    lat: Optional[float] = None
+    lng: Optional[float] = None
+    lon: Optional[float] = None
+    accuracy: Optional[float] = None
+    batteryLevel: Optional[float] = None
+    batteryState: Optional[str] = None
+
+    client_name: Optional[str] = None
+    timestamp: Optional[str] = None
+
+
+def _normalize_status_payload(p: StatusInPayload) -> dict:
+    """Turn a permissive incoming payload into the canonical device_status doc."""
+    device_id = (p.device_id or p.deviceId or "").strip()
+
+    # Location — prefer the structured object, then any flat alias.
+    lat = None
+    lng = None
+    acc = None
+    loc_error = None
+    if p.location is not None:
+        lat = p.location.latitude
+        lng = p.location.longitude
+        acc = p.location.accuracy
+        loc_error = p.location.error
+    lat = lat if lat is not None else p.latitude
+    lat = lat if lat is not None else p.lat
+    lng = lng if lng is not None else p.longitude
+    lng = lng if lng is not None else p.lng
+    lng = lng if lng is not None else p.lon
+    acc = acc if acc is not None else p.accuracy
+
+    # Battery — 0..1 in wire, 0..100 in canonical.
+    level_01 = None
+    state = None
+    if p.battery is not None:
+        level_01 = p.battery.level
+        state = p.battery.state
+    if level_01 is None:
+        level_01 = p.batteryLevel
+    if state is None:
+        state = p.batteryState
+    battery_pct: Optional[int] = None
+    if isinstance(level_01, (int, float)):
+        try:
+            battery_pct = max(0, min(100, int(round(level_01 * 100))))
+        except Exception:
+            battery_pct = None
+
+    # Enforce: severity may only be set when status is 'trapped'.
+    severity: Optional[str] = p.severity
+    if p.status != "trapped":
+        severity = None
+
+    return {
+        "device_id": device_id,
+        "status": p.status,
+        "severity": severity,
+        "latitude": lat,
+        "longitude": lng,
+        "accuracy_m": acc,
+        "battery_pct": battery_pct,
+        "battery_state": state,
+        "location_error": loc_error,
+    }
+
+
+@api_router.post("/status")
+async def post_status(payload: StatusInPayload):
+    doc = _normalize_status_payload(payload)
+    if not doc["device_id"]:
+        raise HTTPException(400, "deviceId (or device_id) is required")
+    now = datetime.now(timezone.utc).isoformat()
+    doc["updated_at"] = now
+    # Enrich with platform from push_devices if we know it, so the dashboard
+    # can render iOS vs Android without another lookup.
+    dev = await db.push_devices.find_one(
+        {"user_id": doc["device_id"]}, {"_id": 0, "platform": 1},
+    )
+    doc["platform"] = (dev or {}).get("platform")
+    await db.device_status.update_one(
+        {"device_id": doc["device_id"]},
+        {"$set": doc, "$setOnInsert": {"created_at": now}},
+        upsert=True,
+    )
+    return {"status": "ok", "device_id": doc["device_id"], "updated_at": now}
+
+
+@api_router.get("/devices")
+async def get_devices(
+    since: Optional[str] = Query(
+        default=None,
+        description="ISO-8601 timestamp. Only return devices updated on/after this instant.",
+    ),
+    limit: int = Query(default=1000, ge=1, le=5000),
+):
+    """Return every known device's latest state for the rescuer dashboard.
+
+    CORS is limited to https://safequake.onrender.com and http://localhost:*
+    (see middleware config below). Response is snake_case, null-safe, and
+    stable — field names will not change after this ship.
+    """
+    query: dict = {}
+    if since:
+        query["updated_at"] = {"$gte": since}
+
+    rows = await db.device_status.find(query, {"_id": 0}).sort("updated_at", -1).to_list(limit)
+
+    def clean(r: dict) -> dict:
+        return {
+            "device_id": r.get("device_id"),
+            "status": r.get("status") or "unknown",
+            "severity": r.get("severity"),
+            "latitude": r.get("latitude"),
+            "longitude": r.get("longitude"),
+            "accuracy_m": r.get("accuracy_m"),
+            "battery_pct": r.get("battery_pct"),
+            "battery_state": r.get("battery_state"),
+            "platform": r.get("platform"),
+            "updated_at": r.get("updated_at"),
+        }
+
+    return {
+        "count": len(rows),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "devices": [clean(r) for r in rows],
+    }
+
+
+# ---------- Legacy status-check demo endpoint (unused; kept for compat) ----------
 @api_router.get("/status", response_model=List[StatusCheck])
 async def get_status_checks():
     status_checks = await db.status_checks.find({}, {"_id": 0}).to_list(1000)
@@ -858,8 +1016,12 @@ app.include_router(api_router)
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
-    allow_origins=["*"],
-    allow_methods=["*"],
+    allow_origins=[
+        "https://safequake.onrender.com",
+    ],
+    # Localhost on any port for dashboard dev (Vite 5173, CRA 3000, etc.)
+    allow_origin_regex=r"^http://localhost:\d+$",
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
 
