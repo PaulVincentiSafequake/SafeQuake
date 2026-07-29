@@ -415,13 +415,13 @@ export default function AlertScreen() {
         <View style={[styles.bottomWrap, { paddingBottom: Math.max(insets.bottom, spacing.md) }]}>
           {status === "error" && errorMsg && (
             <View style={styles.errorToast} testID="alert-error-toast">
-              <Ionicons name="alert-circle" size={16} color={colors.warning} />
+              <Ionicons name="alert-circle" size={22} color={colors.warning} />
               <Text style={styles.errorText}>{errorMsg}. Tap again to retry.</Text>
             </View>
           )}
           {status === "sent" && outcome === "safe" && (
             <View style={styles.successToast} testID="alert-success-toast">
-              <Ionicons name="checkmark-circle" size={16} color={colors.onSuccess} />
+              <Ionicons name="checkmark-circle" size={22} color={colors.onSuccess} />
               <Text style={styles.successText}>Report received. Stay safe.</Text>
             </View>
           )}
@@ -430,7 +430,7 @@ export default function AlertScreen() {
               style={[styles.trappedToast, severityToastStyle(chosenSeverity)]}
               testID="alert-trapped-toast"
             >
-              <Ionicons name="megaphone" size={16} color="#fff" />
+              <Ionicons name="megaphone" size={28} color="#fff" />
               <Text style={styles.trappedToastText}>
                 Rescuers alerted. Stay calm. Conserve battery.
               </Text>
@@ -602,7 +602,7 @@ function TriageOption({
       hitSlop={4}
     >
       <View style={styles.triageIconWrap}>
-        <Ionicons name={icon} size={26} color="#fff" />
+        <Ionicons name={icon} size={30} color="#fff" />
       </View>
       <View style={{ flex: 1 }}>
         <Text style={styles.triageOptionLabel}>{label}</Text>
@@ -705,10 +705,11 @@ const styles = StyleSheet.create({
   },
   subheading: {
     marginTop: spacing.md,
-    color: "rgba(255,255,255,0.85)",
-    fontSize: 15,
+    color: "rgba(255,255,255,0.9)",
+    fontSize: 19,
+    fontWeight: "500",
     textAlign: "center",
-    lineHeight: 22,
+    lineHeight: 26,
   },
   metricsRow: {
     marginTop: spacing.xl,
@@ -727,20 +728,20 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.xs,
   },
   metricLabel: {
-    color: "rgba(255,255,255,0.6)",
-    fontSize: 10,
+    color: "rgba(255,255,255,0.65)",
+    fontSize: 12,
     letterSpacing: 1.5,
     fontWeight: "700",
     marginBottom: 4,
   },
   metricValue: {
     color: colors.onSurface,
-    fontSize: 24,
+    fontSize: 28,
     fontWeight: "900",
     letterSpacing: 1,
   },
   metricUnit: {
-    fontSize: 12,
+    fontSize: 14,
     fontWeight: "600",
     color: "rgba(255,255,255,0.7)",
   },
@@ -765,29 +766,32 @@ const styles = StyleSheet.create({
   errorText: {
     flex: 1,
     color: colors.warning,
-    fontSize: 13,
-    fontWeight: "600",
+    fontSize: 17,
+    fontWeight: "700",
+    lineHeight: 22,
   },
   successToast: {
     flexDirection: "row",
     alignItems: "center",
     gap: spacing.sm,
     backgroundColor: colors.success,
-    padding: spacing.md,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.md + 2,
     borderRadius: radius.md,
   },
   successText: {
     flex: 1,
     color: colors.onSuccess,
-    fontSize: 13,
-    fontWeight: "700",
+    fontSize: 18,
+    fontWeight: "800",
+    lineHeight: 24,
   },
   safeBtn: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
     gap: spacing.md,
-    height: 64,
+    height: 72,
     borderRadius: radius.lg,
     backgroundColor: colors.success,
     shadowColor: colors.success,
@@ -801,18 +805,18 @@ const styles = StyleSheet.create({
   },
   safeBtnText: {
     color: colors.onSuccess,
-    fontSize: 18,
+    fontSize: 22,
     fontWeight: "900",
     letterSpacing: 3,
   },
   dismissBtn: {
     alignItems: "center",
-    paddingVertical: spacing.sm,
+    paddingVertical: spacing.md,
   },
   dismissText: {
-    color: "rgba(255,255,255,0.55)",
-    fontSize: 13,
-    fontWeight: "600",
+    color: "rgba(255,255,255,0.7)",
+    fontSize: 15,
+    fontWeight: "700",
     letterSpacing: 1,
   },
 
@@ -820,36 +824,40 @@ const styles = StyleSheet.create({
   trappedBtn: {
     marginTop: spacing.sm,
     borderRadius: radius.lg,
-    paddingVertical: spacing.md + 2,
+    paddingVertical: spacing.md + 4,
     paddingHorizontal: spacing.lg,
+    minHeight: 72,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
-    gap: 10,
+    gap: 12,
     backgroundColor: "#EA9500",
     borderWidth: 1.5,
     borderColor: "#B77400",
   },
   trappedBtnText: {
     color: "#fff",
-    fontSize: 16,
+    fontSize: 20,
     fontWeight: "900",
     letterSpacing: 1.5,
+    flexShrink: 1,
+    textAlign: "center",
   },
   trappedToast: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 8,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
-    borderRadius: radius.md,
-    borderWidth: 1,
-    marginBottom: spacing.sm,
+    gap: spacing.sm + 2,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.lg,
+    borderRadius: radius.lg,
+    borderWidth: 1.5,
+    marginBottom: spacing.md,
   },
   trappedToastText: {
     color: "#fff",
-    fontSize: 13,
-    fontWeight: "700",
+    fontSize: 22,
+    fontWeight: "800",
+    lineHeight: 28,
     flex: 1,
   },
 
@@ -876,13 +884,14 @@ const styles = StyleSheet.create({
   },
   triageTitle: {
     color: "#fff",
-    fontSize: 22,
+    fontSize: 26,
     fontWeight: "800",
-    marginBottom: 4,
+    marginBottom: 6,
   },
   triageSubtitle: {
-    color: "rgba(255,255,255,0.65)",
-    fontSize: 13,
+    color: "rgba(255,255,255,0.75)",
+    fontSize: 16,
+    lineHeight: 22,
     marginBottom: spacing.lg,
   },
   triageOption: {
@@ -891,28 +900,29 @@ const styles = StyleSheet.create({
     gap: 14,
     borderRadius: radius.lg,
     paddingHorizontal: spacing.md,
-    paddingVertical: spacing.md + 2,
+    paddingVertical: spacing.md + 4,
     marginBottom: spacing.sm,
-    minHeight: 72,
+    minHeight: 84,
   },
   triageIconWrap: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
     backgroundColor: "rgba(255,255,255,0.18)",
     alignItems: "center",
     justifyContent: "center",
   },
   triageOptionLabel: {
     color: "#fff",
-    fontSize: 15,
+    fontSize: 17,
     fontWeight: "800",
-    lineHeight: 20,
+    lineHeight: 22,
   },
   triageOptionSublabel: {
-    color: "rgba(255,255,255,0.82)",
-    fontSize: 12,
-    marginTop: 2,
+    color: "rgba(255,255,255,0.88)",
+    fontSize: 14,
+    marginTop: 3,
+    lineHeight: 18,
   },
   triageCancel: {
     alignItems: "center",
@@ -920,8 +930,8 @@ const styles = StyleSheet.create({
     marginTop: 4,
   },
   triageCancelText: {
-    color: "rgba(255,255,255,0.65)",
-    fontSize: 14,
+    color: "rgba(255,255,255,0.75)",
+    fontSize: 16,
     fontWeight: "700",
     letterSpacing: 1,
   },
