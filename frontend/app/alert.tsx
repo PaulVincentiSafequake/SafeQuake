@@ -201,6 +201,14 @@ export default function AlertScreen() {
 
   const handleImSafe = async () => {
     if (status === "sending" || status === "sent") return;
+    // 1) IMMEDIATELY silence the siren and cancel pending reminders. The user
+    //    tapping "I'm Safe" is an explicit, unambiguous intent to stop the
+    //    alarm — it must not wait for GPS acquisition, battery read, or the
+    //    network round-trip. shouldPlayRef is latched inside stopSiren() so
+    //    even a network failure (status → "error") won't restart the siren.
+    stopSiren();
+    cancelCheckInReminders().catch(() => {});
+
     setStatus("sending");
     setErrorMsg(null);
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(
@@ -303,10 +311,6 @@ export default function AlertScreen() {
       });
       console.log("[QuakeGuard] I'm Safe → response status:", res.status);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      // Cancel any pending / delivered reminder notifications now that the
-      // user has actively marked themselves safe.
-      await cancelCheckInReminders();
-      stopSiren();
       setStatus("sent");
     } catch (e: any) {
       console.log("[QuakeGuard] I'm Safe → error:", e?.message);
