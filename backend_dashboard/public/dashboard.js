@@ -1,6 +1,7 @@
 /**
  * Dashboard logic. Polls the real QuakeGuard backend every 4 seconds.
- * Shows live device status: Safe, Trapped (with triage severity), Not Responding, Unknown.
+ * Shows live device status grouped by triage priority: Immediate (red),
+ * Delayed (yellow), Minor (green), and Other (safe / not responding / unknown).
  */
 
 const DEVICES_ENDPOINT = "https://quake-alert-18.emergent.host/api/devices";
@@ -122,36 +123,64 @@ function popupHtml(u) {
   return `<b>${u.deviceId}</b><br>${statusLabel(u.status, u.severity)}<br>Battery: ${u.batteryPercent ?? "?"}%`;
 }
 
-function renderSidebar(users) {
-  const list = document.getElementById("userlist");
-  list.innerHTML = "";
+function itemHtml(u) {
+  return `
+    <div class="id">${u.deviceId}${isUrgent(u.status, u.severity) ? '<span class="badge sos">SOS</span>' : ""}</div>
+    <div class="meta">${statusLabel(u.status, u.severity)} · Battery ${u.batteryPercent ?? "?"}%</div>
+    <div class="meta">Updated: ${u.lastUpdated ? new Date(u.lastUpdated).toLocaleTimeString() : "—"}</div>
+  `;
+}
 
-  let safe = 0, trapped = 0, waiting = 0, danger = 0;
+function buildGroup(title, cls, items, alwaysOpen) {
+  const details = document.createElement("details");
+  details.className = "triage-group " + cls;
+  details.open = alwaysOpen || items.length > 0;
 
-  users
-    .slice()
-    .sort((a, b) => {
-      const rank = (u) =>
-        isUrgent(u.status, u.severity) ? 0 :
-        u.status === "trapped" ? 1 :
-        u.status === "not_responding" ? 2 : 3;
-      return rank(a) - rank(b);
-    })
-    .forEach((u) => {
-      if (u.status === "trapped") trapped++;
-      else if (u.status === "safe") safe++;
-      else if (u.status === "not_responding") danger++;
-      else waiting++;
+  const summary = document.createElement("summary");
+  summary.innerHTML = `<span>${title}</span><span class="group-count">${items.length}</span>`;
+  details.appendChild(summary);
 
+  const ul = document.createElement("ul");
+  ul.className = "userlist";
+
+  if (items.length === 0) {
+    const li = document.createElement("li");
+    li.className = "empty";
+    li.textContent = "None";
+    ul.appendChild(li);
+  } else {
+    items.forEach((u) => {
       const li = document.createElement("li");
       li.className = statusClass(u.status, u.severity);
-      li.innerHTML = `
-        <div class="id">${u.deviceId}${isUrgent(u.status, u.severity) ? '<span class="badge sos">SOS</span>' : ""}</div>
-        <div class="meta">${statusLabel(u.status, u.severity)} · Battery ${u.batteryPercent ?? "?"}%</div>
-        <div class="meta">Updated: ${u.lastUpdated ? new Date(u.lastUpdated).toLocaleTimeString() : "—"}</div>
-      `;
-      list.appendChild(li);
+      li.innerHTML = itemHtml(u);
+      ul.appendChild(li);
     });
+  }
+
+  details.appendChild(ul);
+  return details;
+}
+
+function renderSidebar(users) {
+  const container = document.getElementById("userlist");
+  container.innerHTML = "";
+
+  const byRecency = (a, b) => new Date(b.lastUpdated || 0) - new Date(a.lastUpdated || 0);
+
+  const red = users.filter((u) => u.status === "trapped" && u.severity === "red").sort(byRecency);
+  const yellow = users.filter((u) => u.status === "trapped" && u.severity === "yellow").sort(byRecency);
+  const green = users.filter((u) => u.status === "trapped" && (u.severity === "green" || !u.severity)).sort(byRecency);
+  const other = users.filter((u) => u.status !== "trapped").sort(byRecency);
+
+  container.appendChild(buildGroup("🔴 IMMEDIATE — seriously injured / can't move", "group-red", red, true));
+  container.appendChild(buildGroup("🟡 DELAYED — hurt but stable", "group-yellow", yellow, true));
+  container.appendChild(buildGroup("🟢 MINOR — walking wounded", "group-green", green, true));
+  container.appendChild(buildGroup("⚪ Other — Safe / Not Responding / Unknown", "group-other", other, false));
+
+  const safe = users.filter((u) => u.status === "safe").length;
+  const trapped = red.length + yellow.length + green.length;
+  const danger = users.filter((u) => u.status === "not_responding").length;
+  const waiting = users.length - safe - trapped - danger;
 
   document.getElementById("count-safe").textContent = safe;
   const trappedEl = document.getElementById("count-trapped");
