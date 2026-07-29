@@ -56,6 +56,44 @@
   .stat.waiting .num { color: var(--waiting); }
   .stat.danger .num { color: var(--danger); }
   .stat .label { font-size: 11px; color: #666; text-transform: uppercase; }
+
+  .triage-group {
+    margin-bottom: 10px;
+    border-radius: 8px;
+    overflow: hidden;
+    border: 1px solid #e0e0e0;
+  }
+  .triage-group summary {
+    cursor: pointer;
+    padding: 8px 10px;
+    font-weight: 700;
+    font-size: 12.5px;
+    list-style: none;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .triage-group summary::-webkit-details-marker { display: none; }
+  .triage-group.group-red summary { background: #fdecea; color: #b71c1c; }
+  .triage-group.group-yellow summary { background: #fff8e1; color: #8a6100; }
+  .triage-group.group-green summary { background: #e8f5e9; color: #1b5e20; }
+  .triage-group.group-other summary { background: #f4f5f7; color: #555; }
+  .group-count {
+    background: rgba(0,0,0,0.08);
+    border-radius: 10px;
+    padding: 1px 8px;
+    font-size: 11px;
+  }
+  .triage-group ul.userlist { padding: 8px; margin: 0; }
+  .triage-group li.empty {
+    color: #999;
+    font-style: italic;
+    border-left: none;
+    background: transparent;
+    padding: 4px 2px;
+    margin-bottom: 0;
+  }
+
   ul.userlist { list-style: none; padding: 0; margin: 0; }
   ul.userlist li {
     padding: 10px;
@@ -164,7 +202,7 @@
       <div class="stat waiting"><div class="num" id="count-waiting">0</div><div class="label">Unknown</div></div>
       <div class="stat danger"><div class="num" id="count-danger">0</div><div class="label">Not Responding</div></div>
     </div>
-    <ul class="userlist" id="userlist"></ul>
+    <div class="triage-groups" id="userlist"></div>
   </div>
 </div>
 
