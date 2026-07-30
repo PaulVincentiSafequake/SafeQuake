@@ -1,19 +1,28 @@
 /* ═══════════════════════════════════════════════════════════════════════════
    QuakeGuard — JS for the "Trigger Earthquake Alert" button
-   Goes into your dashboard's dashboard.js
+   (with prominent success / wrong-password feedback)
+
+   Goes into your dashboard's dashboard.js.
 
    PLACEMENT
    ─────────
-   Paste the ENTIRE block below at the BOTTOM of dashboard.js.
-   (Bottom is safest — it guarantees the <button id="qg-trigger-btn"> from
-    index.html already exists in the DOM by the time this runs. If your
-    dashboard.js is loaded with `defer` or at the end of <body>, top of the
-    file also works.)
+   Paste the ENTIRE block below at the BOTTOM of dashboard.js. (Bottom is
+   safest — it guarantees #qg-trigger-btn / #qg-banner / #qg-modal-backdrop
+   from index.html already exist in the DOM by the time this runs.)
+
+   REQUIRED MARKUP
+   ───────────────
+   This script assumes the following elements exist in the page:
+     <button id="qg-trigger-btn"> …
+     <div    id="qg-banner">  … .qg-banner-icon .qg-banner-text .qg-banner-close
+     <div    id="qg-modal-backdrop"> #qg-modal .qg-modal-ok
+   Use the companion snippet `dashboard-trigger-button.html` for the CSS +
+   HTML markup — this file is JS only.
 
    BEFORE PASTING
    ──────────────
    Set QUAKEGUARD_BACKEND to your deployed backend URL (visible in Emergent →
-   Publish → Deploy). It must be your backend base URL, no trailing slash.
+   Publish → Deploy). It must be the backend base URL, no trailing slash.
    Example:  "https://quake-alert-18.emergent.host"
    ═══════════════════════════════════════════════════════════════════════════ */
 
@@ -22,17 +31,51 @@
   var QUAKEGUARD_BACKEND = "https://quake-alert-18.emergent.host"; // no trailing /
   // ========================================================================
 
-  var btn    = document.getElementById("qg-trigger-btn");
-  var status = document.getElementById("qg-trigger-status");
-  if (!btn || !status) {
-    // Button not on this page — nothing to wire up.
+  var btn        = document.getElementById("qg-trigger-btn");
+  var banner     = document.getElementById("qg-banner");
+  var bannerText = banner && banner.querySelector(".qg-banner-text");
+  var bannerIcon = banner && banner.querySelector(".qg-banner-icon");
+  var bannerX    = banner && banner.querySelector(".qg-banner-close");
+  var modal      = document.getElementById("qg-modal-backdrop");
+  var modalOk    = modal && modal.querySelector(".qg-modal-ok");
+  if (!btn || !banner || !modal) {
+    // Not on a page with the trigger UI — nothing to wire up.
     return;
   }
 
-  function setStatus(msg, kind) {
-    status.textContent = msg || "";
-    status.className = kind || "";
+  var bannerTimer = null;
+
+  function showBanner(kind, text, autoDismissMs) {
+    if (bannerTimer) { clearTimeout(bannerTimer); bannerTimer = null; }
+    banner.classList.remove("ok", "err");
+    banner.classList.add(kind);
+    bannerIcon.textContent = kind === "ok" ? "✓" : "!";
+    bannerText.textContent = text;
+    // Force reflow so the transition fires reliably on re-shows.
+    void banner.offsetWidth;
+    banner.classList.add("show");
+    if (autoDismissMs && autoDismissMs > 0) {
+      bannerTimer = setTimeout(hideBanner, autoDismissMs);
+    }
   }
+  function hideBanner() {
+    banner.classList.remove("show");
+    if (bannerTimer) { clearTimeout(bannerTimer); bannerTimer = null; }
+  }
+  bannerX.addEventListener("click", hideBanner);
+
+  function showWrongPasswordModal() {
+    modal.classList.add("show");
+    setTimeout(function () { modalOk && modalOk.focus(); }, 50);
+  }
+  function hideModal() { modal.classList.remove("show"); }
+  modalOk.addEventListener("click", hideModal);
+  modal.addEventListener("click", function (e) {
+    if (e.target === modal) hideModal();
+  });
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape" && modal.classList.contains("show")) hideModal();
+  });
 
   btn.addEventListener("click", async function onTriggerClick() {
     var confirmed = window.confirm(
@@ -43,10 +86,10 @@
     if (!confirmed) return;
 
     var pwd = window.prompt("Enter emergency personnel password:");
-    if (!pwd) { setStatus("Cancelled.", "info"); return; }
+    if (!pwd) { showBanner("err", "Cancelled — no alert sent.", 4000); return; }
 
     btn.disabled = true;
-    setStatus("Broadcasting…", "info");
+    showBanner("ok", "Broadcasting alert…", 0);
 
     try {
       var res = await fetch(QUAKEGUARD_BACKEND + "/api/trigger-alert", {
@@ -64,26 +107,24 @@
       });
 
       if (res.status === 401) {
-        setStatus("Wrong password. Alert not sent.", "err");
+        hideBanner();
+        showWrongPasswordModal();
         return;
       }
       if (!res.ok) {
-        setStatus("Server error (" + res.status + "). Alert not sent.", "err");
+        showBanner("err", "Server error (" + res.status + "). Alert NOT sent.");
         return;
       }
 
       var data = await res.json();
-      var n = (data && typeof data.recipients === "number") ? data.recipients : "?";
+      var n = (data && typeof data.recipients === "number") ? data.recipients : 0;
       var delivered = data && data.push_delivered;
-      setStatus(
-        "Alert broadcast to " + n + " device" + (n === 1 ? "" : "s") +
-          (delivered === false
-            ? " (push queued — check EMERGENT_PUSH_KEY on the backend if this persists)."
-            : "."),
-        "ok"
-      );
+      var text =
+        "ALERT BROADCAST — " + n + " device" + (n === 1 ? "" : "s") +
+        (delivered === false ? " (delivery issue — check /api/admin/last-push-events)" : "");
+      showBanner(delivered === false ? "err" : "ok", text, delivered === false ? 0 : 6000);
     } catch (e) {
-      setStatus("Network error: " + (e && e.message ? e.message : e), "err");
+      showBanner("err", "Network error: " + (e && e.message ? e.message : e));
     } finally {
       btn.disabled = false;
     }

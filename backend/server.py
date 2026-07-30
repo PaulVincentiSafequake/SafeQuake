@@ -171,11 +171,21 @@ async def post_status(payload: StatusInPayload):
         {"user_id": doc["device_id"]}, {"_id": 0, "platform": 1},
     )
     doc["platform"] = (dev or {}).get("platform")
+    # Upsert latest state.
     await db.device_status.update_one(
         {"device_id": doc["device_id"]},
         {"$set": doc, "$setOnInsert": {"created_at": now}},
         upsert=True,
     )
+    # Append immutable history row for the audit log. `device_status` only
+    # holds the LATEST state; `status_events` is the append-only ledger.
+    try:
+        await db.status_events.insert_one({
+            **doc,
+            "recorded_at": now,
+        })
+    except Exception as e:
+        logging.warning(f"Failed to append status_events: {e}")
     return {"status": "ok", "device_id": doc["device_id"], "updated_at": now}
 
 
@@ -225,6 +235,155 @@ async def get_devices(
 async def get_status_checks():
     status_checks = await db.status_checks.find({}, {"_id": 0}).to_list(1000)
     return [StatusCheck(**s) for s in status_checks]
+
+
+# ---------- Audit log (unified trigger + status feed) ----------
+@api_router.get("/audit")
+async def get_audit_log(
+    limit: int = Query(default=100, ge=1, le=500),
+    since: Optional[str] = Query(
+        default=None,
+        description="ISO-8601 timestamp — only include events on/after this instant.",
+    ),
+    kind: Optional[str] = Query(
+        default=None,
+        description="Filter to a single event kind: 'trigger' or 'status'.",
+    ),
+):
+    """Unified, dashboard-facing audit feed.
+
+    Interleaves two event kinds by timestamp, most recent first:
+      - `trigger`: an alert was broadcast (from push_events)
+      - `status`:  a device reported a status change (from status_events)
+
+    CORS is limited to https://safequake.onrender.com and http://localhost:*
+    (see middleware config). Field names are stable snake_case.
+    """
+    events: List[dict] = []
+
+    # ---- Trigger events ----
+    if kind in (None, "trigger"):
+        tq: dict = {}
+        if since:
+            tq["created_at"] = {"$gte": since}
+        rows = await db.push_events.find(tq, {"_id": 0}).sort("created_at", -1).to_list(limit)
+        for r in rows:
+            events.append({
+                "kind": "trigger",
+                "at": r.get("created_at"),
+                "idempotency_key": r.get("idempotency_key"),
+                "triggered_by": r.get("triggered_by") or "dashboard",
+                "magnitude": r.get("magnitude"),
+                "recipients_total": r.get("recipients_total") or 0,
+                "ios_count": r.get("ios_count") or 0,
+                "android_count": r.get("android_count") or 0,
+                "delivered": bool(r.get("push_delivered")),
+                "error": r.get("push_error"),
+            })
+
+    # ---- Status change events ----
+    if kind in (None, "status"):
+        sq: dict = {}
+        if since:
+            sq["recorded_at"] = {"$gte": since}
+        rows = await db.status_events.find(sq, {"_id": 0}).sort("recorded_at", -1).to_list(limit)
+        for r in rows:
+            events.append({
+                "kind": "status",
+                "at": r.get("recorded_at") or r.get("updated_at"),
+                "device_id": r.get("device_id"),
+                "status": r.get("status"),
+                "severity": r.get("severity"),
+                "latitude": r.get("latitude"),
+                "longitude": r.get("longitude"),
+                "accuracy_m": r.get("accuracy_m"),
+                "battery_pct": r.get("battery_pct"),
+                "battery_state": r.get("battery_state"),
+                "platform": r.get("platform"),
+            })
+
+    # Merge and clip.
+    events.sort(key=lambda e: e.get("at") or "", reverse=True)
+    events = events[:limit]
+
+    return {
+        "count": len(events),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "events": events,
+    }
+
+
+@api_router.get("/admin/audit-log", response_class=HTMLResponse)
+async def audit_log_browser(
+    token: str = Query(default=""),
+    limit: int = Query(default=100, ge=1, le=500),
+):
+    """Browser-viewable version of /api/audit for quick inspection in Safari."""
+    if not ADMIN_TRIGGER_PASSWORD:
+        return HTMLResponse("<h2>Server error</h2>", status_code=500)
+    if token != ADMIN_TRIGGER_PASSWORD:
+        return HTMLResponse(
+            "<h2 style='color:#c21818'>Wrong password.</h2>"
+            "<p>Append <code>?token=&lt;password&gt;</code>.</p>",
+            status_code=401,
+        )
+    feed = await get_audit_log(limit=limit, since=None, kind=None)  # type: ignore[arg-type]
+
+    def sev_color(s: Optional[str]) -> str:
+        return {"red": "#C21818", "yellow": "#EA9500", "green": "#2E7D32"}.get(s or "", "#666")
+
+    def row_html(e: dict) -> str:
+        at = _html.escape(str(e.get("at") or ""))
+        if e.get("kind") == "trigger":
+            delivered = e.get("delivered")
+            badge = f'<span style="background:{"#1F8A3A" if delivered else "#C21818"};color:#fff;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700">{"delivered" if delivered else "FAILED"}</span>'
+            body = (
+                f'<b>TRIGGER</b> · magnitude {_html.escape(str(e.get("magnitude") or "?"))} · '
+                f'{e.get("recipients_total") or 0} devices (iOS: {e.get("ios_count") or 0}, Android: {e.get("android_count") or 0}) '
+                f'· by <code>{_html.escape(str(e.get("triggered_by") or ""))}</code>'
+            )
+            err = e.get("error")
+            error_html = f'<div style="color:#c21818;font-size:12px;margin-top:4px"><b>Error:</b> {_html.escape(str(err))}</div>' if err else ""
+            return f'<div class="row trigger">{badge}<div class="body">{body}{error_html}<div class="at">{at}</div></div></div>'
+        else:
+            sev = e.get("severity")
+            sev_badge = f'<span style="background:{sev_color(sev)};color:#fff;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700;margin-left:6px">{_html.escape(sev)}</span>' if sev else ""
+            loc = ""
+            if e.get("latitude") is not None and e.get("longitude") is not None:
+                loc = f' · <a href="https://www.google.com/maps/place/{e.get("latitude")},{e.get("longitude")}" target="_blank" rel="noopener">📍 map</a>'
+            bat = ""
+            if e.get("battery_pct") is not None:
+                bat = f' · 🔋 {_html.escape(str(e.get("battery_pct")))}%'
+            body = (
+                f'<b>STATUS</b> · <code>{_html.escape(str(e.get("device_id") or ""))}</code> → '
+                f'<b>{_html.escape(str(e.get("status") or ""))}</b>{sev_badge}{loc}{bat}'
+            )
+            return f'<div class="row status">{body}<div class="at">{at}</div></div>'
+
+    rows_html = "\n".join(row_html(e) for e in feed["events"]) or (
+        '<p style="color:#666">No events yet.</p>'
+    )
+    return HTMLResponse(f"""<!doctype html><html><head>
+<title>QuakeGuard — audit log</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<style>
+body{{font-family:-apple-system,Segoe UI,sans-serif;padding:20px;max-width:820px;margin:0 auto;background:#f4f4f7}}
+.card{{border:1px solid #ddd;border-radius:12px;padding:14px 16px;background:#fff;margin-bottom:14px}}
+h1{{font-size:20px;margin:0 0 6px}}
+.row{{background:#fff;border:1px solid #e6e6ea;border-left-width:4px;border-radius:8px;padding:10px 14px;margin-bottom:8px;display:flex;gap:10px;align-items:flex-start}}
+.row.trigger{{border-left-color:#c21818}}
+.row.status{{border-left-color:#4a90e2}}
+.row .body{{flex:1}}
+.row .at{{color:#888;font-size:11px;margin-top:4px;font-family:ui-monospace,Menlo,monospace}}
+code{{background:#f4f4f6;padding:1px 6px;border-radius:4px;font-size:12px;font-family:ui-monospace,Menlo,monospace}}
+</style></head><body>
+<div class="card">
+  <h1>Audit log · last {feed["count"]} event(s)</h1>
+  <p style="margin:0;color:#666;font-size:13px">Interleaved feed of dashboard triggers and device status changes. Most recent first.</p>
+</div>
+{rows_html}
+</body></html>""")
 
 # ---------- Push registration + fan-out ----------
 class RegisterPushBody(BaseModel):

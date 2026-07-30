@@ -1,5 +1,5 @@
 <!--
-  QuakeGuard — "Trigger Earthquake Alert" button snippet.
+  QuakeGuard — "Trigger Earthquake Alert" button + prominent feedback.
 
   HOW TO USE
   ----------
@@ -7,12 +7,23 @@
      dashboard where you want the emergency-personnel button to appear.
   2. Replace the value of QUAKEGUARD_BACKEND below with the deployed URL of
      the QuakeGuard FastAPI backend (visible under Emergent → Publish →
-     Deploy). It must end with /api/trigger-alert being reachable at that
-     origin — i.e. your backend base URL, without a trailing slash.
+     Deploy). It must be the backend base URL, without a trailing slash.
      Example: "https://quake-alert-18.emergent.host"
   3. The password prompt matches the ADMIN_TRIGGER_PASSWORD env var on the
      backend. Change the password by editing that env var (Deployment panel
      → Secrets tab) — no code changes needed here.
+
+  WHAT'S NEW (prominent feedback)
+  -------------------------------
+  Previously status was shown as a tiny 13px line under the button — easy to
+  miss under stress. Now:
+    • Wrong password → full-screen blocking modal, red, huge text, requires
+      an explicit "OK" click to dismiss. Impossible to miss.
+    • Successful trigger → full-width green banner at the top of the
+      viewport, 60px tall, slide-in animation, auto-dismisses after 6s
+      (with a manual close button).
+    • Server/network errors → same top banner in red, no auto-dismiss —
+      operator must acknowledge.
 
   SECURITY NOTES
   --------------
@@ -49,15 +60,110 @@
   #qg-trigger-btn:hover { transform: translateY(-1px); }
   #qg-trigger-btn:active { transform: translateY(0); opacity: .9; }
   #qg-trigger-btn[disabled] { opacity: .55; cursor: not-allowed; }
-  #qg-trigger-status {
-    display: block;
-    margin-top: 10px;
-    font-size: 13px;
-    min-height: 18px;
+
+  /* ─────────── Full-width top banner (success / network error) ─────────── */
+  #qg-banner {
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    min-height: 68px;
+    padding: 14px 22px;
+    z-index: 99998;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    font-size: 20px;
+    font-weight: 800;
+    letter-spacing: .3px;
+    color: #fff;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.25);
+    transform: translateY(-100%);
+    transition: transform .35s cubic-bezier(.2,.9,.3,1);
+    text-align: center;
   }
-  #qg-trigger-status.ok    { color: #1F8A3A; }
-  #qg-trigger-status.err   { color: #C21818; }
-  #qg-trigger-status.info  { color: #666; }
+  #qg-banner.show { transform: translateY(0); }
+  #qg-banner.ok  { background: #1F8A3A; }
+  #qg-banner.err { background: #C21818; }
+  #qg-banner .qg-banner-icon { font-size: 28px; line-height: 1; }
+  #qg-banner .qg-banner-close {
+    background: rgba(255,255,255,0.2);
+    color: #fff;
+    border: 0;
+    border-radius: 999px;
+    width: 32px; height: 32px;
+    font-size: 20px; font-weight: 900;
+    line-height: 1;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    margin-left: 12px;
+    padding: 0;
+  }
+  #qg-banner .qg-banner-close:hover { background: rgba(255,255,255,0.32); }
+
+  /* ─────────── Blocking modal (wrong password) ─────────── */
+  #qg-modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.72);
+    z-index: 99999;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+  }
+  #qg-modal-backdrop.show { display: flex; }
+  #qg-modal {
+    background: #fff;
+    border-radius: 16px;
+    padding: 32px 32px 24px;
+    max-width: 480px;
+    width: 100%;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.4);
+    border-top: 8px solid #C21818;
+    text-align: center;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  #qg-modal .qg-modal-icon {
+    font-size: 56px;
+    line-height: 1;
+    margin-bottom: 12px;
+  }
+  #qg-modal .qg-modal-title {
+    font-size: 26px;
+    font-weight: 900;
+    color: #C21818;
+    margin-bottom: 8px;
+    letter-spacing: .3px;
+  }
+  #qg-modal .qg-modal-body {
+    font-size: 17px;
+    color: #333;
+    line-height: 1.45;
+    margin-bottom: 22px;
+  }
+  #qg-modal .qg-modal-ok {
+    background: #C21818;
+    color: #fff;
+    border: 0;
+    border-radius: 10px;
+    padding: 14px 40px;
+    font-size: 16px;
+    font-weight: 800;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    cursor: pointer;
+    min-width: 140px;
+  }
+  #qg-modal .qg-modal-ok:hover { background: #A11313; }
+
+  /* Small screens */
+  @media (max-width: 520px) {
+    #qg-banner { font-size: 16px; padding: 12px 16px; }
+    #qg-modal .qg-modal-title { font-size: 22px; }
+    #qg-modal .qg-modal-body { font-size: 15px; }
+  }
 </style>
 
 <div id="qg-trigger-wrap">
@@ -65,7 +171,26 @@
     <span aria-hidden="true">⚠️</span>
     Trigger Earthquake Alert
   </button>
-  <span id="qg-trigger-status" role="status" aria-live="polite"></span>
+</div>
+
+<!-- Fixed top banner (success / network error) -->
+<div id="qg-banner" role="status" aria-live="assertive">
+  <span class="qg-banner-icon" aria-hidden="true">✓</span>
+  <span class="qg-banner-text">Ready.</span>
+  <button class="qg-banner-close" type="button" aria-label="Dismiss">×</button>
+</div>
+
+<!-- Blocking modal (wrong password) -->
+<div id="qg-modal-backdrop" role="alertdialog" aria-modal="true" aria-labelledby="qg-modal-title">
+  <div id="qg-modal">
+    <div class="qg-modal-icon" aria-hidden="true">🔒</div>
+    <div class="qg-modal-title" id="qg-modal-title">Wrong password</div>
+    <div class="qg-modal-body">
+      The password you entered doesn&rsquo;t match. No alert was sent. Try
+      again or contact whoever manages the deployment.
+    </div>
+    <button class="qg-modal-ok" type="button">OK</button>
+  </div>
 </div>
 
 <script>
@@ -74,14 +199,49 @@
   var QUAKEGUARD_BACKEND = "https://quake-alert-18.emergent.host"; // no trailing /
   // ========================================================================
 
-  var btn    = document.getElementById("qg-trigger-btn");
-  var status = document.getElementById("qg-trigger-status");
-  if (!btn || !status) return;
+  var btn        = document.getElementById("qg-trigger-btn");
+  var banner     = document.getElementById("qg-banner");
+  var bannerText = banner && banner.querySelector(".qg-banner-text");
+  var bannerIcon = banner && banner.querySelector(".qg-banner-icon");
+  var bannerX    = banner && banner.querySelector(".qg-banner-close");
+  var modal      = document.getElementById("qg-modal-backdrop");
+  var modalOk    = modal && modal.querySelector(".qg-modal-ok");
+  if (!btn || !banner || !modal) return;
 
-  function setStatus(msg, kind) {
-    status.textContent = msg || "";
-    status.className = kind || "";
+  var bannerTimer = null;
+
+  function showBanner(kind, text, autoDismissMs) {
+    if (bannerTimer) { clearTimeout(bannerTimer); bannerTimer = null; }
+    banner.classList.remove("ok", "err");
+    banner.classList.add(kind);
+    bannerIcon.textContent = kind === "ok" ? "✓" : "!";
+    bannerText.textContent = text;
+    // Force layout so the transition fires reliably on re-shows.
+    void banner.offsetWidth;
+    banner.classList.add("show");
+    if (autoDismissMs && autoDismissMs > 0) {
+      bannerTimer = setTimeout(hideBanner, autoDismissMs);
+    }
   }
+  function hideBanner() {
+    banner.classList.remove("show");
+    if (bannerTimer) { clearTimeout(bannerTimer); bannerTimer = null; }
+  }
+  bannerX.addEventListener("click", hideBanner);
+
+  function showWrongPasswordModal() {
+    modal.classList.add("show");
+    setTimeout(function () { modalOk && modalOk.focus(); }, 50);
+  }
+  function hideModal() { modal.classList.remove("show"); }
+  modalOk.addEventListener("click", hideModal);
+  modal.addEventListener("click", function (e) {
+    // Click outside inner modal dismisses too.
+    if (e.target === modal) hideModal();
+  });
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape" && modal.classList.contains("show")) hideModal();
+  });
 
   btn.addEventListener("click", async function () {
     var confirmed = window.confirm(
@@ -93,10 +253,10 @@
     if (!confirmed) return;
 
     var pwd = window.prompt("Enter emergency personnel password:");
-    if (!pwd) { setStatus("Cancelled.", "info"); return; }
+    if (!pwd) { showBanner("err", "Cancelled — no alert sent.", 4000); return; }
 
     btn.disabled = true;
-    setStatus("Broadcasting…", "info");
+    showBanner("ok", "Broadcasting alert…", 0);
 
     try {
       var res = await fetch(QUAKEGUARD_BACKEND + "/api/trigger-alert", {
@@ -114,25 +274,23 @@
       });
 
       if (res.status === 401) {
-        setStatus("Wrong password. Alert not sent.", "err");
+        hideBanner();
+        showWrongPasswordModal();
         return;
       }
       if (!res.ok) {
-        setStatus("Server error (" + res.status + "). Alert not sent.", "err");
+        showBanner("err", "Server error (" + res.status + "). Alert NOT sent.");
         return;
       }
       var data = await res.json();
-      var n = (data && typeof data.recipients === "number") ? data.recipients : "?";
+      var n = (data && typeof data.recipients === "number") ? data.recipients : 0;
       var delivered = data && data.push_delivered;
-      setStatus(
-        "Alert broadcast to " + n + " device" + (n === 1 ? "" : "s") +
-        (delivered === false
-          ? " (push queued — check EMERGENT_PUSH_KEY on the backend if this persists)."
-          : "."),
-        "ok"
-      );
+      var text =
+        "ALERT BROADCAST — " + n + " device" + (n === 1 ? "" : "s") +
+        (delivered === false ? " (delivery issue — check /api/admin/last-push-events)" : "");
+      showBanner(delivered === false ? "err" : "ok", text, delivered === false ? 0 : 6000);
     } catch (e) {
-      setStatus("Network error: " + (e && e.message ? e.message : e), "err");
+      showBanner("err", "Network error: " + (e && e.message ? e.message : e));
     } finally {
       btn.disabled = false;
     }
