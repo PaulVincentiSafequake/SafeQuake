@@ -198,11 +198,22 @@ def _fingerprint(token: str) -> str:
 
 
 def _build_critical_payload(title: str, body: str, action_url: str) -> dict:
-    """APNs payload for a true iOS Critical Alert."""
+    """APNs payload for a true iOS Critical Alert.
+
+    IMPORTANT: `sound.name` must reference a file actually bundled inside the
+    iOS app's `Library/Sounds/` directory — one of `.caf`, `.aiff`, or `.wav`,
+    ≤ 30 seconds. Using `"default"` inside a `critical: 1` dict is
+    inconsistently honoured by iOS: the push is accepted (APNs returns 200)
+    but is often silently downgraded to a regular alert (no screen wake, no
+    override of silent/DND/Focus). We bundle `siren.caf` via the
+    expo-notifications plugin `sounds` array in app.json — Expo copies it
+    into `Library/Sounds/` at build time, so `name: "siren.caf"` resolves
+    on device and iOS honours the critical-alert semantics.
+    """
     return {
         "aps": {
             "alert": {"title": title, "body": body},
-            "sound": {"critical": 1, "name": "default", "volume": 1.0},
+            "sound": {"critical": 1, "name": "siren.caf", "volume": 1.0},
             "interruption-level": "critical",
             "relevance-score": 1,
         },
