@@ -12,12 +12,24 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Stack, useRouter } from "expo-router";
 import * as Notifications from "expo-notifications";
+import {
+  useAudioPlayer,
+  useAudioPlayerStatus,
+  setAudioModeAsync,
+} from "expo-audio";
 
 import {
   registerForPushNotifications,
   getDiagInfo,
   type DiagInfo,
 } from "@/src/utils/push";
+
+// Local siren assets — used only to verify that the audio files are correctly
+// bundled inside the native IPA/APK. `siren.caf` is the file APNs references
+// for iOS Critical Alerts; if it doesn't play here, the push payload won't
+// find it either.
+const SIREN_CAF = require("../assets/audio/siren.caf");
+const SIREN_MP3 = require("../assets/audio/siren.mp3");
 
 interface PermStatus {
   status: string;
@@ -40,6 +52,74 @@ export default function DiagScreen() {
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
 
+  // Test-siren players. We keep two independent players so the user can
+  // validate BOTH bundled audio assets (the .caf used by APNs Critical
+  // Alerts and the .mp3 used by the in-app looping siren).
+  const cafPlayer = useAudioPlayer(SIREN_CAF);
+  const cafStatus = useAudioPlayerStatus(cafPlayer);
+  const mp3Player = useAudioPlayer(SIREN_MP3);
+  const mp3Status = useAudioPlayerStatus(mp3Player);
+
+  const cafPlaying = !!cafStatus?.playing;
+  const mp3Playing = !!mp3Status?.playing;
+
+  const stopBothSirens = useCallback(() => {
+    try {
+      cafPlayer.pause();
+      cafPlayer.seekTo(0);
+    } catch {}
+    try {
+      mp3Player.pause();
+      mp3Player.seekTo(0);
+    } catch {}
+  }, [cafPlayer, mp3Player]);
+
+  const playCaf = useCallback(async () => {
+    try {
+      // Route audio through the loud ringer path even in silent mode so this
+      // test faithfully mirrors what the user would hear on a real alert.
+      await setAudioModeAsync({
+        playsInSilentMode: true,
+        shouldPlayInBackground: false,
+        interruptionMode: "doNotMix",
+      });
+    } catch {}
+    try {
+      mp3Player.pause();
+    } catch {}
+    try {
+      cafPlayer.loop = false;
+      cafPlayer.volume = 1.0;
+      cafPlayer.seekTo(0);
+      cafPlayer.play();
+      setMsg("Playing siren.caf — if you hear this, the .caf is bundled.");
+    } catch (e) {
+      setMsg(`siren.caf failed: ${(e as Error)?.message ?? "unknown"}`);
+    }
+  }, [cafPlayer, mp3Player]);
+
+  const playMp3 = useCallback(async () => {
+    try {
+      await setAudioModeAsync({
+        playsInSilentMode: true,
+        shouldPlayInBackground: false,
+        interruptionMode: "doNotMix",
+      });
+    } catch {}
+    try {
+      cafPlayer.pause();
+    } catch {}
+    try {
+      mp3Player.loop = false;
+      mp3Player.volume = 1.0;
+      mp3Player.seekTo(0);
+      mp3Player.play();
+      setMsg("Playing siren.mp3 — in-app siren asset.");
+    } catch (e) {
+      setMsg(`siren.mp3 failed: ${(e as Error)?.message ?? "unknown"}`);
+    }
+  }, [cafPlayer, mp3Player]);
+
   const load = useCallback(async () => {
     const [i, p] = await Promise.all([
       getDiagInfo(),
@@ -57,6 +137,13 @@ export default function DiagScreen() {
   useEffect(() => {
     load();
   }, [load]);
+
+  // Ensure sirens don't keep looping if the user navigates away.
+  useEffect(() => {
+    return () => {
+      stopBothSirens();
+    };
+  }, [stopBothSirens]);
 
   const onReRegister = useCallback(async () => {
     setBusy("registering");
@@ -170,6 +257,45 @@ export default function DiagScreen() {
           <Row label="last at" value={info?.last_registered_at ?? "never"} />
           <Row label="last status" value={info?.last_register_status ?? "—"} />
         </Section>
+
+        <Section title="Test siren (local playback)">
+          <Row
+            label="siren.caf"
+            value={cafStatus?.isLoaded ? (cafPlaying ? "playing" : "loaded") : "not loaded"}
+            valueColor={cafStatus?.isLoaded ? "#1F8A3A" : "#c21818"}
+          />
+          <Row
+            label="siren.mp3"
+            value={mp3Status?.isLoaded ? (mp3Playing ? "playing" : "loaded") : "not loaded"}
+            valueColor={mp3Status?.isLoaded ? "#1F8A3A" : "#c21818"}
+          />
+          <Row
+            label="hint"
+            value="Plays locally to verify assets are bundled in the IPA."
+            hint
+          />
+        </Section>
+
+        <View style={styles.testRow}>
+          <TouchableOpacity
+            style={[styles.testBtn, styles.testBtnCaf, cafPlaying && styles.testBtnActive]}
+            onPress={cafPlaying ? stopBothSirens : playCaf}
+            activeOpacity={0.85}
+          >
+            <Text style={styles.testBtnText}>
+              {cafPlaying ? "Stop .caf" : "Play siren.caf"}
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.testBtn, styles.testBtnMp3, mp3Playing && styles.testBtnActive]}
+            onPress={mp3Playing ? stopBothSirens : playMp3}
+            activeOpacity={0.85}
+          >
+            <Text style={styles.testBtnText}>
+              {mp3Playing ? "Stop .mp3" : "Play siren.mp3"}
+            </Text>
+          </TouchableOpacity>
+        </View>
 
         {msg ? (
           <View style={styles.msg}>
@@ -310,6 +436,31 @@ const styles = StyleSheet.create({
     marginBottom: 12,
   },
   msgText: { color: "#a5d6a7", fontSize: 13 },
+  testRow: {
+    flexDirection: "row",
+    gap: 10,
+    marginBottom: 12,
+  },
+  testBtn: {
+    flex: 1,
+    borderRadius: 12,
+    paddingVertical: 14,
+    alignItems: "center",
+    borderWidth: 1,
+  },
+  testBtnCaf: {
+    backgroundColor: "#3a1a1a",
+    borderColor: "#c21818",
+  },
+  testBtnMp3: {
+    backgroundColor: "#1a2a3a",
+    borderColor: "#2f6feb",
+  },
+  testBtnActive: {
+    backgroundColor: "#c21818",
+    borderColor: "#ff5555",
+  },
+  testBtnText: { color: "#fff", fontSize: 14, fontWeight: "700" },
   btn: {
     backgroundColor: "#c21818",
     borderRadius: 12,

@@ -5,6 +5,15 @@ const { FileStore } = require('metro-cache');
 
 const config = getDefaultConfig(__dirname);
 
+// Register .caf (Apple Core Audio Format) as a bundleable asset so
+// require("./siren.caf") resolves from JS. This is the same file that
+// APNs Critical Alerts play from the native Library/Sounds/ directory.
+if (config.resolver && Array.isArray(config.resolver.assetExts)) {
+  if (!config.resolver.assetExts.includes("caf")) {
+    config.resolver.assetExts.push("caf");
+  }
+}
+
 // Use a stable on-disk store (shared across web/android)
 const root = process.env.METRO_CACHE_ROOT || path.join(__dirname, '.metro-cache');
 config.cacheStores = [
