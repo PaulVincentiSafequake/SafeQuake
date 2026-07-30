@@ -992,6 +992,84 @@ button{{background:#c21818;color:#fff;border:0;padding:10px 20px;border-radius:8
 </body></html>""")
 
 
+# ---------- Routing pre-flight (which push path would this device take?) ----------
+@api_router.get("/admin/route-check")
+async def route_check(
+    user_id: str = Query(..., description="user_id of the device to inspect"),
+    token: str = Query(default=""),
+    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
+):
+    """Show which push delivery path a given device would take on the next
+    /api/trigger-alert call. Does not send anything. Answers the question:
+    'Was the last silent-no-CRITICAL-badge because we fell back to SuprSend?'
+    """
+    if not ADMIN_TRIGGER_PASSWORD:
+        raise HTTPException(500, "ADMIN_TRIGGER_PASSWORD not configured")
+    if (x_admin_token or token) != ADMIN_TRIGGER_PASSWORD:
+        raise HTTPException(401, "Invalid admin token")
+
+    target = user_id.strip()
+    device = await db.push_devices.find_one({"user_id": target}, {"_id": 0})
+    if not device:
+        raise HTTPException(404, f"No device row for user_id={target}")
+
+    platform = (device.get("platform") or "").lower()
+    device_token = device.get("device_token") or ""
+    token_len = len(device_token)
+
+    apns_status = await apns_config_status(db)
+
+    # Replicate the exact filter used in /api/trigger-alert.
+    would_take_apns = platform == "ios" and bool(device_token)
+    would_take_suprsend = platform != "ios"
+    would_be_dropped = not would_take_apns and not would_take_suprsend
+
+    if would_take_apns and not apns_status.get("configured"):
+        expected_outcome = (
+            "APNs config MISSING → send_critical_alerts returns a stub event "
+            "with reason APNS_NOT_CONFIGURED; device gets NOTHING."
+        )
+    elif would_take_apns:
+        expected_outcome = (
+            "Direct APNs (Critical Alert payload). Screen wakes, CRITICAL "
+            "badge shown, plays over silent — provided the device token is a "
+            "real production APNs token."
+        )
+    elif would_take_suprsend:
+        expected_outcome = (
+            "SuprSend relay → regular push. No CRITICAL badge, no screen "
+            "wake, respects silent/DND/Focus."
+        )
+    else:
+        expected_outcome = (
+            "DROPPED. Device is marked platform=ios but has no device_token "
+            "in the DB — falls through both filters. Re-register from the "
+            "Diagnostics screen in the app to fix."
+        )
+
+    return {
+        "user_id": target,
+        "platform_in_db": device.get("platform"),
+        "device_token_length": token_len,
+        "device_token_fingerprint": (
+            f"{device_token[:8]}…{device_token[-8:]}" if token_len > 16 else device_token
+        ),
+        "routing": {
+            "would_take_apns_critical": would_take_apns,
+            "would_take_suprsend": would_take_suprsend,
+            "would_be_dropped": would_be_dropped,
+        },
+        "apns_configured": apns_status.get("configured", False),
+        "apns_metadata": {
+            "key_id": apns_status.get("key_id"),
+            "team_id": apns_status.get("team_id"),
+            "bundle_id": apns_status.get("bundle_id"),
+            "updated_at": apns_status.get("updated_at"),
+        },
+        "expected_outcome": expected_outcome,
+    }
+
+
 # ---------- APNs auth key status (read-only) ----------
 # NOTE: The one-time upload endpoints (GET /admin/apns-key form + POST
 # /admin/apns-key) have been removed after the key was successfully
