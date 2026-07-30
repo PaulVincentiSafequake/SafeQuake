@@ -32,4 +32,214 @@
   }
   header h1 { font-size: 18px; margin: 0; font-weight: 600; }
   header p { margin: 2px 0 0; font-size: 12px; color: #b7c2cc; }
-  .layout { display: flex; height: calc(100vh - 60px);
+  .layout { display: flex; height: calc(100vh - 60px); flex-wrap: wrap; }
+  #map-wrap { position: relative; flex: 1 1 60%; min-height: 400px; }
+  #map { position: absolute; inset: 0; }
+  .map-filters {
+    position: absolute;
+    top: 12px;
+    left: 12px;
+    z-index: 1000;
+    display: flex;
+    gap: 6px;
+    background: rgba(255,255,255,0.95);
+    padding: 6px;
+    border-radius: 10px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.18);
+  }
+  .map-filter-btn {
+    border: none;
+    background: transparent;
+    padding: 6px 10px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+    color: #333;
+  }
+  .map-filter-btn:hover { background: rgba(0,0,0,0.06); }
+  .map-filter-btn.active { background: #1c2b36; color: #fff; }
+  .sidebar {
+    flex: 1 1 320px;
+    max-width: 380px;
+    background: #fff;
+    padding: 16px;
+    overflow-y: auto;
+    border-left: 1px solid #e0e0e0;
+  }
+  .stat-row { display: flex; gap: 10px; margin-bottom: 16px; flex-wrap: wrap; }
+  .stat {
+    flex: 1 1 calc(50% - 5px);
+    background: var(--bg);
+    border-radius: 8px;
+    padding: 10px;
+    text-align: center;
+  }
+  .stat .num { font-size: 22px; font-weight: 700; }
+  .stat.safe .num { color: var(--safe); }
+  .stat.trapped .num { color: var(--trapped); }
+  .stat.waiting .num { color: var(--waiting); }
+  .stat.danger .num { color: var(--danger); }
+  .stat .label { font-size: 11px; color: #666; text-transform: uppercase; }
+
+  .triage-group {
+    margin-bottom: 10px;
+    border-radius: 8px;
+    overflow: hidden;
+    border: 1px solid #e0e0e0;
+  }
+  .triage-group summary {
+    cursor: pointer;
+    padding: 8px 10px;
+    font-weight: 700;
+    font-size: 12.5px;
+    list-style: none;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .triage-group summary::-webkit-details-marker { display: none; }
+  .triage-group.group-red summary { background: #fdecea; color: #b71c1c; }
+  .triage-group.group-yellow summary { background: #fff8e1; color: #8a6100; }
+  .triage-group.group-green summary { background: #e8f5e9; color: #1b5e20; }
+  .triage-group.group-other summary { background: #f4f5f7; color: #555; }
+  .group-count {
+    background: rgba(0,0,0,0.08);
+    border-radius: 10px;
+    padding: 1px 8px;
+    font-size: 11px;
+  }
+  .triage-group ul.userlist { padding: 8px; margin: 0; }
+  .triage-group li.empty {
+    color: #999;
+    font-style: italic;
+    border-left: none;
+    background: transparent;
+    padding: 4px 2px;
+    margin-bottom: 0;
+  }
+
+  ul.userlist { list-style: none; padding: 0; margin: 0; }
+  ul.userlist li {
+    padding: 10px;
+    border-radius: 8px;
+    margin-bottom: 8px;
+    border-left: 4px solid #ccc;
+    background: var(--bg);
+    font-size: 13px;
+  }
+  li.safe { border-color: var(--safe); }
+  li.trapped-red { border-color: var(--trapped); background: #fdecea; }
+  li.trapped-yellow { border-color: var(--waiting); }
+  li.trapped-green { border-color: var(--safe); }
+  li.waiting { border-color: var(--waiting); }
+  li.danger { border-color: var(--danger); }
+  li .id { font-weight: 700; }
+  li .meta { color: #666; margin-top: 2px; }
+  .badge {
+    display: inline-block;
+    padding: 1px 7px;
+    border-radius: 10px;
+    font-size: 10px;
+    font-weight: 700;
+    color: #fff;
+    margin-left: 6px;
+  }
+  .badge.bt { background: #455a64; }
+  .badge.sos { background: #c62828; }
+  .sos-label {
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    color: #c62828;
+    font-weight: 800;
+    font-size: 11px;
+    text-shadow: 0 0 3px #fff, 0 0 3px #fff, 0 0 3px #fff;
+  }
+  button.demo {
+    background: #1c2b36;
+    color: #fff;
+    border: none;
+    padding: 8px 14px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 12px;
+  }
+</style>
+<style>
+  #qg-trigger-wrap {
+    display: inline-block;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  #qg-trigger-btn {
+    background: #FF3B30;
+    color: #fff;
+    font-size: 15px;
+    font-weight: 800;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    border: none;
+    border-radius: 12px;
+    padding: 14px 22px;
+    cursor: pointer;
+    box-shadow: 0 6px 22px rgba(255, 59, 48, 0.35);
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    transition: transform .08s ease, opacity .15s ease;
+  }
+  #qg-trigger-btn:hover  { transform: translateY(-1px); }
+  #qg-trigger-btn:active { transform: translateY(0); opacity: .9; }
+  #qg-trigger-btn[disabled] { opacity: .55; cursor: not-allowed; }
+  #qg-trigger-status {
+    display: block;
+    margin-top: 10px;
+    font-size: 13px;
+    min-height: 18px;
+  }
+  #qg-trigger-status.ok   { color: #1F8A3A; }
+  #qg-trigger-status.err  { color: #C21818; }
+  #qg-trigger-status.info { color: #666;    }
+</style>
+</head>
+<body>
+<div id="qg-trigger-wrap">
+  <button id="qg-trigger-btn" type="button" aria-label="Trigger earthquake alert">
+    <span aria-hidden="true">⚠️</span>
+    Trigger Earthquake Alert
+  </button>
+  <span id="qg-trigger-status" role="status" aria-live="polite"></span>
+</div>
+<header>
+  <div>
+    <h1>Earthquake Safety — Emergency Response Dashboard (PILOT / DEMO)</h1>
+    <p>Live device data. Refreshes every 4 seconds.</p>
+  </div>
+  <button class="demo" onclick="seedDemoData()">Load demo test users</button>
+</header>
+
+<div class="layout">
+  <div id="map-wrap">
+    <div class="map-filters">
+      <button class="map-filter-btn active" data-filter="all" onclick="setFilter('all')">All</button>
+      <button class="map-filter-btn" data-filter="red" onclick="setFilter('red')">🔴 Immediate</button>
+      <button class="map-filter-btn" data-filter="yellow" onclick="setFilter('yellow')">🟡 Serious/Stable</button>
+      <button class="map-filter-btn" data-filter="green" onclick="setFilter('green')">🟢 Minor</button>
+    </div>
+    <div id="map"></div>
+  </div>
+  <div class="sidebar">
+    <div class="stat-row">
+      <div class="stat safe"><div class="num" id="count-safe">0</div><div class="label">Safe</div></div>
+      <div class="stat trapped"><div class="num" id="count-trapped">0</div><div class="label">Trapped</div></div>
+      <div class="stat waiting"><div class="num" id="count-waiting">0</div><div class="label">Unknown</div></div>
+      <div class="stat danger"><div class="num" id="count-danger">0</div><div class="label">Not Responding</div></div>
+    </div>
+    <div class="triage-groups" id="userlist"></div>
+  </div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="dashboard.js"></script>
+</body>
+</html>vh - 60px);
