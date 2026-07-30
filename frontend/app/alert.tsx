@@ -543,7 +543,7 @@ export default function AlertScreen() {
               <TriageOption
                 color="#EA9500"
                 label="I&apos;m hurt but stable, waiting for help"
-                sublabel="Delayed · not immediately life-threatening"
+                sublabel="Serious — Stable · not immediately life-threatening"
                 icon="medkit"
                 onPress={() => chooseTriage("yellow")}
                 testID="triage-yellow"
@@ -855,9 +855,9 @@ const styles = StyleSheet.create({
   },
   trappedToastText: {
     color: "#fff",
-    fontSize: 22,
+    fontSize: 26,
     fontWeight: "800",
-    lineHeight: 28,
+    lineHeight: 33,
     flex: 1,
   },
 
@@ -914,15 +914,15 @@ const styles = StyleSheet.create({
   },
   triageOptionLabel: {
     color: "#fff",
-    fontSize: 17,
+    fontSize: 20,
     fontWeight: "800",
-    lineHeight: 22,
+    lineHeight: 26,
   },
   triageOptionSublabel: {
-    color: "rgba(255,255,255,0.88)",
-    fontSize: 14,
-    marginTop: 3,
-    lineHeight: 18,
+    color: "rgba(255,255,255,0.92)",
+    fontSize: 18,
+    marginTop: 4,
+    lineHeight: 24,
   },
   triageCancel: {
     alignItems: "center",
