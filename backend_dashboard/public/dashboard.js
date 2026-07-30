@@ -1,7 +1,8 @@
 /**
  * Dashboard logic. Polls the real QuakeGuard backend every 4 seconds.
  * Shows live device status grouped by triage priority: Immediate (red),
- * Delayed (yellow), Minor (green), and Other (safe / not responding / unknown).
+ * Serious/Stable (yellow), Minor (green), and Other (safe / not responding / unknown).
+ * The map can show all groups at once, or be filtered to one group at a time.
  */
 
 const DEVICES_ENDPOINT = "https://quake-alert-18.emergent.host/api/devices";
@@ -12,6 +13,8 @@ L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
 }).addTo(map);
 
 const markers = new Map();
+let lastUsers = [];
+let currentFilter = "all"; // "all" | "red" | "yellow" | "green"
 
 function colorFor(status, severity) {
   if (status === "trapped") {
@@ -27,7 +30,7 @@ function colorFor(status, severity) {
 function statusLabel(status, severity) {
   if (status === "trapped") {
     if (severity === "red") return "TRAPPED — IMMEDIATE";
-    if (severity === "yellow") return "Trapped — Delayed";
+    if (severity === "yellow") return "Trapped — Serious/Stable";
     if (severity === "green") return "Trapped — Minor";
     return "Trapped";
   }
@@ -69,7 +72,9 @@ async function refresh() {
     const res = await fetch(DEVICES_ENDPOINT);
     const data = await res.json();
     const users = (data.devices || []).map(normalizeDevice);
+    lastUsers = users;
     renderMap(users);
+    applyFilterVisibility();
     renderSidebar(users);
   } catch (e) {
     console.error("Failed to refresh dashboard:", e);
@@ -118,6 +123,32 @@ function renderMap(users) {
     }
   }
 }
+
+function matchesFilter(u) {
+  if (currentFilter === "all") return true;
+  if (u.status !== "trapped") return false;
+  const sev = u.severity || "green";
+  return sev === currentFilter;
+}
+
+function applyFilterVisibility() {
+  lastUsers.forEach((u) => {
+    const m = markers.get(u.deviceId);
+    if (!m) return;
+    const show = matchesFilter(u);
+    if (show && !map.hasLayer(m)) map.addLayer(m);
+    if (!show && map.hasLayer(m)) map.removeLayer(m);
+  });
+}
+
+function setFilter(f) {
+  currentFilter = f;
+  applyFilterVisibility();
+  document.querySelectorAll(".map-filter-btn").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.filter === currentFilter);
+  });
+}
+window.setFilter = setFilter;
 
 function popupHtml(u) {
   return `<b>${u.deviceId}</b><br>${statusLabel(u.status, u.severity)}<br>Battery: ${u.batteryPercent ?? "?"}%`;
@@ -173,7 +204,7 @@ function renderSidebar(users) {
   const other = users.filter((u) => u.status !== "trapped").sort(byRecency);
 
   container.appendChild(buildGroup("🔴 IMMEDIATE — seriously injured / can't move", "group-red", red, true));
-  container.appendChild(buildGroup("🟡 DELAYED — hurt but stable", "group-yellow", yellow, true));
+  container.appendChild(buildGroup("🟡 SERIOUS — STABLE — hurt but stable", "group-yellow", yellow, true));
   container.appendChild(buildGroup("🟢 MINOR — walking wounded", "group-green", green, true));
   container.appendChild(buildGroup("⚪ Other — Safe / Not Responding / Unknown", "group-other", other, false));
 
