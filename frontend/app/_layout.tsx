@@ -6,9 +6,12 @@ import { setAudioModeAsync } from "expo-audio";
 import { useEffect } from "react";
 import { LogBox, Platform } from "react-native";
 import { SafeAreaProvider } from "react-native-safe-area-context";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 
 import { useIconFonts } from "@/src/hooks/use-icon-fonts";
 import { registerForPushNotifications } from "@/src/utils/push";
+
+const ONBOARDING_DONE_KEY = "quakeguard_onboarding_done";
 
 // Disable logbox errors etc so that users can see the app
 // and agent works as expected.
@@ -70,13 +73,40 @@ export default function RootLayout() {
     }
   }, [loaded, error]);
 
-  // Register push token on cold start (retries on every app open)
+  // Register push token on cold start (retries on every app open).
+  //
+  // On iOS we gate the FIRST-EVER permission prompt behind an /onboarding
+  // screen so the user sees the Apple Watch caveat right next to the ask.
+  // On every subsequent launch (or on Android) we register silently.
   useEffect(() => {
     if (Platform.OS === "web") return;
-    registerForPushNotifications().catch((e) =>
-      console.log("[QuakeGuard] push register error:", e?.message),
-    );
-  }, []);
+
+    (async () => {
+      if (Platform.OS === "ios") {
+        try {
+          const done = await AsyncStorage.getItem(ONBOARDING_DONE_KEY);
+          if (!done) {
+            const perm = await Notifications.getPermissionsAsync();
+            // Only intercept if we still have a chance to prompt. If the
+            // user already granted (upgrading from an older build) or
+            // already denied permanently, just mark onboarding done and
+            // continue silently — the note lives on /diag for reference.
+            if (!perm.granted && perm.canAskAgain) {
+              router.replace("/onboarding");
+              return;
+            }
+            await AsyncStorage.setItem(ONBOARDING_DONE_KEY, "1");
+          }
+        } catch (e) {
+          console.log("[QuakeGuard] onboarding gate err:", (e as Error)?.message);
+        }
+      }
+
+      registerForPushNotifications().catch((e) =>
+        console.log("[QuakeGuard] push register error:", e?.message),
+      );
+    })();
+  }, [router]);
 
   // Handle notification taps → open /alert
   useEffect(() => {

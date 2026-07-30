@@ -23,6 +23,7 @@ import {
   getDiagInfo,
   type DiagInfo,
 } from "@/src/utils/push";
+import { AppleWatchNote } from "@/src/components/AppleWatchNote";
 
 // Local siren assets — used only to verify that the audio files are correctly
 // bundled inside the native IPA/APK. `siren.caf` is the file APNs references
@@ -257,6 +258,13 @@ export default function DiagScreen() {
           <Row label="last at" value={info?.last_registered_at ?? "never"} />
           <Row label="last status" value={info?.last_register_status ?? "—"} />
         </Section>
+
+        {Platform.OS !== "android" ? (
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>Apple Watch behavior</Text>
+            <AppleWatchNote variant="compact" />
+          </View>
+        ) : null}
 
         <Section title="Test siren (local playback)">
           <Row
