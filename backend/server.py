@@ -409,10 +409,11 @@ async def trigger_alert(
     push_error: Optional[str] = None
     events: List[dict] = []      # Android/SuprSend chunk events
     apns_events: List[dict] = [] # iOS per-recipient APNs events
+    apns_payload: Optional[dict] = None  # exact JSON POSTed to Apple
 
     # ---- iOS: direct APNs with true critical-alert payload ----
     try:
-        apns_events = await send_critical_alerts(
+        apns_result = await send_critical_alerts(
             db=db,
             devices=ios_devices,
             title=title,
@@ -420,6 +421,8 @@ async def trigger_alert(
             action_url="/alert",
             idempotency_key=idem,
         )
+        apns_events = apns_result.get("events", []) or []
+        apns_payload = apns_result.get("payload")
     except Exception as e:
         push_error = f"APNs pipeline: {e}"
         logging.warning(push_error)
@@ -475,8 +478,9 @@ async def trigger_alert(
             "android_count": len(android_recipients),
             "push_delivered": push_delivered,
             "push_error": push_error,
-            "chunks": events,             # legacy field (Android)
-            "apns_events": apns_events,   # new: per-recipient iOS results
+            "chunks": events,               # legacy field (Android)
+            "apns_events": apns_events,     # per-recipient iOS results
+            "apns_payload": apns_payload,   # exact JSON body POSTed to Apple
         })
     except Exception as e:
         logging.warning(f"Failed to persist push_events: {e}")
@@ -491,6 +495,7 @@ async def trigger_alert(
         "idempotency_key": idem,
         "chunks": events,
         "apns_events": apns_events,
+        "apns_payload": apns_payload,
     }
 
 # ---------- Maintenance: purge leftover test / diagnostic rows ----------
@@ -646,6 +651,41 @@ async def last_push_events_browser(
 </tr>"""
         apns_block = ""
         if apns_rows:
+            # Render the exact JSON payload that was POSTed to Apple's APNs.
+            # This lets us verify sound.name / interruption-level / critical
+            # were actually set at wire time, not just intended in code.
+            payload = ev.get("apns_payload")
+            payload_html = ""
+            if payload:
+                payload_pretty = _html.escape(_json.dumps(payload, indent=2))
+                aps = payload.get("aps") if isinstance(payload, dict) else None
+                sound = aps.get("sound") if isinstance(aps, dict) else None
+                is_critical_sound = (
+                    isinstance(sound, dict) and sound.get("critical") == 1
+                )
+                interruption = aps.get("interruption-level") if isinstance(aps, dict) else None
+                sound_name = sound.get("name") if isinstance(sound, dict) else None
+                summary_color = (
+                    "#1F8A3A"
+                    if is_critical_sound
+                    and interruption == "critical"
+                    and sound_name
+                    and sound_name != "default"
+                    else "#C21818"
+                )
+                payload_html = f"""
+<div style="margin-top:10px">
+  <div style="font-size:12px;color:#666;font-weight:700;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">APNs request payload</div>
+  <div style="display:flex;gap:8px;flex-wrap:wrap;font-size:12px;margin-bottom:6px">
+    <span style="background:{summary_color};color:#fff;padding:2px 8px;border-radius:999px;font-weight:700">sound.critical: {_html.escape(str(sound.get('critical') if isinstance(sound, dict) else '—'))}</span>
+    <span style="background:{summary_color};color:#fff;padding:2px 8px;border-radius:999px;font-weight:700">sound.name: {_html.escape(str(sound_name or '—'))}</span>
+    <span style="background:{summary_color};color:#fff;padding:2px 8px;border-radius:999px;font-weight:700">interruption-level: {_html.escape(str(interruption or '—'))}</span>
+  </div>
+  <pre style="background:#0e1116;color:#d5dae0;padding:10px;border-radius:6px;font-size:11px;overflow:auto;max-height:280px;white-space:pre-wrap;word-break:break-word">{payload_pretty}</pre>
+</div>"""
+            else:
+                payload_html = '<div style="margin-top:8px;font-size:12px;color:#c21818">⚠️ apns_payload not recorded for this event (pre-payload-capture backend).</div>'
+
             apns_block = f"""
 <div style="margin-top:12px">
   <div style="font-size:12px;color:#666;font-weight:700;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">iOS (direct APNs)</div>
@@ -660,6 +700,7 @@ async def last_push_events_browser(
     </tr></thead>
     <tbody>{apns_rows}</tbody>
   </table>
+  {payload_html}
 </div>"""
 
         # ---- Android SuprSend chunk rows (legacy) ----

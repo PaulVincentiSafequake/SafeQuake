@@ -309,29 +309,40 @@ async def send_critical_alerts(
     body: str,
     action_url: str,
     idempotency_key: str,
-) -> list[dict]:
-    """Send a critical-alert push to every iOS device in `devices`. Returns
-    a list of per-recipient event dicts (serializable) for storage in the
-    push_events collection."""
+) -> dict:
+    """Send a critical-alert push to every iOS device in `devices`.
+
+    Returns a dict with:
+      - `payload`: the exact JSON body that was POSTed to Apple's APNs (same
+        for every recipient in this batch — captured so it's stored in
+        push_events for later verification of e.g. sound.name).
+      - `events`: per-recipient serializable event dicts.
+    """
     if not devices:
-        return []
+        return {"payload": None, "events": []}
 
     cfg = await load_apns_config(db)
     if cfg is None:
         # Not configured yet — record a single stub event so the UI shows
         # why nothing was sent.
-        return [{
-            "user_id": d.get("user_id") or "",
-            "token_fingerprint": _fingerprint(d.get("device_token") or ""),
-            "environment": "n/a",
-            "status_code": None,
-            "apns_id": None,
-            "apns_unique_id": None,
-            "reason": "APNS_NOT_CONFIGURED",
-            "delivered": False,
-            "duration_ms": 0,
-            "error": "APNs auth key not uploaded. Visit /api/admin/apns-key?token=<pwd>",
-        } for d in devices]
+        return {
+            "payload": None,
+            "events": [
+                {
+                    "user_id": d.get("user_id") or "",
+                    "token_fingerprint": _fingerprint(d.get("device_token") or ""),
+                    "environment": "n/a",
+                    "status_code": None,
+                    "apns_id": None,
+                    "apns_unique_id": None,
+                    "reason": "APNS_NOT_CONFIGURED",
+                    "delivered": False,
+                    "duration_ms": 0,
+                    "error": "APNs auth key not uploaded. Visit /api/admin/apns-key?token=<pwd>",
+                }
+                for d in devices
+            ],
+        }
 
     payload = _build_critical_payload(title, body, action_url)
     sem = asyncio.Semaphore(CONCURRENCY)
@@ -347,4 +358,7 @@ async def send_critical_alerts(
             )
 
     results = await asyncio.gather(*(_guarded(d) for d in devices))
-    return [r.as_dict() for r in results]
+    return {
+        "payload": payload,
+        "events": [r.as_dict() for r in results],
+    }
