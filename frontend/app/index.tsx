@@ -203,7 +203,7 @@ export default function HomeScreen() {
               <View style={styles.statusDot} />
               <Text style={styles.statusText}>SYSTEM ACTIVE · MONITORING</Text>
             </View>
-            <Text style={styles.brand}>QUAKEGUARD</Text>
+            <Text style={styles.brand}>QUAKE ANGEL</Text>
             <Text style={styles.tagline}>
               Earthquake preparedness{"\n"}at your fingertips.
             </Text>

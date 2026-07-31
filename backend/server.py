@@ -383,7 +383,7 @@ async def audit_log_browser(
         '<p style="color:#666">No events yet.</p>'
     )
     return HTMLResponse(f"""<!doctype html><html><head>
-<title>QuakeGuard — audit log</title>
+<title>Quake Angel — audit log</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="referrer" content="no-referrer">
 <style>
@@ -551,7 +551,7 @@ async def trigger_alert(
     body: TriggerAlertBody,
     x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
 ):
-    """Broadcast a QuakeGuard alert to every registered device (except the
+    """Broadcast a Quake Angel alert to every registered device (except the
     device that triggered it, if provided). Push delivery failure is logged
     but never blocks the response.
 
@@ -932,7 +932,7 @@ async def last_push_events_browser(
         body_html = "".join(render_event(ev) for ev in events)
 
     return HTMLResponse(f"""<!doctype html><html><head>
-<title>QuakeGuard — last push events</title>
+<title>Quake Angel — last push events</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="referrer" content="no-referrer">
 <style>body{{font-family:-apple-system,Segoe UI,sans-serif;padding:24px;max-width:760px;margin:0 auto;background:#f4f4f7}}
@@ -990,7 +990,7 @@ async def devices_browser(token: str = Query(default="")):
         "<tr><td colspan='6' style='padding:16px;color:#666'>No devices registered.</td></tr>"
     )
     return HTMLResponse(f"""<!doctype html><html><head>
-<title>QuakeGuard — registered devices</title>
+<title>Quake Angel — registered devices</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="referrer" content="no-referrer">
 <style>
@@ -1060,7 +1060,7 @@ async def last_registrations_browser(
         "<div class='card'><p style='color:#666'>No registration logs yet. Reopen the app to trigger a re-register.</p></div>"
     )
     return HTMLResponse(f"""<!doctype html><html><head>
-<title>QuakeGuard — last registrations</title>
+<title>Quake Angel — last registrations</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="referrer" content="no-referrer">
 <style>body{{font-family:-apple-system,Segoe UI,sans-serif;padding:20px;max-width:760px;margin:0 auto;background:#f4f4f7}}
@@ -1112,7 +1112,7 @@ async def self_test_push(
         events = await send_push(
             recipients=[target],
             data={
-                "title": "QuakeGuard self-test",
+                "title": "Quake Angel self-test",
                 "message": "If you see this, APNs delivery to this device is working.",
                 "action_url": "/",
             },
@@ -1188,7 +1188,7 @@ async def self_test_push_browser(
             result_html = f'<div class="card" style="border-color:#c21818"><h3 style="margin-top:0;color:#c21818">Error {e.status_code}</h3><p>{_html.escape(str(e.detail))}</p></div>'
 
     return HTMLResponse(f"""<!doctype html><html><head>
-<title>QuakeGuard — self-test push</title>
+<title>Quake Angel — self-test push</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="referrer" content="no-referrer">
 <style>body{{font-family:-apple-system,Segoe UI,sans-serif;padding:20px;max-width:760px;margin:0 auto;background:#f4f4f7}}

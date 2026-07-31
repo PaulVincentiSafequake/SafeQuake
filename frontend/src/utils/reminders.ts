@@ -76,7 +76,7 @@ export async function scheduleCheckInReminders(
         identifier: `${REMINDER_TAG}-${i}`,
         content: {
           title: "Are you safe?",
-          body: "Earthquake alert active. Tap to open QuakeGuard and mark yourself safe.",
+          body: "Earthquake alert active. Tap to open Quake Angel and mark yourself safe.",
           sound: "default",
           // 'critical' bypasses the physical silent switch, DND, and Focus
           // modes. Requires the com.apple.developer.usernotifications.

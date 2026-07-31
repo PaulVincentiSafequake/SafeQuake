@@ -107,6 +107,71 @@ export default function AlertScreen() {
     };
   }, [sirenPlayer]);
 
+  // ─── SIREN KILL-SWITCH ───────────────────────────────────────────────
+  // Watches the player's live "playing" flag. If we EVER observe playback
+  // active while shouldPlayRef.current is false (i.e. the user has already
+  // silenced the siren via I'm Safe / triage / mobility / dismiss), force
+  // it back to paused synchronously. This is defence-in-depth against any
+  // edge case where expo-audio's internal state resurrects the player
+  // across a re-render — e.g. the extra state transitions introduced by
+  // the mobility follow-up modal.
+  useEffect(() => {
+    if (!sirenStatus.playing) return;
+    if (shouldPlayRef.current) return;
+    try {
+      sirenPlayer.loop = false;
+    } catch {
+      // ignore
+    }
+    try {
+      sirenPlayer.volume = 0;
+    } catch {
+      // ignore
+    }
+    try {
+      sirenPlayer.pause();
+    } catch {
+      // ignore
+    }
+    try {
+      sirenPlayer.seekTo(0);
+    } catch {
+      // ignore
+    }
+  }, [sirenStatus.playing, sirenPlayer]);
+
+  // ─── FINAL SAFETY NET: status transitions to "sent" ───────────────────
+  // Whenever a submission completes (safe or trapped), imperatively pause
+  // the player one more time. stopSiren() ran synchronously the moment
+  // the user tapped a triage option — this catches the pathological case
+  // where something during the ~1-15s async submission (GPS acquisition,
+  // battery read, network round-trip, React re-renders driven by
+  // setState("sending") → setState("sent")) somehow revives playback.
+  useEffect(() => {
+    if (status !== "sent") return;
+    shouldPlayRef.current = false;
+    try {
+      sirenPlayer.loop = false;
+    } catch {
+      // ignore
+    }
+    try {
+      sirenPlayer.volume = 0;
+    } catch {
+      // ignore
+    }
+    try {
+      sirenPlayer.pause();
+    } catch {
+      // ignore
+    }
+    try {
+      sirenPlayer.seekTo(0);
+    } catch {
+      // ignore
+    }
+  }, [status, sirenPlayer]);
+
   const stopSiren = () => {
     // Flip the guard FIRST so any in-flight play effect bails out before
     // touching the hardware. Then forcibly silence: loop=false so any
@@ -364,7 +429,11 @@ export default function AlertScreen() {
   const chooseTriage = (severity: TriageSeverity) => {
     // Severity chosen → close severity sheet, remember it, and open the
     // mobility follow-up. Submission is deferred until the user answers
-    // "Can you move?".
+    // "Can you move?". stopSiren() is called defensively at every step of
+    // the trapped flow — the kill-switch effect will also catch any
+    // resurrection, but calling it here means we don't rely on that safety
+    // net firing in time.
+    stopSiren();
     setTriageOpen(false);
     setPendingSeverity(severity);
     setMobilityOpen(true);
@@ -372,6 +441,10 @@ export default function AlertScreen() {
   };
 
   const chooseMobility = (mobility: Mobility) => {
+    // Defensive: silence again immediately before we start the async
+    // submission chain (GPS → battery → network) so even a multi-second
+    // network stall cannot leave the siren audible.
+    stopSiren();
     setMobilityOpen(false);
     const sev = pendingSeverity;
     setPendingSeverity(null);
@@ -381,6 +454,7 @@ export default function AlertScreen() {
   // Back arrow inside the mobility sheet: reopen severity picker so the
   // user can re-answer without losing their place in the flow.
   const backToSeverity = () => {
+    stopSiren();
     setMobilityOpen(false);
     setPendingSeverity(null);
     setTriageOpen(true);

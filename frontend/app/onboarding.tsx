@@ -108,12 +108,12 @@ export default function OnboardingScreen() {
           {/* Header */}
           <View style={styles.brandRow}>
             <View style={styles.brandDot} />
-            <Text style={styles.brandLabel}>QUAKEGUARD · SETUP</Text>
+            <Text style={styles.brandLabel}>QUAKE ANGEL · SETUP</Text>
           </View>
           <Text style={styles.h1}>Turn on Critical Alerts</Text>
           <Text style={styles.subtitle}>
             An earthquake alert must wake your phone even when it&apos;s on
-            silent or in a Focus mode. Grant Critical Alerts so QuakeGuard can
+            silent or in a Focus mode. Grant Critical Alerts so Quake Angel can
             do that.
           </Text>
 
@@ -143,7 +143,7 @@ export default function OnboardingScreen() {
 
           <Text style={styles.footnote}>
             You can change these settings later in{" "}
-            <Text style={styles.footnoteBold}>Settings › Notifications › QuakeGuard</Text>
+            <Text style={styles.footnoteBold}>Settings › Notifications › Quake Angel</Text>
             .
           </Text>
         </ScrollView>

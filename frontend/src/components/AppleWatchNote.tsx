@@ -40,7 +40,7 @@ export function AppleWatchNote({ variant = "compact" }: Props) {
       </Text>
 
       <View style={s.fixCard}>
-        <Text style={s.fixLabel}>To make sure QuakeGuard always rings your iPhone:</Text>
+        <Text style={s.fixLabel}>To make sure Quake Angel always rings your iPhone:</Text>
         <View style={s.stepRow}>
           <Text style={s.stepNum}>1.</Text>
           <Text style={s.stepText}>
@@ -56,7 +56,7 @@ export function AppleWatchNote({ variant = "compact" }: Props) {
         <View style={s.stepRow}>
           <Text style={s.stepNum}>3.</Text>
           <Text style={s.stepText}>
-            Find <Text style={s.stepBold}>QuakeGuard</Text> in the list.
+            Find <Text style={s.stepBold}>Quake Angel</Text> in the list.
           </Text>
         </View>
         <View style={s.stepRow}>
