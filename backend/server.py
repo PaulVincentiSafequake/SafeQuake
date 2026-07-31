@@ -83,6 +83,11 @@ class StatusInPayload(BaseModel):
     # Status + triage
     status: str = Field(pattern=r"^(safe|trapped|not_responding)$")
     severity: Optional[str] = Field(default=None, pattern=r"^(green|yellow|red)$")
+    # Mobility follow-up captured after severity for `trapped` check-ins.
+    #   "mobile"  → user can move themselves out of danger
+    #   "trapped" → user is pinned/under debris and cannot move
+    # Ignored (nulled) by the normalizer for any non-trapped status.
+    mobility: Optional[str] = Field(default=None, pattern=r"^(mobile|trapped)$")
 
     # Structured shapes
     location: Optional[LocationPayload] = None
@@ -145,10 +150,16 @@ def _normalize_status_payload(p: StatusInPayload) -> dict:
     if p.status != "trapped":
         severity = None
 
+    # Mobility is likewise only meaningful for 'trapped' reports.
+    mobility: Optional[str] = p.mobility
+    if p.status != "trapped":
+        mobility = None
+
     return {
         "device_id": device_id,
         "status": p.status,
         "severity": severity,
+        "mobility": mobility,
         "latitude": lat,
         "longitude": lng,
         "accuracy_m": acc,
@@ -214,6 +225,7 @@ async def get_devices(
             "device_id": r.get("device_id"),
             "status": r.get("status") or "unknown",
             "severity": r.get("severity"),
+            "mobility": r.get("mobility"),
             "latitude": r.get("latitude"),
             "longitude": r.get("longitude"),
             "accuracy_m": r.get("accuracy_m"),
@@ -294,6 +306,7 @@ async def get_audit_log(
                 "device_id": r.get("device_id"),
                 "status": r.get("status"),
                 "severity": r.get("severity"),
+                "mobility": r.get("mobility"),
                 "latitude": r.get("latitude"),
                 "longitude": r.get("longitude"),
                 "accuracy_m": r.get("accuracy_m"),
@@ -348,6 +361,12 @@ async def audit_log_browser(
         else:
             sev = e.get("severity")
             sev_badge = f'<span style="background:{sev_color(sev)};color:#fff;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700;margin-left:6px">{_html.escape(sev)}</span>' if sev else ""
+            mob = e.get("mobility")
+            mob_badge = ""
+            if mob:
+                mob_color = "#C21818" if mob == "trapped" else "#2E7D32"
+                mob_label = "trapped/pinned" if mob == "trapped" else "can move"
+                mob_badge = f'<span style="background:{mob_color};color:#fff;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700;margin-left:6px">{mob_label}</span>'
             loc = ""
             if e.get("latitude") is not None and e.get("longitude") is not None:
                 loc = f' · <a href="https://www.google.com/maps/place/{e.get("latitude")},{e.get("longitude")}" target="_blank" rel="noopener">📍 map</a>'
@@ -356,7 +375,7 @@ async def audit_log_browser(
                 bat = f' · 🔋 {_html.escape(str(e.get("battery_pct")))}%'
             body = (
                 f'<b>STATUS</b> · <code>{_html.escape(str(e.get("device_id") or ""))}</code> → '
-                f'<b>{_html.escape(str(e.get("status") or ""))}</b>{sev_badge}{loc}{bat}'
+                f'<b>{_html.escape(str(e.get("status") or ""))}</b>{sev_badge}{mob_badge}{loc}{bat}'
             )
             return f'<div class="row status">{body}<div class="at">{at}</div></div>'
 

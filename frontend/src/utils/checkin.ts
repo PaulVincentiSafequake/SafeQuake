@@ -23,6 +23,13 @@ export async function getDeviceId(): Promise<string> {
 
 export type CheckInStatus = "not_responding" | "safe" | "trapped";
 export type TriageSeverity = "green" | "yellow" | "red";
+/**
+ * Follow-up mobility answer captured after severity for `trapped` check-ins.
+ *  - "mobile"  → "Yes, I can move"
+ *  - "trapped" → "No, I'm trapped/pinned (e.g. under debris)"
+ * `null` for non-trapped statuses, or when the user hasn't answered yet.
+ */
+export type Mobility = "mobile" | "trapped";
 
 export interface LocationPayload {
   latitude: number | null;
@@ -50,17 +57,21 @@ export interface BatteryPayload {
 export async function postStatus(opts: {
   status: CheckInStatus;
   severity?: TriageSeverity | null;
+  mobility?: Mobility | null;
   location?: LocationPayload;
   battery?: BatteryPayload;
 }): Promise<Response> {
   const deviceId = await getDeviceId();
-  const { status, severity, location, battery } = opts;
+  const { status, severity, mobility, location, battery } = opts;
 
   const payload: Record<string, any> = {
     deviceId,
     status,
     // severity is only meaningful for `trapped`; backend also enforces this.
     severity: status === "trapped" ? (severity ?? null) : null,
+    // mobility ("mobile" | "trapped") is likewise trapped-only; backend
+    // normalizer will null it out for other statuses defensively.
+    mobility: status === "trapped" ? (mobility ?? null) : null,
     client_name: "quakeguard-mobile",
     timestamp: new Date().toISOString(),
     location: location ?? {
@@ -93,7 +104,7 @@ export async function postStatus(opts: {
   }
 
   console.log(
-    `[QuakeGuard] POST (${status}${severity ? "/" + severity : ""}) →`,
+    `[QuakeGuard] POST (${status}${severity ? "/" + severity : ""}${mobility ? "/" + mobility : ""}) →`,
     JSON.stringify(payload),
   );
 

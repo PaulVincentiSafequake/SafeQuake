@@ -25,7 +25,7 @@ import Animated, {
 } from "react-native-reanimated";
 
 import { colors, radius, spacing } from "@/src/theme";
-import { postStatus, type TriageSeverity } from "@/src/utils/checkin";
+import { postStatus, type Mobility, type TriageSeverity } from "@/src/utils/checkin";
 import { cancelCheckInReminders } from "@/src/utils/reminders";
 
 const SIREN_SOURCE = require("../assets/audio/siren.mp3");
@@ -40,7 +40,13 @@ export default function AlertScreen() {
   const [outcome, setOutcome] = useState<OutcomeKind>("safe");
   const [chosenSeverity, setChosenSeverity] =
     useState<TriageSeverity | null>(null);
+  const [chosenMobility, setChosenMobility] = useState<Mobility | null>(null);
   const [triageOpen, setTriageOpen] = useState(false);
+  // Between severity pick and submission we open a mobility follow-up. The
+  // severity is held here so the mobility handler can forward it.
+  const [pendingSeverity, setPendingSeverity] =
+    useState<TriageSeverity | null>(null);
+  const [mobilityOpen, setMobilityOpen] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [elapsed, setElapsed] = useState(0);
 
@@ -212,6 +218,7 @@ export default function AlertScreen() {
   const submitCheckIn = async (
     kind: OutcomeKind,
     severity: TriageSeverity | null = null,
+    mobility: Mobility | null = null,
   ) => {
     if (status === "sending" || status === "sent") return;
     // 1) IMMEDIATELY silence the siren and cancel pending reminders. The user
@@ -224,6 +231,7 @@ export default function AlertScreen() {
 
     setOutcome(kind);
     setChosenSeverity(severity);
+    setChosenMobility(mobility);
     setStatus("sending");
     setErrorMsg(null);
     Haptics.notificationAsync(
@@ -324,11 +332,12 @@ export default function AlertScreen() {
       const res = await postStatus({
         status: kind === "safe" ? "safe" : "trapped",
         severity: kind === "trapped" ? severity : null,
+        mobility: kind === "trapped" ? mobility : null,
         location: { latitude, longitude, accuracy, error: locationError },
         battery: { level: batteryLevel, state: batteryState },
       });
       console.log(
-        `[QuakeGuard] ${kind}${severity ? "/" + severity : ""} → response status:`,
+        `[QuakeGuard] ${kind}${severity ? "/" + severity : ""}${mobility ? "/" + mobility : ""} → response status:`,
         res.status,
       );
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -353,8 +362,28 @@ export default function AlertScreen() {
   };
 
   const chooseTriage = (severity: TriageSeverity) => {
+    // Severity chosen → close severity sheet, remember it, and open the
+    // mobility follow-up. Submission is deferred until the user answers
+    // "Can you move?".
     setTriageOpen(false);
-    submitCheckIn("trapped", severity);
+    setPendingSeverity(severity);
+    setMobilityOpen(true);
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+  };
+
+  const chooseMobility = (mobility: Mobility) => {
+    setMobilityOpen(false);
+    const sev = pendingSeverity;
+    setPendingSeverity(null);
+    submitCheckIn("trapped", sev, mobility);
+  };
+
+  // Back arrow inside the mobility sheet: reopen severity picker so the
+  // user can re-answer without losing their place in the flow.
+  const backToSeverity = () => {
+    setMobilityOpen(false);
+    setPendingSeverity(null);
+    setTriageOpen(true);
   };
 
   const mm = String(Math.floor(elapsed / 60)).padStart(2, "0");
@@ -431,9 +460,19 @@ export default function AlertScreen() {
               testID="alert-trapped-toast"
             >
               <Ionicons name="megaphone" size={28} color="#fff" />
-              <Text style={styles.trappedToastText}>
-                Rescuers alerted. Stay calm. Conserve battery.
-              </Text>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.trappedToastText}>
+                  Rescuers alerted. Stay calm. Conserve battery.
+                </Text>
+                {chosenMobility ? (
+                  <Text style={styles.trappedToastMeta} testID="trapped-mobility-summary">
+                    Reported:{" "}
+                    {chosenMobility === "mobile"
+                      ? "you can move"
+                      : "you are trapped/pinned"}
+                  </Text>
+                ) : null}
+              </View>
             </View>
           )}
 
@@ -562,6 +601,59 @@ export default function AlertScreen() {
                 style={styles.triageCancel}
                 hitSlop={8}
                 testID="triage-cancel"
+              >
+                <Text style={styles.triageCancelText}>Back</Text>
+              </Pressable>
+            </View>
+          </View>
+        </Modal>
+
+        {/* Mobility follow-up — shown after severity. Captures whether the
+            user can move themselves out of danger or is pinned/trapped
+            (e.g. under debris). Value flows into postStatus as
+            `mobility: 'mobile' | 'trapped'` for the rescuer dashboard. */}
+        <Modal
+          visible={mobilityOpen}
+          animationType="slide"
+          transparent
+          onRequestClose={backToSeverity}
+        >
+          <View style={styles.triageBackdrop}>
+            <View
+              style={[
+                styles.triageSheet,
+                { paddingBottom: Math.max(insets.bottom + spacing.md, spacing.xl) },
+              ]}
+            >
+              <View style={styles.triageHandle} />
+              <Text style={styles.triageTitle}>Can you move?</Text>
+              <Text style={styles.triageSubtitle}>
+                Tell rescuers whether you&apos;re free to move or physically
+                pinned. This does not delay your report.
+              </Text>
+
+              <TriageOption
+                color="#2E7D32"
+                label="Yes, I can move"
+                sublabel="I can walk or crawl to a safer spot"
+                icon="walk"
+                onPress={() => chooseMobility("mobile")}
+                testID="mobility-mobile"
+              />
+              <TriageOption
+                color="#C21818"
+                label="No, I&apos;m trapped/pinned"
+                sublabel="Stuck under debris or unable to move"
+                icon="alert-circle"
+                onPress={() => chooseMobility("trapped")}
+                testID="mobility-trapped"
+              />
+
+              <Pressable
+                onPress={backToSeverity}
+                style={styles.triageCancel}
+                hitSlop={8}
+                testID="mobility-back"
               >
                 <Text style={styles.triageCancelText}>Back</Text>
               </Pressable>
@@ -859,6 +951,13 @@ const styles = StyleSheet.create({
     fontWeight: "800",
     lineHeight: 33,
     flex: 1,
+  },
+  trappedToastMeta: {
+    color: "rgba(255,255,255,0.92)",
+    fontSize: 15,
+    fontWeight: "600",
+    lineHeight: 20,
+    marginTop: 6,
   },
 
   /* Triage modal */
