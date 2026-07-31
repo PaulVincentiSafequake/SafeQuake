@@ -66,6 +66,16 @@ export function AppleWatchNote({ variant = "compact" }: Props) {
           </Text>
         </View>
       </View>
+
+      <View style={s.updateNote}>
+        <Text style={s.updateNoteLabel}>Heads up</Text>
+        <Text style={s.updateNoteText}>
+          iOS often <Text style={s.stepBold}>resets this toggle back to ON after
+          app updates</Text> (including TestFlight installs and app-name/icon
+          changes). Re-check this setting after every update — the app
+          can&apos;t detect or change it for you.
+        </Text>
+      </View>
     </View>
   );
 }
@@ -141,6 +151,28 @@ const onboardingStyles = StyleSheet.create({
     color: colors.onSurface,
     fontWeight: "700",
   },
+  updateNote: {
+    marginTop: 4,
+    backgroundColor: "#1B1005",
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: "#2E1F08",
+    padding: spacing.md,
+    gap: 4,
+  },
+  updateNoteLabel: {
+    color: "#E28A2B",
+    fontSize: 12,
+    fontWeight: "800",
+    letterSpacing: 0.5,
+    textTransform: "uppercase",
+    marginBottom: 4,
+  },
+  updateNoteText: {
+    color: colors.onSurfaceSecondary,
+    fontSize: 14,
+    lineHeight: 20,
+  },
 });
 
 const compactStyles = StyleSheet.create({
@@ -206,5 +238,27 @@ const compactStyles = StyleSheet.create({
   stepBold: {
     color: colors.onSurface,
     fontWeight: "700",
+  },
+  updateNote: {
+    marginTop: 2,
+    backgroundColor: "#1B1005",
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: "#2E1F08",
+    padding: 10,
+    gap: 2,
+  },
+  updateNoteLabel: {
+    color: "#E28A2B",
+    fontSize: 11,
+    fontWeight: "800",
+    letterSpacing: 0.5,
+    textTransform: "uppercase",
+    marginBottom: 2,
+  },
+  updateNoteText: {
+    color: colors.onSurfaceSecondary,
+    fontSize: 12,
+    lineHeight: 17,
   },
 });

@@ -1,13 +1,17 @@
-import { useRouter } from "expo-router";
+import { useRouter, useLocalSearchParams } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { Image } from "expo-image";
 import { LinearGradient } from "expo-linear-gradient";
 import { Ionicons } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
 import * as Location from "expo-location";
-import { useState } from "react";
+import Constants from "expo-constants";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import { useEffect, useState } from "react";
 import {
   ActivityIndicator,
+  Modal,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -16,6 +20,7 @@ import {
 } from "react-native";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 
+import { AppleWatchNote } from "@/src/components/AppleWatchNote";
 import { colors, radius, spacing } from "@/src/theme";
 import { postStatus } from "@/src/utils/checkin";
 import {
@@ -23,6 +28,8 @@ import {
   ensureNotificationSetup,
   scheduleCheckInReminders,
 } from "@/src/utils/reminders";
+
+const LAST_SEEN_VERSION_KEY = "quakeguard_last_seen_version";
 
 const HERO_IMG =
   "https://images.unsplash.com/photo-1772050137595-0116f8dba498?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjY2NjV8MHwxfHNlYXJjaHwxfHxlYXJ0aHF1YWtlJTIwc2Vpc21vZ3JhcGglMjBkYXJrfGVufDB8fHx8MTc4NDcwNTQ2MHww&ixlib=rb-4.1.0&q=85";
@@ -60,6 +67,59 @@ export default function HomeScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const [triggering, setTriggering] = useState(false);
+  // ?preview=1 forces the iOS-only update-reminder banner to render on web
+  // during development — has no effect on real devices.
+  const { preview } = useLocalSearchParams<{ preview?: string }>();
+  const forcePreview = preview === "1";
+  // ── Post-update Apple Watch reminder ───────────────────────────────────
+  // iOS is known to silently reset the Watch app's per-app notification
+  // mirroring toggle after app updates (including TestFlight installs and
+  // name/icon changes) — Apple Support docs and community reports confirm
+  // this. Since we can't detect or control that toggle from JS, we track
+  // the installed version and, on the FIRST launch after any version bump,
+  // surface a dismissible amber card reminding the user to re-check.
+  const [updateReminderVisible, setUpdateReminderVisible] = useState(false);
+  const [watchModalOpen, setWatchModalOpen] = useState(false);
+  const currentVersion = (Constants.expoConfig?.version as string) ?? null;
+
+  useEffect(() => {
+    // Only meaningful on iOS. Android users don't have this Watch-mirror
+    // toggle to worry about. The forcePreview flag lets devs visually
+    // verify the banner in the web preview.
+    if (Platform.OS !== "ios" && !forcePreview) return;
+    if (!currentVersion) return;
+    (async () => {
+      try {
+        const seen = await AsyncStorage.getItem(LAST_SEEN_VERSION_KEY);
+        // Fresh install (nothing stored) → don't show anything, just record.
+        // Users who install for the first time haven't "updated".
+        if (seen === null && !forcePreview) {
+          await AsyncStorage.setItem(LAST_SEEN_VERSION_KEY, currentVersion);
+          return;
+        }
+        if (seen !== currentVersion || forcePreview) {
+          setUpdateReminderVisible(true);
+        }
+      } catch (e) {
+        console.log("[QuakeGuard] version-seen check failed:", (e as Error)?.message);
+      }
+    })();
+  }, [currentVersion, forcePreview]);
+
+  const dismissUpdateReminder = async () => {
+    setUpdateReminderVisible(false);
+    if (!currentVersion) return;
+    try {
+      await AsyncStorage.setItem(LAST_SEEN_VERSION_KEY, currentVersion);
+    } catch (e) {
+      console.log("[QuakeGuard] version-seen persist failed:", (e as Error)?.message);
+    }
+  };
+
+  const openWatchModal = () => {
+    setWatchModalOpen(true);
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+  };
 
   const handleTrigger = async () => {
     if (triggering) return;
@@ -210,6 +270,48 @@ export default function HomeScreen() {
           </SafeAreaView>
         </View>
 
+        {/* Post-update Apple Watch reminder — iOS only, once per version */}
+        {updateReminderVisible ? (
+          <View style={styles.section}>
+            <View style={styles.updateReminderCard} testID="update-reminder-card">
+              <View style={styles.updateReminderHeader}>
+                <View style={styles.updateReminderIcon}>
+                  <Ionicons name="watch-outline" size={20} color={colors.warning} />
+                </View>
+                <Text style={styles.updateReminderTitle}>
+                  Just updated? Re-check your Apple Watch
+                </Text>
+              </View>
+              <Text style={styles.updateReminderBody}>
+                iOS often resets the Watch app&apos;s notification-mirroring
+                toggle back to <Text style={styles.updateReminderBold}>on</Text>{" "}
+                after an app update — even for critical alerts. If you turned
+                it off before, please re-check it now.
+              </Text>
+              <View style={styles.updateReminderActions}>
+                <Pressable
+                  onPress={openWatchModal}
+                  style={({ pressed }) => [
+                    styles.updateReminderPrimary,
+                    pressed && { opacity: 0.85 },
+                  ]}
+                  testID="update-reminder-show-steps"
+                >
+                  <Text style={styles.updateReminderPrimaryText}>Show me how</Text>
+                </Pressable>
+                <Pressable
+                  onPress={dismissUpdateReminder}
+                  style={styles.updateReminderSecondary}
+                  testID="update-reminder-dismiss"
+                  hitSlop={6}
+                >
+                  <Text style={styles.updateReminderSecondaryText}>Dismiss</Text>
+                </Pressable>
+              </View>
+            </View>
+          </View>
+        ) : null}
+
         {/* Tips */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>SAFETY PROTOCOL</Text>
@@ -293,6 +395,45 @@ export default function HomeScreen() {
           </Text>
         </Pressable>
       </View>
+
+      {/* Apple Watch help modal — opened from the post-update reminder card */}
+      <Modal
+        visible={watchModalOpen}
+        animationType="slide"
+        transparent
+        onRequestClose={() => setWatchModalOpen(false)}
+      >
+        <View style={styles.watchModalBackdrop}>
+          <View
+            style={[
+              styles.watchModalSheet,
+              { paddingBottom: Math.max(insets.bottom + spacing.md, spacing.xl) },
+            ]}
+          >
+            <View style={styles.watchModalHandle} />
+            <ScrollView
+              style={{ maxHeight: 620 }}
+              contentContainerStyle={{ paddingBottom: spacing.md }}
+              showsVerticalScrollIndicator={false}
+            >
+              <AppleWatchNote variant="onboarding" />
+            </ScrollView>
+            <Pressable
+              onPress={() => {
+                setWatchModalOpen(false);
+                dismissUpdateReminder();
+              }}
+              style={({ pressed }) => [
+                styles.watchModalGotIt,
+                pressed && { opacity: 0.9 },
+              ]}
+              testID="watch-modal-got-it"
+            >
+              <Text style={styles.watchModalGotItText}>GOT IT</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -465,5 +606,111 @@ const styles = StyleSheet.create({
     fontWeight: "600",
     letterSpacing: 1,
     textTransform: "uppercase",
+  },
+
+  /* Post-update Apple Watch reminder */
+  updateReminderCard: {
+    backgroundColor: "#2A1F0A",
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: "#4A3814",
+    padding: spacing.lg,
+    gap: spacing.md,
+  },
+  updateReminderHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.sm,
+  },
+  updateReminderIcon: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: "#3B2C0F",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  updateReminderTitle: {
+    flex: 1,
+    color: colors.onSurface,
+    fontSize: 16,
+    fontWeight: "800",
+    lineHeight: 22,
+  },
+  updateReminderBody: {
+    color: colors.onSurfaceSecondary,
+    fontSize: 14,
+    lineHeight: 20,
+  },
+  updateReminderBold: {
+    color: colors.onSurface,
+    fontWeight: "800",
+  },
+  updateReminderActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.md,
+    marginTop: 2,
+  },
+  updateReminderPrimary: {
+    flex: 1,
+    height: 44,
+    borderRadius: radius.md,
+    backgroundColor: colors.warning,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  updateReminderPrimaryText: {
+    color: "#1B1005",
+    fontSize: 14,
+    fontWeight: "800",
+    letterSpacing: 0.5,
+  },
+  updateReminderSecondary: {
+    height: 44,
+    paddingHorizontal: spacing.md,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  updateReminderSecondaryText: {
+    color: colors.onSurfaceTertiary,
+    fontSize: 14,
+    fontWeight: "700",
+  },
+
+  /* Apple Watch help modal */
+  watchModalBackdrop: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.6)",
+    justifyContent: "flex-end",
+  },
+  watchModalSheet: {
+    backgroundColor: colors.surface,
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    paddingTop: spacing.sm,
+    paddingHorizontal: spacing.lg,
+    gap: spacing.md,
+  },
+  watchModalHandle: {
+    alignSelf: "center",
+    width: 44,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: "rgba(255,255,255,0.35)",
+    marginBottom: spacing.sm,
+  },
+  watchModalGotIt: {
+    height: 52,
+    borderRadius: radius.md,
+    backgroundColor: colors.warning,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  watchModalGotItText: {
+    color: "#1B1005",
+    fontSize: 15,
+    fontWeight: "800",
+    letterSpacing: 2,
   },
 });

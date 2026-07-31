@@ -427,17 +427,31 @@ export default function AlertScreen() {
   };
 
   const chooseTriage = (severity: TriageSeverity) => {
-    // Severity chosen → close severity sheet, remember it, and open the
-    // mobility follow-up. Submission is deferred until the user answers
-    // "Can you move?". stopSiren() is called defensively at every step of
-    // the trapped flow — the kill-switch effect will also catch any
-    // resurrection, but calling it here means we don't rely on that safety
-    // net firing in time.
+    // Severity chosen. The mobility follow-up is only genuinely useful for
+    // YELLOW: green's label already says "I can walk / not badly hurt" and
+    // red's says "can't move" — asking again would just be extra taps in
+    // an emergency. So for green/red we short-circuit straight to
+    // submission with the mobility inferred from the severity choice.
+    //
+    // stopSiren() is called defensively at every step of the trapped flow
+    // — the kill-switch effect will also catch any resurrection, but
+    // calling it here means we don't rely on that safety net firing in
+    // time.
     stopSiren();
     setTriageOpen(false);
-    setPendingSeverity(severity);
-    setMobilityOpen(true);
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+
+    if (severity === "yellow") {
+      // Only yellow needs the follow-up — mobility is genuinely ambiguous.
+      setPendingSeverity(severity);
+      setMobilityOpen(true);
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+      return;
+    }
+
+    // Green → user is walking wounded, mobility is "mobile" by definition.
+    // Red  → user is seriously injured / can't move → mobility is "trapped".
+    const inferredMobility: Mobility = severity === "green" ? "mobile" : "trapped";
+    submitCheckIn("trapped", severity, inferredMobility);
   };
 
   const chooseMobility = (mobility: Mobility) => {
