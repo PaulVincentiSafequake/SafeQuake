@@ -1,441 +1,416 @@
-/**
- * Dashboard logic. Polls the real Quake Angel backend every 4 seconds.
- * Shows live device status grouped by triage priority: Immediate (red),
- * Serious/Stable (yellow), Minor (green), and Other (safe / not responding / unknown).
- * The map can show all groups at once, or be filtered to one group at a time.
- */
-
-const DEVICES_ENDPOINT = "https://quake-alert-18.emergent.host/api/devices";
-
-const map = L.map("map").setView([35.8997, 14.5146], 13); // default: Malta
-L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-  attribution: "&copy; OpenStreetMap contributors",
-}).addTo(map);
-
-const markers = new Map();
-let lastUsers = [];
-let currentFilter = "all"; // "all" | "red" | "yellow" | "green"
-
-function colorFor(status, severity) {
-  if (status === "trapped") {
-    if (severity === "red") return "#c62828";
-    if (severity === "yellow") return "#f9a825";
-    return "#2e7d32"; // green severity, or trapped with no severity yet
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Quake Angel — Emergency Response Dashboard</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<style>
+  :root {
+    --safe: #2e7d32;
+    --trapped: #c62828;
+    --waiting: #f9a825;
+    --danger: #757575;
+    --bg: #f4f5f7;
   }
-  if (status === "safe") return "#2e7d32";
-  if (status === "not_responding") return "#757575";
-  return "#455a64"; // unknown
-}
-
-function statusLabel(status, severity) {
-  if (status === "trapped") {
-    if (severity === "red") return "TRAPPED — IMMEDIATE";
-    if (severity === "yellow") return "Trapped — Serious/Stable";
-    if (severity === "green") return "Trapped — Minor";
-    return "Trapped";
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, "Segoe UI", Arial, sans-serif;
+    background: var(--bg);
+    color: #222;
   }
-  if (status === "safe") return "Safe";
-  if (status === "not_responding") return "Not responding";
-  return "Unknown";
-}
-
-function statusClass(status, severity) {
-  if (status === "trapped") {
-    if (severity === "red") return "trapped-red";
-    if (severity === "yellow") return "trapped-yellow";
-    return "trapped-green";
+  header {
+    background: #1c2b36;
+    color: #fff;
+    padding: 14px 20px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 10px;
   }
-  if (status === "safe") return "safe";
-  if (status === "not_responding") return "danger";
-  return "waiting";
-}
-
-function isUrgent(status, severity) {
-  return status === "trapped" && severity === "red";
-}
-
-function mobilityLabel(m) {
-  if (m === "mobile") return "🟢 can move";
-  if (m === "trapped") return "🔴 trapped/pinned";
-  return "";
-}
-
-function normalizeDevice(d) {
-  return {
-    deviceId: d.device_id,
-    status: d.status,
-    severity: d.severity,
-    mobility: d.mobility,
-    latitude: d.latitude,
-    longitude: d.longitude,
-    batteryPercent: d.battery_pct,
-    lastUpdated: d.updated_at,
-    platform: d.platform,
-  };
-}
-
-async function refresh() {
-  try {
-    const res = await fetch(DEVICES_ENDPOINT);
-    const data = await res.json();
-    const users = (data.devices || []).map(normalizeDevice);
-    lastUsers = users;
-    renderMap(users);
-    applyFilterVisibility();
-    renderSidebar(users);
-  } catch (e) {
-    console.error("Failed to refresh dashboard:", e);
+  header h1 { font-size: 18px; margin: 0; font-weight: 600; }
+  header p { margin: 2px 0 0; font-size: 12px; color: #b7c2cc; }
+  .layout { display: flex; height: calc(100vh - 60px); flex-wrap: wrap; }
+  #map-wrap { position: relative; flex: 1 1 60%; min-height: 400px; }
+  #map { position: absolute; inset: 0; }
+  .map-filters {
+    position: absolute;
+    top: 12px;
+    left: 12px;
+    z-index: 1000;
+    display: flex;
+    gap: 6px;
+    background: rgba(255,255,255,0.95);
+    padding: 6px;
+    border-radius: 10px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.18);
   }
-}
-
-function renderMap(users) {
-  const seen = new Set();
-  users.forEach((u) => {
-    if (u.latitude == null || u.longitude == null) return;
-    seen.add(u.deviceId);
-    const color = colorFor(u.status, u.severity);
-    const urgent = isUrgent(u.status, u.severity);
-
-    if (markers.has(u.deviceId)) {
-      const m = markers.get(u.deviceId);
-      m.setLatLng([u.latitude, u.longitude]);
-      m.setStyle({ color, fillColor: color, weight: urgent ? 4 : 2 });
-      m.setRadius(urgent ? 13 : 10);
-      m.setPopupContent(popupHtml(u));
-    } else {
-      const marker = L.circleMarker([u.latitude, u.longitude], {
-        radius: urgent ? 13 : 10,
-        color,
-        fillColor: color,
-        fillOpacity: 0.85,
-        weight: urgent ? 4 : 2,
-      }).addTo(map);
-      marker.bindPopup(popupHtml(u));
-      if (urgent) {
-        marker.bindTooltip("SOS", {
-          permanent: true,
-          direction: "center",
-          className: "sos-label",
-        });
-      }
-      markers.set(u.deviceId, marker);
-    }
-  });
-
-  // Remove markers for devices no longer in the list
-  for (const id of markers.keys()) {
-    if (!seen.has(id)) {
-      map.removeLayer(markers.get(id));
-      markers.delete(id);
-    }
+  .map-filter-btn {
+    border: none;
+    background: transparent;
+    padding: 6px 10px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+    color: #333;
   }
-}
+  .map-filter-btn:hover { background: rgba(0,0,0,0.06); }
+  .map-filter-btn.active { background: #1c2b36; color: #fff; }
+  .sidebar {
+    flex: 1 1 320px;
+    max-width: 380px;
+    background: #fff;
+    padding: 16px;
+    overflow-y: auto;
+    border-left: 1px solid #e0e0e0;
+  }
+  .stat-row { display: flex; gap: 10px; margin-bottom: 16px; flex-wrap: wrap; }
+  .stat {
+    flex: 1 1 calc(50% - 5px);
+    background: var(--bg);
+    border-radius: 8px;
+    padding: 10px;
+    text-align: center;
+  }
+  .stat .num { font-size: 22px; font-weight: 700; }
+  .stat.safe .num { color: var(--safe); }
+  .stat.trapped .num { color: var(--trapped); }
+  .stat.waiting .num { color: var(--waiting); }
+  .stat.danger .num { color: var(--danger); }
+  .stat .label { font-size: 11px; color: #666; text-transform: uppercase; }
 
-function matchesFilter(u) {
-  if (currentFilter === "all") return true;
-  if (u.status !== "trapped") return false;
-  const sev = u.severity || "green";
-  return sev === currentFilter;
-}
-
-function applyFilterVisibility() {
-  lastUsers.forEach((u) => {
-    const m = markers.get(u.deviceId);
-    if (!m) return;
-    const show = matchesFilter(u);
-    if (show && !map.hasLayer(m)) map.addLayer(m);
-    if (!show && map.hasLayer(m)) map.removeLayer(m);
-  });
-}
-
-function setFilter(f) {
-  currentFilter = f;
-  applyFilterVisibility();
-  document.querySelectorAll(".map-filter-btn").forEach((btn) => {
-    btn.classList.toggle("active", btn.dataset.filter === currentFilter);
-  });
-}
-window.setFilter = setFilter;
-
-function popupHtml(u) {
-  const mob = mobilityLabel(u.mobility);
-  return `<b>${u.deviceId}</b><br>${statusLabel(u.status, u.severity)}${mob ? "<br>" + mob : ""}<br>Battery: ${u.batteryPercent ?? "?"}%`;
-}
-
-function itemHtml(u) {
-  const mob = mobilityLabel(u.mobility);
-  return `
-    <div class="id">${u.deviceId}${isUrgent(u.status, u.severity) ? '<span class="badge sos">SOS</span>' : ""}</div>
-    <div class="meta">${statusLabel(u.status, u.severity)}${mob ? " · " + mob : ""} · Battery ${u.batteryPercent ?? "?"}%</div>
-    <div class="meta">Updated: ${u.lastUpdated ? new Date(u.lastUpdated).toLocaleTimeString() : "—"}</div>
-  `;
-}
-
-function buildGroup(title, cls, items, alwaysOpen) {
-  const details = document.createElement("details");
-  details.className = "triage-group " + cls;
-  details.open = alwaysOpen || items.length > 0;
-
-  const summary = document.createElement("summary");
-  summary.innerHTML = `<span>${title}</span><span class="group-count">${items.length}</span>`;
-  details.appendChild(summary);
-
-  const ul = document.createElement("ul");
-  ul.className = "userlist";
-
-  if (items.length === 0) {
-    const li = document.createElement("li");
-    li.className = "empty";
-    li.textContent = "None";
-    ul.appendChild(li);
-  } else {
-    items.forEach((u) => {
-      const li = document.createElement("li");
-      li.className = statusClass(u.status, u.severity);
-      li.innerHTML = itemHtml(u);
-      ul.appendChild(li);
-    });
+  .triage-group {
+    margin-bottom: 10px;
+    border-radius: 8px;
+    overflow: hidden;
+    border: 1px solid #e0e0e0;
+  }
+  .triage-group summary {
+    cursor: pointer;
+    padding: 8px 10px;
+    font-weight: 700;
+    font-size: 12.5px;
+    list-style: none;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .triage-group summary::-webkit-details-marker { display: none; }
+  .triage-group.group-red summary { background: #fdecea; color: #b71c1c; }
+  .triage-group.group-yellow summary { background: #fff8e1; color: #8a6100; }
+  .triage-group.group-green summary { background: #e8f5e9; color: #1b5e20; }
+  .triage-group.group-other summary { background: #f4f5f7; color: #555; }
+  .group-count {
+    background: rgba(0,0,0,0.08);
+    border-radius: 10px;
+    padding: 1px 8px;
+    font-size: 11px;
+  }
+  .triage-group ul.userlist { padding: 8px; margin: 0; }
+  .triage-group li.empty {
+    color: #999;
+    font-style: italic;
+    border-left: none;
+    background: transparent;
+    padding: 4px 2px;
+    margin-bottom: 0;
   }
 
-  details.appendChild(ul);
-  return details;
-}
-
-function renderSidebar(users) {
-  const container = document.getElementById("userlist");
-  container.innerHTML = "";
-
-  const byRecency = (a, b) => new Date(b.lastUpdated || 0) - new Date(a.lastUpdated || 0);
-
-  const red = users.filter((u) => u.status === "trapped" && u.severity === "red").sort(byRecency);
-  const yellow = users.filter((u) => u.status === "trapped" && u.severity === "yellow").sort(byRecency);
-  const green = users.filter((u) => u.status === "trapped" && (u.severity === "green" || !u.severity)).sort(byRecency);
-  const other = users.filter((u) => u.status !== "trapped").sort(byRecency);
-
-  container.appendChild(buildGroup("🔴 IMMEDIATE — seriously injured / can't move", "group-red", red, true));
-  container.appendChild(buildGroup("🟡 SERIOUS — STABLE — hurt but stable", "group-yellow", yellow, true));
-  container.appendChild(buildGroup("🟢 MINOR — walking wounded", "group-green", green, true));
-  container.appendChild(buildGroup("⚪ Other — Safe / Not Responding / Unknown", "group-other", other, false));
-
-  const safe = users.filter((u) => u.status === "safe").length;
-  const trapped = red.length + yellow.length + green.length;
-  const danger = users.filter((u) => u.status === "not_responding").length;
-  const waiting = users.length - safe - trapped - danger;
-
-  document.getElementById("count-safe").textContent = safe;
-  const trappedEl = document.getElementById("count-trapped");
-  if (trappedEl) trappedEl.textContent = trapped;
-  document.getElementById("count-waiting").textContent = waiting;
-  document.getElementById("count-danger").textContent = danger;
-}
-
-async function seedDemoData() {
-  await fetch("/api/demo-seed", { method: "POST" });
-  refresh();
-}
-
-refresh();
-setInterval(refresh, 4000);
-
-/* ── Trigger button: confirm + password + broadcast, with prominent feedback ── */
-(function initQuakeGuardTriggerButton() {
-  // === EDIT THIS ==========================================================
-  var QUAKEGUARD_BACKEND = "https://quake-alert-18.emergent.host"; // no trailing /
-  // ========================================================================
-
-  var btn        = document.getElementById("qg-trigger-btn");
-  var banner     = document.getElementById("qg-banner");
-  var bannerText = banner && banner.querySelector(".qg-banner-text");
-  var bannerIcon = banner && banner.querySelector(".qg-banner-icon");
-  var bannerX    = banner && banner.querySelector(".qg-banner-close");
-  var modal      = document.getElementById("qg-modal-backdrop");
-  var modalOk    = modal && modal.querySelector(".qg-modal-ok");
-  if (!btn || !banner || !modal) {
-    // Not on a page with the trigger UI — nothing to wire up.
-    return;
+  ul.userlist { list-style: none; padding: 0; margin: 0; }
+  ul.userlist li {
+    padding: 10px;
+    border-radius: 8px;
+    margin-bottom: 8px;
+    border-left: 4px solid #ccc;
+    background: var(--bg);
+    font-size: 13px;
   }
-
-  var bannerTimer = null;
-  function showBanner(kind, text, autoDismissMs) {
-    if (bannerTimer) { clearTimeout(bannerTimer); bannerTimer = null; }
-    banner.classList.remove("ok", "err");
-    banner.classList.add(kind);
-    bannerIcon.textContent = kind === "ok" ? "✓" : "!";
-    bannerText.textContent = text;
-    void banner.offsetWidth;
-    banner.classList.add("show");
-    if (autoDismissMs && autoDismissMs > 0) {
-      bannerTimer = setTimeout(hideBanner, autoDismissMs);
-    }
+  li.safe { border-color: var(--safe); }
+  li.trapped-red { border-color: var(--trapped); background: #fdecea; }
+  li.trapped-yellow { border-color: var(--waiting); }
+  li.trapped-green { border-color: var(--safe); }
+  li.waiting { border-color: var(--waiting); }
+  li.danger { border-color: var(--danger); }
+  li .id { font-weight: 700; }
+  li .meta { color: #666; margin-top: 2px; }
+  .badge {
+    display: inline-block;
+    padding: 1px 7px;
+    border-radius: 10px;
+    font-size: 10px;
+    font-weight: 700;
+    color: #fff;
+    margin-left: 6px;
   }
-  function hideBanner() {
-    banner.classList.remove("show");
-    if (bannerTimer) { clearTimeout(bannerTimer); bannerTimer = null; }
+  .badge.bt { background: #455a64; }
+  .badge.sos { background: #c62828; }
+  .sos-label {
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    color: #c62828;
+    font-weight: 800;
+    font-size: 11px;
+    text-shadow: 0 0 3px #fff, 0 0 3px #fff, 0 0 3px #fff;
   }
-  bannerX.addEventListener("click", hideBanner);
-
-  function showWrongPasswordModal() {
-    modal.classList.add("show");
-    setTimeout(function () { modalOk && modalOk.focus(); }, 50);
+  button.demo {
+    background: #1c2b36;
+    color: #fff;
+    border: none;
+    padding: 8px 14px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 12px;
   }
-  function hideModal() { modal.classList.remove("show"); }
-  modalOk.addEventListener("click", hideModal);
-  modal.addEventListener("click", function (e) {
-    if (e.target === modal) hideModal();
-  });
-  document.addEventListener("keydown", function (e) {
-    if (e.key === "Escape" && modal.classList.contains("show")) hideModal();
-  });
-
-  btn.addEventListener("click", async function onTriggerClick() {
-    var confirmed = window.confirm(
-      "Broadcast an EARTHQUAKE ALERT to every registered device?\n\n" +
-      "This will push a notification to all installed apps and flip their " +
-      "dashboard status to 'not responding' until they mark themselves safe."
-    );
-    if (!confirmed) return;
-
-    var pwd = window.prompt("Enter emergency personnel password:");
-    if (!pwd) { showBanner("err", "Cancelled — no alert sent.", 4000); return; }
-
-    btn.disabled = true;
-    showBanner("ok", "Broadcasting alert…", 0);
-
-    try {
-      var res = await fetch(QUAKEGUARD_BACKEND + "/api/trigger-alert", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Admin-Token": pwd
-        },
-        body: JSON.stringify({
-          triggeredBy: "dashboard",
-          magnitude: 6.4,
-          distance_km: 12,
-          intensity: "VII"
-        })
-      });
-
-      if (res.status === 401) {
-        hideBanner();
-        showWrongPasswordModal();
-        return;
-      }
-      if (!res.ok) {
-        showBanner("err", "Server error (" + res.status + "). Alert NOT sent.");
-        return;
-      }
-
-      var data = await res.json();
-      var n = (data && typeof data.recipients === "number") ? data.recipients : 0;
-      var delivered = data && data.push_delivered;
-      var text =
-        "ALERT BROADCAST — " + n + " device" + (n === 1 ? "" : "s") +
-        (delivered === false ? " (delivery issue — check /api/admin/last-push-events)" : "");
-      showBanner(delivered === false ? "err" : "ok", text, delivered === false ? 0 : 6000);
-    } catch (e) {
-      showBanner("err", "Network error: " + (e && e.message ? e.message : e));
-    } finally {
-      btn.disabled = false;
-    }
-  });
-})();
-
-/* ── Recent activity / audit log widget ── */
-(function initQuakeGuardAuditLog() {
-  var QUAKEGUARD_BACKEND = "https://quake-alert-18.emergent.host"; // no trailing /
-  var LIMIT = 100;
-  var POLL_MS = 10000;
-
-  var body = document.getElementById("qg-audit-body");
-  var meta = document.getElementById("qg-audit-meta");
-  if (!body || !meta) return;
-
-  function esc(s) {
-    return String(s == null ? "" : s)
-      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+</style>
+<style>
+  #qg-trigger-wrap {
+    position: relative;
+    display: inline-block;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   }
-  function sevColor(s) {
-    if (s === "red")    return "#C21818";
-    if (s === "yellow") return "#EA9500";
-    if (s === "green")  return "#2E7D32";
-    return "#666";
+  #qg-trigger-btn {
+    background: #FF3B30;
+    color: #fff;
+    font-size: 15px;
+    font-weight: 800;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    border: none;
+    border-radius: 12px;
+    padding: 14px 22px;
+    cursor: pointer;
+    box-shadow: 0 6px 22px rgba(255, 59, 48, 0.35);
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    transition: transform .08s ease, opacity .15s ease;
   }
-  function mobBadge(m) {
-    if (m === "mobile")  return '<span class="qg-badge" style="background:#2E7D32">can move</span>';
-    if (m === "trapped") return '<span class="qg-badge" style="background:#C21818">trapped/pinned</span>';
-    return "";
-  }
+  #qg-trigger-btn:hover  { transform: translateY(-1px); }
+  #qg-trigger-btn:active { transform: translateY(0); opacity: .9; }
+  #qg-trigger-btn[disabled] { opacity: .55; cursor: not-allowed; }
 
-  function formatEvent(e) {
-    if (e.kind === "trigger") {
-      var delivered = !!e.delivered;
-      var badge =
-        '<span class="qg-badge" style="background:' +
-        (delivered ? "#1F8A3A" : "#C21818") + '">' +
-        (delivered ? "delivered" : "FAILED") + "</span>";
-      var mag = e.magnitude != null ? "M" + esc(e.magnitude) : "M?";
-      var counts =
-        "iOS " + (e.ios_count || 0) + " · Android " + (e.android_count || 0);
-      var err = e.error
-        ? '<div style="color:#c21818;font-size:12px;margin-top:4px"><b>Error:</b> ' + esc(e.error) + "</div>"
-        : "";
-      return (
-        '<div class="qg-audit-row trigger">' +
-          '<div class="qg-audit-title">' +
-            '⚠️ TRIGGER ' + badge +
-            ' · ' + mag + ' · ' + esc(e.recipients_total || 0) + ' device' + (e.recipients_total === 1 ? '' : 's') +
-            ' (' + counts + ')' +
-            ' · by <code>' + esc(e.triggered_by || "dashboard") + '</code>' +
-          '</div>' +
-          err +
-          '<div class="qg-audit-at">' + esc(e.at || "") + '</div>' +
-        '</div>'
-      );
-    }
-    // status
-    var sev = e.severity
-      ? '<span class="qg-badge" style="background:' + sevColor(e.severity) + '">' + esc(e.severity) + "</span>"
-      : "";
-    var mob = mobBadge(e.mobility);
-    var loc = "";
-    if (e.latitude != null && e.longitude != null) {
-      loc = ' · <a href="https://www.google.com/maps/place/' +
-            encodeURIComponent(e.latitude + "," + e.longitude) +
-            '" target="_blank" rel="noopener">📍 map</a>';
-    }
-    var bat = e.battery_pct != null ? " · 🔋 " + esc(e.battery_pct) + "%" : "";
-    return (
-      '<div class="qg-audit-row status">' +
-        '<div class="qg-audit-title">' +
-          '📱 STATUS · <code>' + esc(e.device_id || "") + "</code> → " +
-          '<b>' + esc(e.status || "") + '</b>' + sev + mob + loc + bat +
-        '</div>' +
-        '<div class="qg-audit-at">' + esc(e.at || "") + '</div>' +
-      '</div>'
-    );
+  #qg-banner {
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    min-height: 68px;
+    padding: 14px 22px;
+    z-index: 99998;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    font-size: 20px;
+    font-weight: 800;
+    letter-spacing: .3px;
+    color: #fff;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.25);
+    transform: translateY(-100%);
+    transition: transform .35s cubic-bezier(.2,.9,.3,1);
+    text-align: center;
   }
-
-  async function refreshAudit() {
-    try {
-      var res = await fetch(QUAKEGUARD_BACKEND + "/api/audit?limit=" + LIMIT, {
-        cache: "no-store"
-      });
-      if (!res.ok) throw new Error("HTTP " + res.status);
-      var data = await res.json();
-      var events = (data && data.events) || [];
-      if (events.length === 0) {
-        body.innerHTML = '<div class="qg-audit-empty">No activity yet.</div>';
-      } else {
-        body.innerHTML = events.map(formatEvent).join("");
-      }
-      meta.textContent = events.length + " events · updated " + new Date().toLocaleTimeString();
-    } catch (e) {
-      meta.textContent = "load error: " + (e && e.message ? e.message : e);
-    }
+  #qg-banner.show { transform: translateY(0); }
+  #qg-banner.ok  { background: #1F8A3A; }
+  #qg-banner.err { background: #C21818; }
+  #qg-banner .qg-banner-icon { font-size: 28px; line-height: 1; }
+  #qg-banner .qg-banner-close {
+    background: rgba(255,255,255,0.2);
+    color: #fff;
+    border: 0;
+    border-radius: 999px;
+    width: 32px; height: 32px;
+    font-size: 20px; font-weight: 900;
+    line-height: 1;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    margin-left: 12px;
+    padding: 0;
   }
+  #qg-banner .qg-banner-close:hover { background: rgba(255,255,255,0.32); }
 
-  refreshAudit();
-  setInterval(refreshAudit, POLL_MS);
-})();
+  #qg-modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.72);
+    z-index: 99999;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+  }
+  #qg-modal-backdrop.show { display: flex; }
+  #qg-modal {
+    background: #fff;
+    border-radius: 16px;
+    padding: 32px 32px 24px;
+    max-width: 480px;
+    width: 100%;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.4);
+    border-top: 8px solid #C21818;
+    text-align: center;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  #qg-modal .qg-modal-icon { font-size: 56px; line-height: 1; margin-bottom: 12px; }
+  #qg-modal .qg-modal-title {
+    font-size: 26px;
+    font-weight: 900;
+    color: #C21818;
+    margin-bottom: 8px;
+    letter-spacing: .3px;
+  }
+  #qg-modal .qg-modal-body { font-size: 17px; color: #333; line-height: 1.45; margin-bottom: 22px; }
+  #qg-modal .qg-modal-ok {
+    background: #C21818;
+    color: #fff;
+    border: 0;
+    border-radius: 10px;
+    padding: 14px 40px;
+    font-size: 16px;
+    font-weight: 800;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    cursor: pointer;
+    min-width: 140px;
+  }
+  #qg-modal .qg-modal-ok:hover { background: #A11313; }
+
+  @media (max-width: 520px) {
+    #qg-banner { font-size: 16px; padding: 12px 16px; }
+    #qg-modal .qg-modal-title { font-size: 22px; }
+    #qg-modal .qg-modal-body { font-size: 15px; }
+  }
+</style>
+<style>
+  #qg-audit {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    max-width: 100%;
+    margin: 20px;
+  }
+  #qg-audit .qg-audit-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    margin-bottom: 12px;
+  }
+  #qg-audit h3 { margin: 0; font-size: 18px; font-weight: 800; color: #222; }
+  #qg-audit .qg-audit-meta {
+    font-size: 12px;
+    color: #888;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  #qg-audit .qg-audit-row {
+    background: #fff;
+    border: 1px solid #e6e6ea;
+    border-left-width: 4px;
+    border-radius: 8px;
+    padding: 10px 14px;
+    margin-bottom: 8px;
+  }
+  #qg-audit .qg-audit-row.trigger { border-left-color: #C21818; }
+  #qg-audit .qg-audit-row.status  { border-left-color: #4A90E2; }
+  #qg-audit .qg-audit-title { font-weight: 700; font-size: 14px; color: #222; }
+  #qg-audit .qg-audit-at {
+    color: #888;
+    font-size: 11px;
+    margin-top: 4px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  #qg-audit .qg-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 700;
+    color: #fff;
+    margin-left: 6px;
+    vertical-align: middle;
+  }
+  #qg-audit .qg-audit-empty {
+    color: #888;
+    font-size: 13px;
+    padding: 20px;
+    text-align: center;
+    background: #fafafa;
+    border-radius: 8px;
+  }
+  #qg-audit code {
+    background: #f4f4f6;
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+</style>
+</head>
+<body>
+<div id="qg-trigger-wrap">
+  <button id="qg-trigger-btn" type="button" aria-label="Trigger earthquake alert">
+    <span aria-hidden="true">⚠️</span>
+    Trigger Earthquake Alert
+  </button>
+</div>
+
+<div id="qg-banner" role="status" aria-live="assertive">
+  <span class="qg-banner-icon" aria-hidden="true">✓</span>
+  <span class="qg-banner-text">Ready.</span>
+  <button class="qg-banner-close" type="button" aria-label="Dismiss">×</button>
+</div>
+
+<div id="qg-modal-backdrop" role="alertdialog" aria-modal="true" aria-labelledby="qg-modal-title">
+  <div id="qg-modal">
+    <div class="qg-modal-icon" aria-hidden="true">🔒</div>
+    <div class="qg-modal-title" id="qg-modal-title">Wrong password</div>
+    <div class="qg-modal-body">
+      The password you entered doesn&rsquo;t match. No alert was sent. Try
+      again or contact whoever manages the deployment.
+    </div>
+    <button class="qg-modal-ok" type="button">OK</button>
+  </div>
+</div>
+
+<header>
+  <div>
+    <h1>Quake Angel — Emergency Response Dashboard (PILOT / DEMO)</h1>
+    <p>Live device data. Refreshes every 4 seconds.</p>
+  </div>
+  <button class="demo" onclick="seedDemoData()">Load demo test users</button>
+</header>
+
+<div class="layout">
+  <div id="map-wrap">
+    <div class="map-filters">
+      <button class="map-filter-btn active" data-filter="all" onclick="setFilter('all')">All</button>
+      <button class="map-filter-btn" data-filter="red" onclick="setFilter('red')">🔴 Immediate</button>
+      <button class="map-filter-btn" data-filter="yellow" onclick="setFilter('yellow')">🟡 Serious/Stable</button>
+      <button class="map-filter-btn" data-filter="green" onclick="setFilter('green')">🟢 Minor</button>
+    </div>
+    <div id="map"></div>
+  </div>
+  <div class="sidebar">
+    <div class="stat-row">
+      <div class="stat safe"><div class="num" id="count-safe">0</div><div class="label">Safe</div></div>
+      <div class="stat trapped"><div class="num" id="count-trapped">0</div><div class="label">Trapped</div></div>
+      <div class="stat waiting"><div class="num" id="count-waiting">0</div><div class="label">Unknown</div></div>
+      <div class="stat danger"><div class="num" id="count-danger">0</div><div class="label">Not Responding</div></div>
+    </div>
+    <div class="triage-groups" id="userlist"></div>
+  </div>
+</div>
+
+<div id="qg-audit">
+  <div class="qg-audit-header">
+    <h3>Recent activity</h3>
+    <span class="qg-audit-meta" id="qg-audit-meta">Loading…</span>
+  </div>
+  <div id="qg-audit-body"></div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="dashboard.js"></script>
+</body>
+</html>
