@@ -248,8 +248,9 @@ setInterval(refresh, 4000);
   var bannerText = banner && banner.querySelector(".qg-banner-text");
   var bannerIcon = banner && banner.querySelector(".qg-banner-icon");
   var bannerX    = banner && banner.querySelector(".qg-banner-close");
-  var modal      = document.getElementById("qg-modal-backdrop");
-  var modalOk    = modal && modal.querySelector(".qg-modal-ok");
+  var modal        = document.getElementById("qg-modal-backdrop");
+  var modalOk      = modal && modal.querySelector(".qg-modal-ok");
+  var modalCancel  = modal && modal.querySelector(".qg-modal-cancel");
   if (!btn || !banner || !modal) {
     // Not on a page with the trigger UI — nothing to wire up.
     return;
@@ -279,7 +280,18 @@ setInterval(refresh, 4000);
     setTimeout(function () { modalOk && modalOk.focus(); }, 50);
   }
   function hideModal() { modal.classList.remove("show"); }
-  modalOk.addEventListener("click", hideModal);
+
+  // "Try Again" re-prompts for the password immediately — no need to
+  // re-confirm the broadcast itself, they already agreed to that once.
+  // "Cancel" just closes the modal; nothing is sent.
+  modalOk.addEventListener("click", function () {
+    hideModal();
+    promptForPasswordAndSend();
+  });
+  modalCancel && modalCancel.addEventListener("click", function () {
+    hideModal();
+    showBanner("err", "Cancelled — no alert sent.", 4000);
+  });
   modal.addEventListener("click", function (e) {
     if (e.target === modal) hideModal();
   });
@@ -287,14 +299,7 @@ setInterval(refresh, 4000);
     if (e.key === "Escape" && modal.classList.contains("show")) hideModal();
   });
 
-  btn.addEventListener("click", async function onTriggerClick() {
-    var confirmed = window.confirm(
-      "Broadcast an EARTHQUAKE ALERT to every registered device?\n\n" +
-      "This will push a notification to all installed apps and flip their " +
-      "dashboard status to 'not responding' until they mark themselves safe."
-    );
-    if (!confirmed) return;
-
+  async function promptForPasswordAndSend() {
     var pwd = window.prompt("Enter emergency personnel password:");
     if (!pwd) { showBanner("err", "Cancelled — no alert sent.", 4000); return; }
 
@@ -338,6 +343,16 @@ setInterval(refresh, 4000);
     } finally {
       btn.disabled = false;
     }
+  }
+
+  btn.addEventListener("click", function onTriggerClick() {
+    var confirmed = window.confirm(
+      "Broadcast an EARTHQUAKE ALERT to every registered device?\n\n" +
+      "This will push a notification to all installed apps and flip their " +
+      "dashboard status to 'not responding' until they mark themselves safe."
+    );
+    if (!confirmed) return;
+    promptForPasswordAndSend();
   });
 })();
 
