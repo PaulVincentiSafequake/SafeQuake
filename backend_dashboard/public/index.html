@@ -264,6 +264,23 @@
     letter-spacing: .3px;
   }
   #qg-modal .qg-modal-body { font-size: 17px; color: #333; line-height: 1.45; margin-bottom: 22px; }
+  #qg-modal .qg-modal-actions {
+    display: flex;
+    gap: 12px;
+    justify-content: center;
+  }
+  #qg-modal .qg-modal-cancel {
+    background: #eee;
+    color: #333;
+    border: 0;
+    font-size: 17px;
+    font-weight: 700;
+    padding: 12px 24px;
+    border-radius: 10px;
+    cursor: pointer;
+    min-width: 120px;
+  }
+  #qg-modal .qg-modal-cancel:hover { background: #ddd; }
   #qg-modal .qg-modal-ok {
     background: #C21818;
     color: #fff;
@@ -369,7 +386,10 @@
       The password you entered doesn&rsquo;t match. No alert was sent. Try
       again or contact whoever manages the deployment.
     </div>
-    <button class="qg-modal-ok" type="button">OK</button>
+    <div class="qg-modal-actions">
+      <button class="qg-modal-cancel" type="button">Cancel</button>
+      <button class="qg-modal-ok" type="button">Try Again</button>
+    </div>
   </div>
 </div>
 
