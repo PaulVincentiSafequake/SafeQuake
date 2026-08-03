@@ -2,9 +2,9 @@
   "expo": {
     "name": "Quake Angel",
     "slug": "frontend",
-    "version": "1.0.17",
+    "version": "1.0.21",
     "orientation": "portrait",
-    "icon": "./assets/icons/quake_angel_ios.png",
+    "icon": "./assets/icons/quake_angel_ios_v3.png",
     "scheme": "frontend",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
@@ -22,8 +22,8 @@
     },
     "android": {
       "adaptiveIcon": {
-        "foregroundImage": "./assets/icons/quake_angel_android_fg.png",
-        "backgroundImage": "./assets/icons/quake_angel_android_bg.png",
+        "foregroundImage": "./assets/icons/quake_angel_android_fg_v3.png",
+        "backgroundImage": "./assets/icons/quake_angel_android_bg_v3.png",
         "backgroundColor": "#F5B70E"
       },
       "edgeToEdgeEnabled": true,
