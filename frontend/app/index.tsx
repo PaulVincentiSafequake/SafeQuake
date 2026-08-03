@@ -7,9 +7,11 @@ import * as Haptics from "expo-haptics";
 import * as Location from "expo-location";
 import Constants from "expo-constants";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   ActivityIndicator,
+  AppState,
+  type AppStateStatus,
   Modal,
   Platform,
   Pressable,
@@ -29,7 +31,22 @@ import {
   scheduleCheckInReminders,
 } from "@/src/utils/reminders";
 
-const LAST_SEEN_VERSION_KEY = "quakeguard_last_seen_version";
+// Legacy: pre-1.0.22 we only recorded the last-seen version and cleared the
+// banner on "Dismiss". Kept for one-shot migration.
+const LEGACY_LAST_SEEN_VERSION_KEY = "quakeguard_last_seen_version";
+
+// New (1.0.22+) sticky-reminder keys. Together these let us decide, on every
+// app open / foreground, whether to show the full banner or the "already
+// checked" mini pill.
+const WATCH_CONFIRMED_AT_KEY = "quakeguard_watch_confirmed_at";
+const WATCH_CONFIRMED_VERSION_KEY = "quakeguard_watch_confirmed_version";
+
+// Re-nag interval — even without an app update, the Watch's own software
+// updates can independently re-enable notification mirroring. Two weeks is
+// short enough that a user who checks once will likely still remember the
+// steps; long enough not to feel spammy.
+const WATCH_RECHECK_DAYS = 14;
+const WATCH_RECHECK_MS = WATCH_RECHECK_DAYS * 24 * 60 * 60 * 1000;
 
 const HERO_IMG =
   "https://images.unsplash.com/photo-1772050137595-0116f8dba498?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjY2NjV8MHwxfHNlYXJjaHwxfHxlYXJ0aHF1YWtlJTIwc2Vpc21vZ3JhcGglMjBkYXJrfGVufDB8fHx8MTc4NDcwNTQ2MHww&ixlib=rb-4.1.0&q=85";
@@ -71,50 +88,116 @@ export default function HomeScreen() {
   // during development — has no effect on real devices.
   const { preview } = useLocalSearchParams<{ preview?: string }>();
   const forcePreview = preview === "1";
-  // ── Post-update Apple Watch reminder ───────────────────────────────────
-  // iOS is known to silently reset the Watch app's per-app notification
-  // mirroring toggle after app updates (including TestFlight installs and
-  // name/icon changes) — Apple Support docs and community reports confirm
-  // this. Since we can't detect or control that toggle from JS, we track
-  // the installed version and, on the FIRST launch after any version bump,
-  // surface a dismissible amber card reminding the user to re-check.
-  const [updateReminderVisible, setUpdateReminderVisible] = useState(false);
+  // ── Post-update Apple Watch reminder (sticky) ─────────────────────────
+  // iOS silently resets the Watch app's per-app notification-mirroring
+  // toggle after app updates, and the Watch's own software updates can flip
+  // it independently of the phone app. Since we can't detect or control the
+  // toggle from JS, we surface this to the user on EVERY app open until
+  // they explicitly tap "I've checked this". After confirmation we keep a
+  // small green pill visible so the state is always glanceable, and we
+  // re-nag with the full banner if:
+  //   (a) the app version differs from the version at confirmation, OR
+  //   (b) more than WATCH_RECHECK_DAYS have passed since confirmation.
+  const [watchState, setWatchState] = useState<
+    | { kind: "loading" }
+    | { kind: "hidden" } // non-iOS, or web without preview flag
+    | { kind: "nag"; reason: "never" | "version-change" | "stale" }
+    | { kind: "confirmed"; confirmedAt: number; daysAgo: number; daysUntilNext: number }
+  >({ kind: "loading" });
   const [watchModalOpen, setWatchModalOpen] = useState(false);
   const currentVersion = (Constants.expoConfig?.version as string) ?? null;
 
-  useEffect(() => {
-    // Only meaningful on iOS. Android users don't have this Watch-mirror
-    // toggle to worry about. The forcePreview flag lets devs visually
-    // verify the banner in the web preview.
-    if (Platform.OS !== "ios" && !forcePreview) return;
-    if (!currentVersion) return;
-    (async () => {
-      try {
-        const seen = await AsyncStorage.getItem(LAST_SEEN_VERSION_KEY);
-        // Fresh install (nothing stored) → don't show anything, just record.
-        // Users who install for the first time haven't "updated".
-        if (seen === null && !forcePreview) {
-          await AsyncStorage.setItem(LAST_SEEN_VERSION_KEY, currentVersion);
-          return;
-        }
-        if (seen !== currentVersion || forcePreview) {
-          setUpdateReminderVisible(true);
-        }
-      } catch (e) {
-        console.log("[QuakeGuard] version-seen check failed:", (e as Error)?.message);
+  const evaluateWatchState = useCallback(async () => {
+    // Non-iOS / web without ?preview=1 → the entire feature is a no-op.
+    if (Platform.OS !== "ios" && !forcePreview) {
+      setWatchState({ kind: "hidden" });
+      return;
+    }
+    if (!currentVersion) {
+      setWatchState({ kind: "hidden" });
+      return;
+    }
+    try {
+      const [confirmedAtRaw, confirmedVersion, legacySeen] = await Promise.all([
+        AsyncStorage.getItem(WATCH_CONFIRMED_AT_KEY),
+        AsyncStorage.getItem(WATCH_CONFIRMED_VERSION_KEY),
+        AsyncStorage.getItem(LEGACY_LAST_SEEN_VERSION_KEY),
+      ]);
+
+      // First-launch heuristic: if BOTH new keys are empty AND legacy key is
+      // empty, this is a truly fresh install — do NOT nag on first launch
+      // (they haven't done anything wrong yet). Seed legacy key so the
+      // NEXT launch triggers the nag if they've ignored the setup step.
+      if (!confirmedAtRaw && !confirmedVersion && !legacySeen && !forcePreview) {
+        await AsyncStorage.setItem(LEGACY_LAST_SEEN_VERSION_KEY, currentVersion);
+        setWatchState({ kind: "nag", reason: "never" });
+        return;
       }
-    })();
+
+      const confirmedAt = confirmedAtRaw ? Number(confirmedAtRaw) : NaN;
+      if (!Number.isFinite(confirmedAt) || !confirmedVersion) {
+        setWatchState({ kind: "nag", reason: "never" });
+        return;
+      }
+      if (confirmedVersion !== currentVersion) {
+        setWatchState({ kind: "nag", reason: "version-change" });
+        return;
+      }
+      const now = Date.now();
+      const elapsed = now - confirmedAt;
+      if (elapsed > WATCH_RECHECK_MS) {
+        setWatchState({ kind: "nag", reason: "stale" });
+        return;
+      }
+      const daysAgo = Math.max(0, Math.floor(elapsed / (24 * 60 * 60 * 1000)));
+      const daysUntilNext = Math.max(0, WATCH_RECHECK_DAYS - daysAgo);
+      setWatchState({ kind: "confirmed", confirmedAt, daysAgo, daysUntilNext });
+    } catch (e) {
+      console.log("[QuakeGuard] watch-state eval failed:", (e as Error)?.message);
+      // Fail-safe: nag rather than hide.
+      setWatchState({ kind: "nag", reason: "never" });
+    }
   }, [currentVersion, forcePreview]);
 
-  const dismissUpdateReminder = async () => {
-    setUpdateReminderVisible(false);
+  // Run on mount and every time app returns to foreground. The AppState
+  // listener is what makes the banner truly sticky across sessions —
+  // without it a user who backgrounds the app for a week would need to
+  // fully kill it to trigger a re-check.
+  useEffect(() => {
+    evaluateWatchState();
+  }, [evaluateWatchState]);
+
+  useEffect(() => {
+    const sub = AppState.addEventListener("change", (next: AppStateStatus) => {
+      if (next === "active") {
+        evaluateWatchState();
+      }
+    });
+    return () => sub.remove();
+  }, [evaluateWatchState]);
+
+  const confirmWatchChecked = useCallback(async () => {
     if (!currentVersion) return;
+    const now = Date.now();
     try {
-      await AsyncStorage.setItem(LAST_SEEN_VERSION_KEY, currentVersion);
+      await Promise.all([
+        AsyncStorage.setItem(WATCH_CONFIRMED_AT_KEY, String(now)),
+        AsyncStorage.setItem(WATCH_CONFIRMED_VERSION_KEY, currentVersion),
+        // Keep legacy key in sync so any lingering old reads see a matching
+        // version and don't spuriously nag.
+        AsyncStorage.setItem(LEGACY_LAST_SEEN_VERSION_KEY, currentVersion),
+      ]);
     } catch (e) {
-      console.log("[QuakeGuard] version-seen persist failed:", (e as Error)?.message);
+      console.log("[QuakeGuard] confirm-watch persist failed:", (e as Error)?.message);
     }
-  };
+    setWatchState({
+      kind: "confirmed",
+      confirmedAt: now,
+      daysAgo: 0,
+      daysUntilNext: WATCH_RECHECK_DAYS,
+    });
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+  }, [currentVersion]);
 
   const openWatchModal = () => {
     setWatchModalOpen(true);
@@ -270,8 +353,14 @@ export default function HomeScreen() {
           </SafeAreaView>
         </View>
 
-        {/* Post-update Apple Watch reminder — iOS only, once per version */}
-        {updateReminderVisible ? (
+        {/* Sticky Apple Watch reminder — iOS only. Two mutually-exclusive
+            surfaces:
+              • Full amber banner (state = "nag") until user taps
+                "I've checked this".
+              • Small green pill (state = "confirmed") after confirmation,
+                showing days-ago + days-until-next-check. Always tappable
+                so the user can re-verify at any time. */}
+        {watchState.kind === "nag" ? (
           <View style={styles.section}>
             <View style={styles.updateReminderCard} testID="update-reminder-card">
               <View style={styles.updateReminderHeader}>
@@ -279,36 +368,93 @@ export default function HomeScreen() {
                   <Ionicons name="watch-outline" size={20} color={colors.warning} />
                 </View>
                 <Text style={styles.updateReminderTitle}>
-                  Just updated? Re-check your Apple Watch
+                  {watchState.reason === "stale"
+                    ? "Time to re-check your Apple Watch"
+                    : watchState.reason === "version-change"
+                      ? "Just updated? Re-check your Apple Watch"
+                      : "Check your Apple Watch settings"}
                 </Text>
               </View>
               <Text style={styles.updateReminderBody}>
-                iOS often resets the Watch app&apos;s notification-mirroring
-                toggle back to <Text style={styles.updateReminderBold}>on</Text>{" "}
-                after an app update — even for critical alerts. If you turned
-                it off before, please re-check it now.
+                {watchState.reason === "stale" ? (
+                  <>
+                    It&apos;s been more than {WATCH_RECHECK_DAYS} days since you
+                    last confirmed. Watch software updates can silently reset
+                    the notification-mirroring toggle — please re-verify it&apos;s
+                    still <Text style={styles.updateReminderBold}>off</Text> so
+                    critical alerts ring your iPhone, not just the Watch.
+                  </>
+                ) : watchState.reason === "version-change" ? (
+                  <>
+                    iOS often resets the Watch app&apos;s notification-mirroring
+                    toggle back to <Text style={styles.updateReminderBold}>on</Text>{" "}
+                    after an app update — even for critical alerts. Please
+                    re-verify it&apos;s off.
+                  </>
+                ) : (
+                  <>
+                    If you wear an Apple Watch, iOS may forward critical alerts
+                    to the Watch instead of ringing your iPhone. Turn the Watch
+                    notification-mirroring toggle{" "}
+                    <Text style={styles.updateReminderBold}>off</Text> to make
+                    sure the phone always rings.
+                  </>
+                )}
               </Text>
               <View style={styles.updateReminderActions}>
                 <Pressable
-                  onPress={openWatchModal}
+                  onPress={confirmWatchChecked}
                   style={({ pressed }) => [
                     styles.updateReminderPrimary,
                     pressed && { opacity: 0.85 },
                   ]}
-                  testID="update-reminder-show-steps"
+                  testID="update-reminder-confirm"
                 >
-                  <Text style={styles.updateReminderPrimaryText}>Show me how</Text>
+                  <Ionicons name="checkmark-circle" size={18} color="#1B1005" />
+                  <Text style={styles.updateReminderPrimaryText}>
+                    I&apos;ve checked this
+                  </Text>
                 </Pressable>
                 <Pressable
-                  onPress={dismissUpdateReminder}
+                  onPress={openWatchModal}
                   style={styles.updateReminderSecondary}
-                  testID="update-reminder-dismiss"
+                  testID="update-reminder-show-steps"
                   hitSlop={6}
                 >
-                  <Text style={styles.updateReminderSecondaryText}>Dismiss</Text>
+                  <Text style={styles.updateReminderSecondaryText}>
+                    How do I check?
+                  </Text>
                 </Pressable>
               </View>
+              <Text style={styles.updateReminderFootnote}>
+                We&apos;ll re-check with you every {WATCH_RECHECK_DAYS} days, since
+                Watch updates can reset this toggle too. The app can&apos;t
+                detect or control the toggle directly.
+              </Text>
             </View>
+          </View>
+        ) : watchState.kind === "confirmed" ? (
+          <View style={styles.section}>
+            <Pressable
+              onPress={openWatchModal}
+              style={({ pressed }) => [
+                styles.watchOkPill,
+                pressed && { opacity: 0.85 },
+              ]}
+              testID="watch-ok-pill"
+            >
+              <Ionicons name="checkmark-circle" size={16} color="#1F8A3A" />
+              <Text style={styles.watchOkPillText}>
+                Watch checked
+                {watchState.daysAgo === 0
+                  ? " · today"
+                  : ` · ${watchState.daysAgo} day${watchState.daysAgo === 1 ? "" : "s"} ago`}
+              </Text>
+              <Text style={styles.watchOkPillMeta}>
+                next in {watchState.daysUntilNext}d
+              </Text>
+              <Ionicons name="chevron-forward" size={14} color={colors.onSurfaceTertiary} />
+            </Pressable>
           </View>
         ) : null}
 
@@ -419,9 +565,9 @@ export default function HomeScreen() {
               <AppleWatchNote variant="onboarding" />
             </ScrollView>
             <Pressable
-              onPress={() => {
+              onPress={async () => {
                 setWatchModalOpen(false);
-                dismissUpdateReminder();
+                await confirmWatchChecked();
               }}
               style={({ pressed }) => [
                 styles.watchModalGotIt,
@@ -429,7 +575,8 @@ export default function HomeScreen() {
               ]}
               testID="watch-modal-got-it"
             >
-              <Text style={styles.watchModalGotItText}>GOT IT</Text>
+              <Ionicons name="checkmark-circle" size={20} color="#1B1005" />
+              <Text style={styles.watchModalGotItText}>I&apos;VE CHECKED THIS</Text>
             </Pressable>
           </View>
         </View>
@@ -659,6 +806,8 @@ const styles = StyleSheet.create({
     backgroundColor: colors.warning,
     alignItems: "center",
     justifyContent: "center",
+    flexDirection: "row",
+    gap: 8,
   },
   updateReminderPrimaryText: {
     color: "#1B1005",
@@ -676,6 +825,40 @@ const styles = StyleSheet.create({
     color: colors.onSurfaceTertiary,
     fontSize: 14,
     fontWeight: "700",
+  },
+  updateReminderFootnote: {
+    marginTop: 4,
+    color: colors.onSurfaceTertiary,
+    fontSize: 12,
+    lineHeight: 17,
+    fontStyle: "italic",
+  },
+
+  /* Confirmed-state pill — always visible until the next re-check triggers */
+  watchOkPill: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    alignSelf: "flex-start",
+    backgroundColor: "rgba(31, 138, 58, 0.12)",
+    borderColor: "rgba(31, 138, 58, 0.4)",
+    borderWidth: 1,
+    borderRadius: 999,
+    paddingLeft: 10,
+    paddingRight: 8,
+    paddingVertical: 6,
+  },
+  watchOkPillText: {
+    color: "#7ED89A",
+    fontSize: 12,
+    fontWeight: "700",
+    letterSpacing: 0.2,
+  },
+  watchOkPillMeta: {
+    color: colors.onSurfaceTertiary,
+    fontSize: 11,
+    fontWeight: "600",
+    marginLeft: 4,
   },
 
   /* Apple Watch help modal */
@@ -706,6 +889,8 @@ const styles = StyleSheet.create({
     backgroundColor: colors.warning,
     alignItems: "center",
     justifyContent: "center",
+    flexDirection: "row",
+    gap: 10,
   },
   watchModalGotItText: {
     color: "#1B1005",
