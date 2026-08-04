@@ -117,7 +117,7 @@ backend:
     file: "backend/server.py"
     stuck_count: 0
     priority: "high"
-    needs_retesting: true
+    needs_retesting: false
     status_history:
       - working: true
         agent: "main"
@@ -133,6 +133,18 @@ backend:
           display_name forward on the audit event they insert.
           Manually verified via curl: Paul → short_code=4OLBG; unicode "José"
           preserved through control-char strip; 50-char string capped to 40.
+      - working: true
+        agent: "testing"
+        comment: |
+          Iteration 25 — 20/20 backend tests PASS (100%). Full sanitization
+          matrix (10 cases) verified: omitted/null/empty/whitespace→None,
+          verbatim + trim + unicode preservation (José, 京子) + control char
+          stripping + 40-char cap. /api/devices and /api/audit both expose
+          short_code + display_name; existing fields unchanged (backwards
+          compat OK). mark-rescued / unmark-rescued carry display_name
+          forward. Regression pass: /api/cors-debug shape unchanged;
+          /api/trigger-alert 401/200 auth works. Test rows cleaned up.
+          Regression suite: backend/tests/test_display_name_iteration_25.py.
 
 metadata:
   created_by: "main_agent"
