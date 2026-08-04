@@ -1,6 +1,6 @@
 from fastapi import FastAPI, APIRouter, HTTPException, Header, Query, Body, Request
 from fastapi.responses import HTMLResponse
-from dotenv import load_dotenv
+from dotenv import load_dotenv, dotenv_values
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
@@ -39,7 +39,26 @@ _push_client = httpx.AsyncClient(
 
 # Admin password for the "Trigger Earthquake Alert" dashboard button and the
 # maintenance purge endpoint. Sent as `X-Admin-Token: <password>`.
-ADMIN_TRIGGER_PASSWORD = os.environ.get("ADMIN_TRIGGER_PASSWORD", "")
+#
+# .env-first read (targeted inversion of the default OS-wins priority). Why:
+# the production deploy pipeline injects an OS-level ADMIN_TRIGGER_PASSWORD
+# at container-provision time that survives redeploys and is not editable
+# via any user-facing console. With the default load_dotenv() behavior
+# (override=False), that stale OS value would silently win over whatever we
+# ship in .env, so token rotation via .env would never take effect on prod.
+#
+# We invert the priority for this specific variable ONLY — all other env
+# vars (MONGO_URL, DB_NAME, EMERGENT_PUSH_KEY) keep the default OS-wins
+# priority so the prod-injected MongoDB URL etc. continue to work. Using
+# dotenv_values() rather than override=True on load_dotenv() keeps the
+# scope narrow to this one key.
+#
+# See security incident notes 2026-08-04 in memory/test_credentials.md.
+_env_file_values = dotenv_values(ROOT_DIR / '.env')
+ADMIN_TRIGGER_PASSWORD = (
+    _env_file_values.get("ADMIN_TRIGGER_PASSWORD")
+    or os.environ.get("ADMIN_TRIGGER_PASSWORD", "")
+)
 
 # ---------- CORS allowlist (single source of truth) ----------
 # Both the CORSMiddleware wire-up at the bottom of this file AND the
