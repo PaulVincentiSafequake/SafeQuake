@@ -209,6 +209,19 @@ export default function DiagScreen() {
 
         <Section title="Device identity">
           <Row label="user_id" value={info?.user_id ?? "—"} mono onPress={onCopyUserId} />
+          {/* Rescue code — the same 5-char tail shown prominently on the
+              main screen and on the persistent lock-screen card fired
+              after a trapped submission. Displayed here so support can
+              read it back to a caller over the phone. */}
+          <Row
+            label="rescue code"
+            value={
+              info?.user_id
+                ? String(info.user_id).slice(-5).toUpperCase()
+                : "—"
+            }
+            mono
+          />
           <Row label="platform" value={info?.platform?.toUpperCase() ?? "—"} />
           <Row label="app version" value={info?.app_version ?? "—"} />
           <Row label="build number" value={info?.build_number ?? "—"} />

@@ -125,6 +125,14 @@ class StatusInPayload(BaseModel):
     # Ignored (nulled) by the normalizer for any non-trapped status.
     mobility: Optional[str] = Field(default=None, pattern=r"^(mobile|trapped)$")
 
+    # Optional first name a responder should see next to the pin. Asked once
+    # at first app launch and editable at any time from the main screen.
+    # Sanitized in _normalize_status_payload (trimmed, control chars stripped,
+    # max 40 chars) so mongo receives a clean value regardless of client bugs.
+    # Empty / whitespace-only is normalized to None so the dashboard falls
+    # back to short_code-only display, matching pre-rollout behavior.
+    display_name: Optional[str] = Field(default=None, max_length=200)
+
     # Structured shapes
     location: Optional[LocationPayload] = None
     battery: Optional[BatteryPayload] = None
@@ -141,6 +149,49 @@ class StatusInPayload(BaseModel):
 
     client_name: Optional[str] = None
     timestamp: Optional[str] = None
+
+
+def _short_code(device_id: Optional[str]) -> Optional[str]:
+    """Rescuer-facing tie-breaker code. Last 5 chars of the device_id,
+    uppercased. Not unique globally — it exists ONLY to disambiguate 2-3
+    victim pins already narrowed down by GPS proximity in the field.
+
+    Returns None when device_id is missing / too short to be meaningful.
+    """
+    if not device_id:
+        return None
+    tail = str(device_id)[-5:]
+    if len(tail) < 3:
+        return None
+    return tail.upper()
+
+
+def _sanitize_display_name(raw) -> Optional[str]:
+    """Clean a user-supplied first name for storage.
+
+    - Trims whitespace.
+    - Strips ASCII control chars (keeps unicode letters like é / ñ / 京).
+    - Caps at 40 chars (post-strip) so the dashboard sidebar can render it
+      inline without wrapping oddly.
+    - Empty / whitespace-only / non-str → None (dashboard falls back to
+      short_code-only, matching pre-rollout behavior).
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        try:
+            raw = str(raw)
+        except Exception:
+            return None
+    # Drop ASCII control chars (0x00-0x1F and 0x7F). Keeps unicode letters
+    # so names like "José", "Aiko", "李" pass through untouched.
+    cleaned = "".join(ch for ch in raw if 32 <= ord(ch) < 127 or ord(ch) >= 128)
+    cleaned = cleaned.strip()
+    if not cleaned:
+        return None
+    if len(cleaned) > 40:
+        cleaned = cleaned[:40].rstrip()
+    return cleaned or None
 
 
 def _normalize_status_payload(p: StatusInPayload) -> dict:
@@ -196,6 +247,7 @@ def _normalize_status_payload(p: StatusInPayload) -> dict:
         "status": p.status,
         "severity": severity,
         "mobility": mobility,
+        "display_name": _sanitize_display_name(p.display_name),
         "latitude": lat,
         "longitude": lng,
         "accuracy_m": acc,
@@ -260,6 +312,15 @@ async def get_devices(
     def clean(r: dict) -> dict:
         return {
             "device_id": r.get("device_id"),
+            # short_code is derived on read, not stored — that way any change
+            # to the algorithm (e.g. hash-based instead of tail) applies to
+            # existing rows without a migration.
+            "short_code": _short_code(r.get("device_id")),
+            # Optional first name captured at first app launch. Nullable —
+            # dashboards should render "NAME · CODE" when present and fall
+            # back to "CODE" alone when not, so pre-rollout devices without
+            # a name still work.
+            "display_name": r.get("display_name"),
             "status": r.get("status") or "unknown",
             "severity": r.get("severity"),
             "mobility": r.get("mobility"),
@@ -362,6 +423,13 @@ async def get_audit_log(
             base = {
                 "at": r.get("recorded_at") or r.get("updated_at"),
                 "device_id": r.get("device_id"),
+                # Same derivation as /api/devices so the dashboard sees a
+                # single stable identifier scheme across both feeds.
+                "short_code": _short_code(r.get("device_id")),
+                # Snapshotted at the moment the event was recorded, so an
+                # old audit row keeps its historical name even if the user
+                # later changes it in settings.
+                "display_name": r.get("display_name"),
                 "status": r.get("status"),
                 "severity": r.get("severity"),
                 "mobility": r.get("mobility"),
@@ -724,6 +792,7 @@ async def mark_rescued(
             "status": "rescued",
             "severity": None,
             "mobility": None,
+            "display_name": current.get("display_name"),
             "latitude": current.get("latitude"),
             "longitude": current.get("longitude"),
             "accuracy_m": current.get("accuracy_m"),
@@ -812,6 +881,7 @@ async def unmark_rescued(
             "status": restored_status,
             "severity": restored_severity,
             "mobility": restored_mobility,
+            "display_name": current.get("display_name"),
             "latitude": current.get("latitude"),
             "longitude": current.get("longitude"),
             "accuracy_m": current.get("accuracy_m"),

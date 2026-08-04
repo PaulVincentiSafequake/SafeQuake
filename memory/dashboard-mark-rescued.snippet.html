@@ -8,14 +8,21 @@
      block into your dashboard once (it's self-contained — CSS + HTML + JS).
   2. A tiny JS API you can call from your existing map-pin popup code:
 
-        QuakeAngelRescue.mark(deviceId, { onDone, notes })      // opens confirm → POST /api/mark-rescued
-        QuakeAngelRescue.unmark(deviceId, { onDone })           // POST /api/unmark-rescued
+        QuakeAngelRescue.mark(deviceOrId, { onDone, notes })    // opens confirm → POST /api/mark-rescued
+        QuakeAngelRescue.unmark(deviceOrId, { onDone })         // POST /api/unmark-rescued
         QuakeAngelRescue.renderButton(container, device)        // renders a Mark/Undo button that flips
                                                                 // based on device.status === 'rescued'
 
-     Where `device` is the object your dashboard already has from GET /api/devices
-     (it needs at minimum `device_id`, `status`, and — for Undo — the object
-     retains its own state; no need to fetch again).
+     Where `deviceOrId` is EITHER a raw device_id string (backwards-compatible
+     with the pre-name-code integration) OR the full device object returned
+     from GET /api/devices. Passing the full object lets the confirm dialog
+     render "NAME · CODE" — the human-readable identifier a responder sees
+     next to a pin — instead of just the raw device_id.
+
+     `device` for renderButton() needs at minimum `device_id` and `status`;
+     `short_code` and `display_name` are optional and used to enrich the
+     confirm dialog (both are returned by GET /api/devices as of the rescue-
+     code rollout).
 
   HOW TO WIRE INTO YOUR EXISTING MAP POPUP
   ----------------------------------------
@@ -328,13 +335,45 @@ window.QuakeAngelRescue = (function () {
     return await res.json();
   }
 
-  function mark(deviceId, opts) {
+  /* Human-readable identifier for the confirm dialogs and toasts.
+   *
+   * device: an object with { device_id, short_code, display_name } — but
+   * `mark()` / `unmark()` accept a bare deviceId string on their public
+   * signature, so callers that only have the ID string can pass it and
+   * still get a sensible (code-only) rendering. When short_code isn't
+   * derivable we fall back to the raw device_id, matching pre-rollout
+   * behavior.
+   */
+  function renderIdent(deviceOrId) {
+    if (!deviceOrId) return "";
+    var did, code, name;
+    if (typeof deviceOrId === "string") {
+      did = deviceOrId;
+      code = did.length >= 3 ? did.slice(-5).toUpperCase() : "";
+      name = "";
+    } else {
+      did = deviceOrId.device_id || "";
+      code = deviceOrId.short_code || (did ? did.slice(-5).toUpperCase() : "");
+      name = deviceOrId.display_name || "";
+    }
+    if (name && code) {
+      return '<b>' + escapeHtml(name) + '</b> · <code title="' +
+        escapeHtml(did) + '">' + escapeHtml(code) + '</code>';
+    }
+    if (code) {
+      return '<code title="' + escapeHtml(did) + '">' + escapeHtml(code) + '</code>';
+    }
+    return '<code>' + escapeHtml(did) + '</code>';
+  }
+
+  function mark(deviceOrId, opts) {
     opts = opts || {};
+    var deviceId = typeof deviceOrId === "string" ? deviceOrId : deviceOrId.device_id;
     openConfirm({
       icon: "✅",
       title: "Mark as Rescued?",
       bodyHtml:
-        'Confirm <code>' + escapeHtml(deviceId) + '</code> has been ' +
+        'Confirm ' + renderIdent(deviceOrId) + ' has been ' +
         'physically found and is safe. This will move the pin out of the ' +
         'trapped groups into <b>Rescued</b>.',
       ctaLabel: "Confirm",
@@ -370,13 +409,14 @@ window.QuakeAngelRescue = (function () {
     });
   }
 
-  function unmark(deviceId, opts) {
+  function unmark(deviceOrId, opts) {
     opts = opts || {};
+    var deviceId = typeof deviceOrId === "string" ? deviceOrId : deviceOrId.device_id;
     openConfirm({
       icon: "↩️",
       title: "Undo rescue?",
       bodyHtml:
-        'Revert <code>' + escapeHtml(deviceId) + '</code> back to its ' +
+        'Revert ' + renderIdent(deviceOrId) + ' back to its ' +
         'previous trapped state. Use this only if the rescued mark was a ' +
         'mis-click. This is logged in the audit trail.',
       ctaLabel: "Revert",
@@ -409,7 +449,9 @@ window.QuakeAngelRescue = (function () {
 
   function renderButton(container, device) {
     // container: DOM element to render into (we replace its contents)
-    // device: { device_id, status, ... } from GET /api/devices
+    // device: { device_id, short_code, display_name, status, ... } from
+    //         GET /api/devices. We pass the whole device object into
+    //         mark()/unmark() so the confirm dialog can render NAME · CODE.
     if (!container || !device) return;
     var isRescued = device.status === "rescued";
     var btn = document.createElement("button");
@@ -418,7 +460,7 @@ window.QuakeAngelRescue = (function () {
     btn.textContent = isRescued ? "↩️ Undo Rescued" : "✅ Mark as Rescued";
     btn.addEventListener("click", function () {
       if (isRescued) {
-        unmark(device.device_id, {
+        unmark(device, {
           onDone: function (updated) {
             // Rebuild button in-place with restored device shape.
             device.status = updated.restored_status || "trapped";
@@ -430,7 +472,7 @@ window.QuakeAngelRescue = (function () {
           },
         });
       } else {
-        mark(device.device_id, {
+        mark(device, {
           onDone: function (updated) {
             device.status = "rescued";
             device.rescued_at = updated.rescued_at;

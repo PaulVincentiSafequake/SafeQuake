@@ -101,3 +101,79 @@
 #====================================================================================================
 # Testing Data - Main Agent and testing sub agent both should log testing data below this section
 #====================================================================================================
+user_problem_statement: |
+  Rescue-code + optional first-name feature. Help on-site responders identify
+  which pin corresponds to the physical phone in front of them, especially
+  when multiple trapped people are clustered within the same GPS accuracy
+  radius. Show a short 5-char code (last 5 chars of device_id, uppercased)
+  prominently on the app, ask an optional first name once at first launch,
+  fire a persistent lock-screen notification with code+name after Trapped
+  submissions, and surface both fields on the dashboard next to device_id.
+
+backend:
+  - task: "Add display_name field + short_code derivation to /api/status, /api/devices, /api/audit"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: true
+        agent: "main"
+        comment: |
+          Added StatusInPayload.display_name (Optional[str], max_length=200).
+          Added _sanitize_display_name: trims whitespace, strips ASCII control
+          chars (keeps unicode), caps at 40 chars post-clean; empty/whitespace
+          → None. Added _short_code helper: last 5 chars uppercased, returns
+          None for IDs shorter than 3 chars. _normalize_status_payload now
+          persists sanitized display_name into device_status and status_events.
+          /api/devices clean() and /api/audit base dict now expose short_code
+          and display_name. mark-rescued and unmark-rescued also carry
+          display_name forward on the audit event they insert.
+          Manually verified via curl: Paul → short_code=4OLBG; unicode "José"
+          preserved through control-char strip; 50-char string capped to 40.
+
+metadata:
+  created_by: "main_agent"
+  version: "1.1"
+  test_sequence: 1
+  run_ui: false
+
+test_plan:
+  current_focus:
+    - "Backend: /api/status accepts display_name, sanitizes correctly (unicode kept, control chars stripped, 40-char cap, null/empty → None)"
+    - "Backend: /api/devices returns short_code (last 5 chars uppercased) and display_name for every device"
+    - "Backend: /api/audit returns short_code and display_name on every status/rescued/rescue_reverted event"
+    - "Backend: /api/mark-rescued carries display_name forward into the status_events audit row"
+    - "Backend: unchanged endpoints (register-push, trigger-alert, cors-debug) still respond correctly — no regression"
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+  - agent: "main"
+    message: |
+      Please run backend tests focused on the rescue-code + display_name
+      feature. Key scenarios:
+      1. POST /api/status with display_name=null/omitted → device_status.display_name is None; /api/devices response has display_name=None and short_code correctly derived.
+      2. POST /api/status with display_name="Paul" → persisted as "Paul"; /api/devices returns display_name="Paul" and short_code = last 5 chars of device_id uppercased.
+      3. POST /api/status with unicode display_name (e.g. "José", "Aiko", "京子") → preserved verbatim after sanitization.
+      4. POST /api/status with display_name containing ASCII control chars (\x00-\x1F, \x7F) → control chars stripped, letters preserved.
+      5. POST /api/status with display_name > 40 chars → capped to 40 chars in storage.
+      6. POST /api/status with display_name="   " (whitespace only) → stored as None.
+      7. GET /api/audit → every event of kind status/rescued/rescue_reverted has short_code and display_name fields.
+      8. POST /api/mark-rescued for a device with display_name="X" → status_events row for that rescue has display_name="X" and /api/audit returns display_name="X" on the rescued event.
+      9. Regression: /api/cors-debug still returns the right shape (allowed_origins, allow_reason, deploy_fingerprint).
+      10. Regression: /api/trigger-alert admin auth still 401s wrong token and 200s correct one (ADMIN_TRIGGER_PASSWORD=Pt3481pt).
+
+      Credentials: ADMIN_TRIGGER_PASSWORD = "Pt3481pt" (from backend/.env).
+      Backend URL for testing: http://localhost:8001
+      No frontend testing needed this pass — I already verified the pill,
+      first-launch modal, tap-to-edit, and end-to-end name persistence via
+      screenshot flow. The persistent lock-screen notification requires a
+      real EAS build (Expo Go / web preview don't fire local notifications
+      the same way) — that's a known limitation, not a test target.
+
+      Please clean up any test rows you create (delete device_status +
+      status_events with device_id starting with "test-" or "qg-test-").

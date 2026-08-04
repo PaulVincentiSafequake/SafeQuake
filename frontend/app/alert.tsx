@@ -25,8 +25,18 @@ import Animated, {
 } from "react-native-reanimated";
 
 import { colors, radius, spacing } from "@/src/theme";
-import { postStatus, type Mobility, type TriageSeverity } from "@/src/utils/checkin";
-import { cancelCheckInReminders } from "@/src/utils/reminders";
+import {
+  getShortCode,
+  getDisplayName,
+  postStatus,
+  type Mobility,
+  type TriageSeverity,
+} from "@/src/utils/checkin";
+import {
+  cancelCheckInReminders,
+  cancelRescueInfoNotification,
+  postRescueInfoNotification,
+} from "@/src/utils/reminders";
 
 const SIREN_SOURCE = require("../assets/audio/siren.mp3");
 
@@ -407,6 +417,34 @@ export default function AlertScreen() {
       );
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       setStatus("sent");
+
+      // Post-submission side effects: manage the persistent rescue-info
+      // lock-screen card. This is what lets a responder pick up an
+      // unconscious victim's locked phone, read the short code + name off
+      // the lock screen, and match it to a pin on the dashboard — the
+      // whole point of this feature.
+      if (kind === "trapped") {
+        // Fire-and-forget — do NOT block the "sent" UI transition on the
+        // notification API, which occasionally takes a beat on cold-start.
+        (async () => {
+          try {
+            const [code, name] = await Promise.all([
+              getShortCode(),
+              getDisplayName(),
+            ]);
+            await postRescueInfoNotification(code, name);
+          } catch (err) {
+            console.log(
+              "[QuakeAngel] rescue info notification failed:",
+              (err as Error)?.message,
+            );
+          }
+        })();
+      } else if (kind === "safe") {
+        // Safe = no longer trapped → clear any stale rescue card from a
+        // previous trapped submission in the same session.
+        cancelRescueInfoNotification().catch(() => {});
+      }
     } catch (e: any) {
       console.log("[QuakeGuard] check-in error:", e?.message);
       setErrorMsg(e?.message ?? "Network error");

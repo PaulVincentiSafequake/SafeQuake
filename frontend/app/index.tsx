@@ -12,19 +12,30 @@ import {
   ActivityIndicator,
   AppState,
   type AppStateStatus,
+  Keyboard,
+  KeyboardAvoidingView,
   Modal,
   Platform,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from "react-native";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { AppleWatchNote } from "@/src/components/AppleWatchNote";
 import { colors, radius, spacing } from "@/src/theme";
-import { postStatus } from "@/src/utils/checkin";
+import {
+  getDisplayName,
+  getShortCode,
+  markNamePrompted,
+  postStatus,
+  sanitizeDisplayName,
+  setDisplayName,
+  wasNamePrompted,
+} from "@/src/utils/checkin";
 import {
   cancelCheckInReminders,
   ensureNotificationSetup,
@@ -107,6 +118,25 @@ export default function HomeScreen() {
   const [watchModalOpen, setWatchModalOpen] = useState(false);
   const currentVersion = (Constants.expoConfig?.version as string) ?? null;
 
+  // ── Rescue-info identity: short code + optional first name ────────────
+  // The short code is the last 5 chars of the device ID (uppercase), shown
+  // prominently on the main screen and on the persistent lock-screen card
+  // fired after a trapped submission. Together with the optional first name,
+  // it lets an on-site responder confirm which pin corresponds to the
+  // physical phone in front of them — used only as a local tie-breaker
+  // among 2-3 pins already narrowed down by GPS.
+  const [shortCode, setShortCode] = useState<string | null>(null);
+  const [displayName, setDisplayNameState] = useState<string | null>(null);
+  const [nameModalOpen, setNameModalOpen] = useState(false);
+  const [nameDraft, setNameDraft] = useState("");
+  // Track whether the modal was opened by the auto first-launch prompt vs
+  // a manual tap on the pill. Auto-open uses "Skip" copy on the secondary
+  // action; manual edit uses "Cancel". Same modal, different affordance.
+  const [nameModalReason, setNameModalReason] = useState<"auto" | "manual">(
+    "manual",
+  );
+  const [nameSaving, setNameSaving] = useState(false);
+
   const evaluateWatchState = useCallback(async () => {
     // Non-iOS / web without ?preview=1 → the entire feature is a no-op.
     if (Platform.OS !== "ios" && !forcePreview) {
@@ -176,6 +206,42 @@ export default function HomeScreen() {
     return () => sub.remove();
   }, [evaluateWatchState]);
 
+  // Load short code + display name on mount, and open the first-launch
+  // prompt exactly once if the user has never been asked. Using
+  // AsyncStorage + a "prompted" flag keeps this cross-platform (iOS +
+  // Android + web) without bolting it onto the iOS-only onboarding flow.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const [code, name, prompted] = await Promise.all([
+          getShortCode(),
+          getDisplayName(),
+          wasNamePrompted(),
+        ]);
+        if (cancelled) return;
+        setShortCode(code);
+        setDisplayNameState(name);
+        if (!prompted) {
+          // Give the hero animation a beat to settle so the modal doesn't
+          // fight the first paint. Non-blocking — user can dismiss and
+          // will simply see "add your name" affordance on the pill.
+          setTimeout(() => {
+            if (cancelled) return;
+            setNameDraft("");
+            setNameModalReason("auto");
+            setNameModalOpen(true);
+          }, 700);
+        }
+      } catch (e) {
+        console.log("[QuakeAngel] load identity failed:", (e as Error)?.message);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const confirmWatchChecked = useCallback(async () => {
     if (!currentVersion) return;
     const now = Date.now();
@@ -203,6 +269,50 @@ export default function HomeScreen() {
     setWatchModalOpen(true);
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
   };
+
+  // ── Name modal handlers ──────────────────────────────────────────────
+  const openNameEditor = useCallback(() => {
+    setNameDraft(displayName ?? "");
+    setNameModalReason("manual");
+    setNameModalOpen(true);
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+  }, [displayName]);
+
+  const closeNameModal = useCallback(async (options?: { markPrompted?: boolean }) => {
+    setNameModalOpen(false);
+    Keyboard.dismiss();
+    if (options?.markPrompted) {
+      // "Skip" on the first-launch modal → remember we asked so we don't
+      // re-open on next launch. On manual edits (markPrompted=false) we
+      // leave the flag alone (it was already set the first time).
+      try {
+        await markNamePrompted();
+      } catch {
+        // ignore — worst case they see the prompt one more time
+      }
+    }
+  }, []);
+
+  const saveDisplayName = useCallback(async () => {
+    if (nameSaving) return;
+    setNameSaving(true);
+    try {
+      // setDisplayName sanitizes (trim + control-char strip + 40-char cap)
+      // and also flips the "prompted" flag, so both auto-prompt and
+      // manual-edit paths converge on the same persisted state.
+      const saved = await setDisplayName(nameDraft.trim() || null);
+      setDisplayNameState(saved);
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(
+        () => {},
+      );
+    } catch (e) {
+      console.log("[QuakeAngel] save name failed:", (e as Error)?.message);
+    } finally {
+      setNameSaving(false);
+      setNameModalOpen(false);
+      Keyboard.dismiss();
+    }
+  }, [nameDraft, nameSaving]);
 
   const handleTrigger = async () => {
     if (triggering) return;
@@ -350,6 +460,51 @@ export default function HomeScreen() {
             <Text style={styles.tagline}>
               Earthquake preparedness{"\n"}at your fingertips.
             </Text>
+
+            {/* Rescue-code pill — persistent, tap to edit name.
+                Purpose: an on-site responder standing over a possibly
+                unconscious victim can glance at this on the phone screen
+                and match it to a specific pin on the dashboard, without
+                unlocking the device or scanning through a list. This is a
+                LOCAL tie-breaker among 2-3 nearby pins already narrowed
+                down by GPS proximity — not a globally unique identifier.
+                Tapping opens the name editor. */}
+            {shortCode ? (
+              <Pressable
+                onPress={openNameEditor}
+                hitSlop={8}
+                testID="rescue-code-pill"
+                style={({ pressed }) => [
+                  styles.rescuePill,
+                  pressed && { opacity: 0.85 },
+                ]}
+              >
+                <View style={styles.rescuePillLeft}>
+                  <Text style={styles.rescuePillLabel}>RESCUE CODE</Text>
+                  <Text style={styles.rescuePillCode}>{shortCode}</Text>
+                </View>
+                <View style={styles.rescuePillDivider} />
+                <View style={styles.rescuePillRight}>
+                  <Text style={styles.rescuePillLabel}>NAME</Text>
+                  <View style={styles.rescuePillNameRow}>
+                    <Text
+                      style={[
+                        styles.rescuePillName,
+                        !displayName && styles.rescuePillNameEmpty,
+                      ]}
+                      numberOfLines={1}
+                    >
+                      {displayName ?? "Add optional first name"}
+                    </Text>
+                    <Ionicons
+                      name="pencil"
+                      size={13}
+                      color={colors.onSurfaceTertiary}
+                    />
+                  </View>
+                </View>
+              </Pressable>
+            ) : null}
           </SafeAreaView>
         </View>
 
@@ -580,6 +735,152 @@ export default function HomeScreen() {
             </Pressable>
           </View>
         </View>
+      </Modal>
+
+      {/* Name editor modal — served both for the one-shot first-launch
+          prompt (nameModalReason === "auto") and every manual tap on the
+          rescue-code pill (reason === "manual"). Same component, only
+          the secondary-action copy changes. */}
+      <Modal
+        visible={nameModalOpen}
+        animationType="slide"
+        transparent
+        onRequestClose={() =>
+          closeNameModal({ markPrompted: nameModalReason === "auto" })
+        }
+      >
+        <KeyboardAvoidingView
+          behavior={Platform.OS === "ios" ? "padding" : undefined}
+          style={styles.nameModalBackdrop}
+        >
+          <Pressable
+            style={StyleSheet.absoluteFill}
+            onPress={() =>
+              closeNameModal({ markPrompted: nameModalReason === "auto" })
+            }
+          />
+          <View
+            style={[
+              styles.nameModalSheet,
+              { paddingBottom: Math.max(insets.bottom + spacing.md, spacing.xl) },
+            ]}
+          >
+            <View style={styles.watchModalHandle} />
+            <Text style={styles.nameModalTitle}>
+              {nameModalReason === "auto"
+                ? "Add your first name?"
+                : displayName
+                  ? "Edit your first name"
+                  : "Add your first name"}
+            </Text>
+            <Text style={styles.nameModalBody}>
+              Optional — helps a first responder confirm they&apos;ve found the
+              right person, especially over radio. You can change or remove it
+              anytime by tapping the rescue-code pill.
+            </Text>
+
+            <View style={styles.nameInputRow}>
+              <Ionicons
+                name="person"
+                size={18}
+                color={colors.onSurfaceTertiary}
+                style={styles.nameInputIcon}
+              />
+              <TextInput
+                value={nameDraft}
+                onChangeText={(v) => {
+                  // Live-cap at 40 chars so the input never displays more
+                  // than the backend accepts. sanitizeDisplayName re-runs
+                  // on save as a defence-in-depth belt.
+                  const capped = v.length > 40 ? v.slice(0, 40) : v;
+                  setNameDraft(capped);
+                }}
+                placeholder="e.g. Paul"
+                placeholderTextColor={colors.onSurfaceTertiary}
+                autoFocus={nameModalOpen}
+                autoCapitalize="words"
+                autoCorrect={false}
+                maxLength={40}
+                returnKeyType="done"
+                onSubmitEditing={saveDisplayName}
+                style={styles.nameInput}
+                testID="name-input"
+              />
+              {nameDraft.length > 0 ? (
+                <Pressable
+                  onPress={() => setNameDraft("")}
+                  hitSlop={10}
+                  style={styles.nameInputClear}
+                  testID="name-input-clear"
+                >
+                  <Ionicons
+                    name="close-circle"
+                    size={18}
+                    color={colors.onSurfaceTertiary}
+                  />
+                </Pressable>
+              ) : null}
+            </View>
+
+            {/* Live preview so the user can see how their name will appear
+                next to the rescue code on the dashboard. */}
+            <View style={styles.namePreviewRow}>
+              <Text style={styles.namePreviewLabel}>Dashboard shows:</Text>
+              <View style={styles.namePreviewChip}>
+                <Text style={styles.namePreviewChipName} numberOfLines={1}>
+                  {sanitizeDisplayName(nameDraft) ?? "—"}
+                </Text>
+                <Text style={styles.namePreviewChipSep}>·</Text>
+                <Text style={styles.namePreviewChipCode}>
+                  {shortCode ?? "-----"}
+                </Text>
+              </View>
+            </View>
+
+            <Pressable
+              onPress={saveDisplayName}
+              disabled={nameSaving}
+              style={({ pressed }) => [
+                styles.nameModalPrimary,
+                pressed && { opacity: 0.9 },
+                nameSaving && { opacity: 0.7 },
+              ]}
+              testID="name-modal-save"
+            >
+              {nameSaving ? (
+                <ActivityIndicator color={colors.onBrandPrimary} />
+              ) : (
+                <Ionicons
+                  name="checkmark-circle"
+                  size={20}
+                  color={colors.onBrandPrimary}
+                />
+              )}
+              <Text style={styles.nameModalPrimaryText}>
+                {nameSaving
+                  ? "SAVING…"
+                  : nameDraft.trim().length > 0
+                    ? "SAVE"
+                    : displayName
+                      ? "REMOVE MY NAME"
+                      : "SKIP"}
+              </Text>
+            </Pressable>
+
+            <Pressable
+              onPress={() =>
+                closeNameModal({ markPrompted: nameModalReason === "auto" })
+              }
+              style={styles.nameModalSecondary}
+              testID="name-modal-secondary"
+              hitSlop={8}
+            >
+              <Text style={styles.nameModalSecondaryText}>
+                {nameModalReason === "auto" ? "Not now" : "Cancel"}
+              </Text>
+            </Pressable>
+          </View>
+        </KeyboardAvoidingView>
       </Modal>
     </View>
   );
@@ -897,5 +1198,182 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: "800",
     letterSpacing: 2,
+  },
+
+  /* ─── Rescue-code pill (hero) ────────────────────────────────────── */
+  rescuePill: {
+    marginTop: spacing.lg,
+    flexDirection: "row",
+    alignItems: "stretch",
+    alignSelf: "stretch",
+    backgroundColor: "rgba(15,17,21,0.55)",
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.14)",
+    paddingVertical: 10,
+    paddingHorizontal: spacing.md,
+    gap: spacing.md,
+  },
+  rescuePillLeft: {
+    minWidth: 96,
+  },
+  rescuePillDivider: {
+    width: 1,
+    backgroundColor: "rgba(255,255,255,0.14)",
+  },
+  rescuePillRight: {
+    flex: 1,
+    justifyContent: "center",
+  },
+  rescuePillLabel: {
+    color: colors.onSurfaceTertiary,
+    fontSize: 10,
+    fontWeight: "700",
+    letterSpacing: 1.5,
+    marginBottom: 2,
+  },
+  rescuePillCode: {
+    color: colors.onSurface,
+    fontSize: 22,
+    fontWeight: "900",
+    letterSpacing: 3,
+    // Monospaced feel — matters when a responder reads it off the screen
+    // out loud over radio.
+    fontVariant: ["tabular-nums"],
+  },
+  rescuePillNameRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+  },
+  rescuePillName: {
+    flex: 1,
+    color: colors.onSurface,
+    fontSize: 15,
+    fontWeight: "700",
+  },
+  rescuePillNameEmpty: {
+    color: colors.onSurfaceTertiary,
+    fontWeight: "600",
+    fontStyle: "italic",
+  },
+
+  /* ─── Name editor modal ──────────────────────────────────────────── */
+  nameModalBackdrop: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.6)",
+    justifyContent: "flex-end",
+  },
+  nameModalSheet: {
+    backgroundColor: colors.surface,
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    paddingTop: spacing.sm,
+    paddingHorizontal: spacing.xl,
+    gap: spacing.md,
+  },
+  nameModalTitle: {
+    color: colors.onSurface,
+    fontSize: 22,
+    fontWeight: "800",
+    letterSpacing: 0.2,
+    marginTop: spacing.sm,
+  },
+  nameModalBody: {
+    color: colors.onSurfaceSecondary,
+    fontSize: 14,
+    lineHeight: 20,
+  },
+  nameInputRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: colors.surfaceSecondary,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingHorizontal: spacing.md,
+    minHeight: 52,
+  },
+  nameInputIcon: {
+    marginRight: spacing.sm,
+  },
+  nameInput: {
+    flex: 1,
+    color: colors.onSurface,
+    fontSize: 17,
+    fontWeight: "600",
+    paddingVertical: Platform.OS === "ios" ? 14 : 8,
+  },
+  nameInputClear: {
+    padding: 6,
+    marginLeft: 4,
+  },
+  namePreviewRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.sm,
+    flexWrap: "wrap",
+  },
+  namePreviewLabel: {
+    color: colors.onSurfaceTertiary,
+    fontSize: 12,
+    fontWeight: "700",
+    letterSpacing: 0.5,
+    textTransform: "uppercase",
+  },
+  namePreviewChip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    backgroundColor: colors.surfaceSecondary,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+  },
+  namePreviewChipName: {
+    color: colors.onSurface,
+    fontSize: 14,
+    fontWeight: "700",
+    maxWidth: 180,
+  },
+  namePreviewChipSep: {
+    color: colors.onSurfaceTertiary,
+    fontSize: 14,
+    fontWeight: "700",
+  },
+  namePreviewChipCode: {
+    color: colors.brandPrimary,
+    fontSize: 14,
+    fontWeight: "900",
+    letterSpacing: 2,
+  },
+  nameModalPrimary: {
+    marginTop: spacing.sm,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: spacing.sm,
+    height: 54,
+    borderRadius: radius.md,
+    backgroundColor: colors.brandPrimary,
+  },
+  nameModalPrimaryText: {
+    color: colors.onBrandPrimary,
+    fontSize: 15,
+    fontWeight: "800",
+    letterSpacing: 2,
+  },
+  nameModalSecondary: {
+    height: 44,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  nameModalSecondaryText: {
+    color: colors.onSurfaceTertiary,
+    fontSize: 14,
+    fontWeight: "700",
+    letterSpacing: 1,
   },
 });

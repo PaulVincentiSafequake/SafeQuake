@@ -163,7 +163,7 @@
       return (
         '<div class="qg-audit-row rescued">' +
           '<div class="qg-audit-title">' +
-            '✅ RESCUED · <code>' + esc(e.device_id || "") + '</code>' +
+            '✅ RESCUED · ' + renderIdent(e) +
             ' was <b>' + esc(e.prior_status || "trapped") + '</b>' + priorSev +
             ' · closed by <code>' + esc(e.rescued_by || "dashboard") + '</code>' +
           '</div>' +
@@ -181,7 +181,7 @@
       return (
         '<div class="qg-audit-row rescue_reverted">' +
           '<div class="qg-audit-title">' +
-            '↩️ RESCUE REVERTED · <code>' + esc(e.device_id || "") + '</code>' +
+            '↩️ RESCUE REVERTED · ' + renderIdent(e) +
             ' restored to <b>' + esc(e.restored_status || e.status || "trapped") + '</b>' + restoredSev +
             ' · by <code>' + esc(e.reverted_by || "dashboard") + '</code>' +
           '</div>' +
@@ -207,12 +207,38 @@
     return (
       '<div class="qg-audit-row status">' +
         '<div class="qg-audit-title">' +
-          '📱 STATUS · <code>' + esc(e.device_id || "") + "</code> → " +
+          '📱 STATUS · ' + renderIdent(e) + " → " +
           '<b>' + esc(e.status || "") + '</b>' + sev + mob + loc + bat +
         '</div>' +
         '<div class="qg-audit-at">' + esc(e.at || "") + '</div>' +
       '</div>'
     );
+  }
+
+  /* renderIdent(e)
+   *
+   * Builds the human-readable device identifier chunk used in every audit
+   * row. Prefers "<name> · <CODE>" when both are known, falls back to
+   * "<CODE>" if only the code is known, and finally to the raw device_id
+   * if the backend somehow shipped no short_code (pre-rollout rows). In
+   * every case we hover-expose the full device_id via `title=` so an
+   * operator can still copy it when needed.
+   *
+   * Kept as a single helper so all four event kinds render the identifier
+   * identically — divergence between rows was the original problem this
+   * feature solves.
+   */
+  function renderIdent(e) {
+    var did = esc(e.device_id || "");
+    var code = e.short_code ? esc(e.short_code) : "";
+    var name = e.display_name ? esc(e.display_name) : "";
+    if (name && code) {
+      return '<b>' + name + '</b> · <code title="' + did + '">' + code + '</code>';
+    }
+    if (code) {
+      return '<code title="' + did + '">' + code + '</code>';
+    }
+    return '<code>' + did + '</code>';
   }
 
   async function refresh() {
