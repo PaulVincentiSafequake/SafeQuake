@@ -906,6 +906,116 @@ async def unmark_rescued(
     }
 
 
+@api_router.post("/admin/redact-notes")
+async def redact_notes(
+    payload: dict = Body(...),
+    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
+):
+    """Blank the `notes` field on rescued / rescue_reverted audit rows for
+    one or more devices. Purpose: allow an operator to purge sensitive text
+    that was accidentally typed into the notes field (which is currently
+    rendered in the public dashboard Recent-Activity feed).
+
+    Admin-gated. Idempotent — re-running on an already-redacted row is a
+    no-op. Also blanks any `notes` field on the corresponding device_status
+    row as defence-in-depth (mark-rescued doesn't persist notes onto
+    device_status today, but we redact there too in case a future writer
+    starts).
+
+    Payload:
+        {
+          "device_ids": ["qg-...", "qg-..."],   // required, 1..50
+          "kinds":      ["rescued", "rescue_reverted"],  // optional, default both
+          "reason":     "incident-2026-08-04"    // optional, appears in redaction marker
+        }
+
+    Response:
+        {
+          "redacted_status_events": N,
+          "redacted_device_status": M,
+          "matched_devices": [...],
+          "unknown_devices": [...]
+        }
+
+    Never echoes the redacted content back — that would defeat the point.
+    """
+    if not ADMIN_TRIGGER_PASSWORD:
+        raise HTTPException(500, "ADMIN_TRIGGER_PASSWORD not configured on server")
+    if x_admin_token != ADMIN_TRIGGER_PASSWORD:
+        raise HTTPException(401, "Invalid or missing X-Admin-Token")
+
+    raw_ids = payload.get("device_ids") or payload.get("deviceIds")
+    if not isinstance(raw_ids, list) or not raw_ids:
+        raise HTTPException(400, "device_ids must be a non-empty list")
+    if len(raw_ids) > 50:
+        raise HTTPException(400, "device_ids capped at 50 per request")
+    device_ids = [str(x).strip() for x in raw_ids if str(x).strip()]
+    if not device_ids:
+        raise HTTPException(400, "device_ids must contain at least one non-empty id")
+
+    # `kinds` is kept in the API surface for forward-compat, but the current
+    # storage layer doesn't persist a `kind` field on status_events — kind
+    # is derived on read in /api/audit from `status`, `rescue_reverted`, etc.
+    # So instead of filtering by a non-existent DB field, we redact any row
+    # that has a non-empty `notes` field for the listed device_ids. Notes
+    # are only ever written by mark-rescued today, so in practice this only
+    # touches rescued / rescue_reverted rows regardless — which is the
+    # intent. We still validate `kinds` for input hygiene.
+    kinds = payload.get("kinds")
+    if kinds is None:
+        kinds = ["rescued", "rescue_reverted"]
+    if not isinstance(kinds, list) or not all(
+        k in {"rescued", "rescue_reverted"} for k in kinds
+    ):
+        raise HTTPException(400, "kinds must be a list of 'rescued' | 'rescue_reverted'")
+
+    reason = str(payload.get("reason") or "").strip()
+    reason_suffix = f"; reason={reason}" if reason else ""
+    marker = (
+        f"[REDACTED — notes purged by admin{reason_suffix}; "
+        f"see /api/admin/redact-notes]"
+    )
+
+    # Which of the requested device_ids actually exist? Report unknowns so
+    # the caller notices typos rather than silently no-op-ing.
+    existing = await db.status_events.distinct(
+        "device_id", {"device_id": {"$in": device_ids}}
+    )
+    unknown = [d for d in device_ids if d not in existing]
+
+    # Redact any status_events row that has non-empty notes for one of the
+    # listed device_ids. Idempotent — we exclude rows already carrying the
+    # exact marker, so re-runs are a true no-op instead of resetting rows
+    # to a fresh marker string.
+    ev_res = await db.status_events.update_many(
+        {
+            "device_id": {"$in": device_ids},
+            "notes": {"$exists": True, "$nin": [None, "", marker]},
+        },
+        {"$set": {"notes": marker}},
+    )
+
+    # Defence-in-depth: same on device_status.
+    ds_res = await db.device_status.update_many(
+        {
+            "device_id": {"$in": device_ids},
+            "notes": {"$exists": True, "$nin": [None, "", marker]},
+        },
+        {"$set": {"notes": marker}},
+    )
+
+    return {
+        "redacted_status_events": ev_res.modified_count,
+        "redacted_device_status": ds_res.modified_count,
+        "matched_devices": sorted(existing),
+        "unknown_devices": unknown,
+        "kinds_requested": kinds,
+        "marker": marker,
+    }
+
+
+
+
 @api_router.post("/trigger-alert")
 async def trigger_alert(
     body: TriggerAlertBody,
