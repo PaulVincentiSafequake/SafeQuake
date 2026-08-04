@@ -15,6 +15,7 @@ L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
 const markers = new Map();
 let lastUsers = [];
 let currentFilter = "all"; // "all" | "red" | "yellow" | "green"
+const selectedForRescue = new Set(); // device IDs checked for group rescue
 
 function colorFor(status, severity) {
   if (status === "trapped") {
@@ -192,7 +193,11 @@ function itemHtml(u) {
   const rescueSlot = showRescue
     ? `<div class="qg-rescue-slot" data-device-id="${u.deviceId}"></div>`
     : "";
+  const bulkCheck = u.status === "trapped"
+    ? `<label class="qg-bulk-check"><input type="checkbox" class="qg-bulk-checkbox" data-device-id="${u.deviceId}"> Select for group rescue</label>`
+    : "";
   return `
+    ${bulkCheck}
     <div class="id">${u.deviceId}${isUrgent(u.status, u.severity) ? '<span class="badge sos">SOS</span>' : ""}</div>
     <div class="meta">${statusLabel(u.status, u.severity)}${mob ? " · " + mob : ""} · Battery ${u.batteryPercent ?? "?"}%</div>
     <div class="meta">Updated: ${u.lastUpdated ? new Date(u.lastUpdated).toLocaleTimeString() : "—"}</div>
@@ -209,6 +214,50 @@ function wireRescueButtons(root, device) {
   slots.forEach((slot) => {
     window.QuakeAngelRescue.renderButton(slot, device);
   });
+}
+
+function updateBulkBar() {
+  const bar = document.getElementById("qg-bulk-bar");
+  const countEl = document.getElementById("qg-bulk-count");
+  if (!bar || !countEl) return;
+  const n = selectedForRescue.size;
+  countEl.textContent = n + (n === 1 ? " selected" : " selected");
+  bar.classList.toggle("show", n > 0);
+}
+
+function wireBulkCheckbox(root, u) {
+  if (!root) return;
+  const cb = root.querySelector ? root.querySelector(".qg-bulk-checkbox") : null;
+  if (!cb) return;
+  cb.checked = selectedForRescue.has(u.deviceId);
+  cb.addEventListener("change", () => {
+    if (cb.checked) selectedForRescue.add(u.deviceId);
+    else selectedForRescue.delete(u.deviceId);
+    updateBulkBar();
+  });
+}
+
+function initBulkBar() {
+  const markBtn = document.getElementById("qg-bulk-mark-btn");
+  const clearBtn = document.getElementById("qg-bulk-clear-btn");
+  if (markBtn) {
+    markBtn.addEventListener("click", () => {
+      if (!window.QuakeAngelRescue || selectedForRescue.size === 0) return;
+      window.QuakeAngelRescue.markBulk(Array.from(selectedForRescue), {
+        onDone: () => {
+          selectedForRescue.clear();
+          updateBulkBar();
+        },
+      });
+    });
+  }
+  if (clearBtn) {
+    clearBtn.addEventListener("click", () => {
+      selectedForRescue.clear();
+      updateBulkBar();
+      document.querySelectorAll(".qg-bulk-checkbox").forEach((cb) => { cb.checked = false; });
+    });
+  }
 }
 
 function buildGroup(title, cls, items, alwaysOpen) {
@@ -235,6 +284,7 @@ function buildGroup(title, cls, items, alwaysOpen) {
       li.innerHTML = itemHtml(u);
       ul.appendChild(li);
       wireRescueButtons(li, u);
+      wireBulkCheckbox(li, u);
     });
   }
 
@@ -245,6 +295,13 @@ function buildGroup(title, cls, items, alwaysOpen) {
 function renderSidebar(users) {
   const container = document.getElementById("userlist");
   container.innerHTML = "";
+
+  // Drop any selections for devices that are no longer trapped (already
+  // rescued some other way, resolved, etc.) so the bulk bar count stays honest.
+  const trappedIds = new Set(users.filter((u) => u.status === "trapped").map((u) => u.deviceId));
+  Array.from(selectedForRescue).forEach((id) => {
+    if (!trappedIds.has(id)) selectedForRescue.delete(id);
+  });
 
   const byRecency = (a, b) => new Date(b.lastUpdated || 0) - new Date(a.lastUpdated || 0);
 
@@ -272,6 +329,8 @@ function renderSidebar(users) {
   document.getElementById("count-danger").textContent = danger;
   const rescuedEl = document.getElementById("count-rescued");
   if (rescuedEl) rescuedEl.textContent = rescued.length;
+
+  updateBulkBar();
 }
 
 async function seedDemoData() {
@@ -279,6 +338,7 @@ async function seedDemoData() {
   refresh();
 }
 
+initBulkBar();
 refresh();
 setInterval(refresh, 4000);
 
