@@ -388,6 +388,7 @@ async def get_audit_log(
         default=None,
         description="Filter to a single event kind: 'trigger', 'status', 'rescued', or 'rescue_reverted'.",
     ),
+    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
 ):
     """Unified, dashboard-facing audit feed.
 
@@ -400,10 +401,26 @@ async def get_audit_log(
       - `rescue_reverted`:  the rescued mark was undone (from status_events
                             with rescue_reverted=True)
 
+    Notes visibility:
+      Free-form operator `notes` on rescued events are ONLY included when the
+      caller provides a valid `X-Admin-Token` header. Unauthenticated callers
+      (i.e. the public dashboard's Recent Activity panel) get `notes_present`
+      as a boolean instead of the note text. This closes the "admin
+      accidentally types a credential into notes → public dashboard leaks it"
+      failure class demonstrated by incident 2026-08-04. Authenticated
+      operators wanting to read notes should hit /api/admin/audit-log (HTML
+      view, already admin-gated) or re-request /api/audit with the token.
+
     CORS is limited to https://safequake.onrender.com,
     https://*.quakeangel.app (any subdomain), and http://localhost:*
     (see middleware config). Field names are stable snake_case.
     """
+    # Only trust the token when the server has one configured — an empty
+    # ADMIN_TRIGGER_PASSWORD must never make anonymous callers "authenticated".
+    is_admin = bool(
+        ADMIN_TRIGGER_PASSWORD and x_admin_token == ADMIN_TRIGGER_PASSWORD
+    )
+
     events: List[dict] = []
 
     # ---- Trigger events ----
@@ -473,15 +490,25 @@ async def get_audit_log(
             elif r.get("status") == "rescued":
                 if not want_rescued:
                     continue
-                events.append({
+                # Notes visibility contract: expose the free-form text only
+                # to admin-authenticated callers. Everyone else gets a
+                # boolean flag so the dashboard can still surface "📝 note
+                # exists, admin-only" without leaking the content. See the
+                # endpoint docstring for the incident that motivated this.
+                raw_notes = r.get("notes")
+                notes_present = bool(raw_notes)
+                rescued_event = {
                     **base,
                     "kind": "rescued",
                     "rescued_by": r.get("rescued_by") or "dashboard",
-                    "notes": r.get("notes"),
+                    "notes_present": notes_present,
                     "prior_status": r.get("prior_status"),
                     "prior_severity": r.get("prior_severity"),
                     "prior_mobility": r.get("prior_mobility"),
-                })
+                }
+                if is_admin:
+                    rescued_event["notes"] = raw_notes
+                events.append(rescued_event)
             else:
                 if not want_status:
                     continue
@@ -512,7 +539,16 @@ async def audit_log_browser(
             "<p>Append <code>?token=&lt;password&gt;</code>.</p>",
             status_code=401,
         )
-    feed = await get_audit_log(limit=limit, since=None, kind=None)  # type: ignore[arg-type]
+    # Pass the admin token through to /api/audit's internal machinery so
+    # this already-admin-gated HTML view still shows the full `notes` field
+    # on rescued events — otherwise the notes-behind-auth change on
+    # /api/audit would blank them here even for legitimate operators.
+    feed = await get_audit_log(
+        limit=limit,
+        since=None,
+        kind=None,
+        x_admin_token=ADMIN_TRIGGER_PASSWORD,
+    )  # type: ignore[arg-type]
 
     def sev_color(s: Optional[str]) -> str:
         return {"red": "#C21818", "yellow": "#EA9500", "green": "#2E7D32"}.get(s or "", "#666")

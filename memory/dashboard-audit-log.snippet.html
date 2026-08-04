@@ -157,9 +157,23 @@
       var priorSev = e.prior_severity
         ? '<span class="qg-badge" style="background:' + sevColor(e.prior_severity) + '">' + esc(e.prior_severity) + '</span>'
         : "";
-      var notes = e.notes
-        ? '<div style="color:#555;font-size:12px;margin-top:4px">📝 ' + esc(e.notes) + '</div>'
-        : "";
+      // Notes rendering:
+      //   • If /api/audit returned an actual `notes` string (admin-authed
+      //     caller), render the note text verbatim.
+      //   • If it only returned `notes_present: true` (public caller —
+      //     the default for a public dashboard iframe), render a
+      //     lock-icon placeholder that hints history exists without
+      //     leaking content. Operators can view the note text via the
+      //     admin-gated /api/admin/audit-log HTML view. This keeps free-
+      //     form operator text out of the public feed by default, closing
+      //     the "credential typed into notes" leak class (incident
+      //     2026-08-04).
+      var notes = "";
+      if (e.notes) {
+        notes = '<div style="color:#555;font-size:12px;margin-top:4px">📝 ' + esc(e.notes) + '</div>';
+      } else if (e.notes_present) {
+        notes = '<div style="color:#888;font-size:12px;margin-top:4px" title="Notes exist but are only visible to admin-authenticated viewers. Open /api/admin/audit-log to read.">🔒 <i>operator note recorded (admin-only)</i></div>';
+      }
       return (
         '<div class="qg-audit-row rescued">' +
           '<div class="qg-audit-title">' +
