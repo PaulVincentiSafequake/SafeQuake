@@ -1,5 +1,5 @@
 /**
- * Dashboard logic. Polls the real QuakeGuard backend every 4 seconds.
+ * Dashboard logic. Polls the real Quake Angel backend every 4 seconds.
  * Shows live device status grouped by triage priority: Immediate (red),
  * Serious/Stable (yellow), Minor (green), and Other (safe / not responding / unknown).
  * The map can show all groups at once, or be filtered to one group at a time.
@@ -22,6 +22,7 @@ function colorFor(status, severity) {
     if (severity === "yellow") return "#f9a825";
     return "#2e7d32"; // green severity, or trapped with no severity yet
   }
+  if (status === "rescued") return "#1F8A3A";
   if (status === "safe") return "#2e7d32";
   if (status === "not_responding") return "#757575";
   return "#455a64"; // unknown
@@ -34,6 +35,7 @@ function statusLabel(status, severity) {
     if (severity === "green") return "Trapped — Minor";
     return "Trapped";
   }
+  if (status === "rescued") return "✅ Rescued (confirmed)";
   if (status === "safe") return "Safe";
   if (status === "not_responding") return "Not responding";
   return "Unknown";
@@ -45,6 +47,7 @@ function statusClass(status, severity) {
     if (severity === "yellow") return "trapped-yellow";
     return "trapped-green";
   }
+  if (status === "rescued") return "rescued";
   if (status === "safe") return "safe";
   if (status === "not_responding") return "danger";
   return "waiting";
@@ -54,16 +57,29 @@ function isUrgent(status, severity) {
   return status === "trapped" && severity === "red";
 }
 
+function mobilityLabel(m) {
+  if (m === "mobile") return "🟢 can move";
+  if (m === "trapped") return "🔴 trapped/pinned";
+  return "";
+}
+
 function normalizeDevice(d) {
   return {
     deviceId: d.device_id,
+    device_id: d.device_id, // QuakeAngelRescue widget expects this exact key
     status: d.status,
     severity: d.severity,
+    mobility: d.mobility,
     latitude: d.latitude,
     longitude: d.longitude,
     batteryPercent: d.battery_pct,
     lastUpdated: d.updated_at,
     platform: d.platform,
+    rescued_at: d.rescued_at,
+    rescued_by: d.rescued_by,
+    pre_rescue_status: d.pre_rescue_status,
+    pre_rescue_severity: d.pre_rescue_severity,
+    pre_rescue_mobility: d.pre_rescue_mobility,
   };
 }
 
@@ -91,10 +107,16 @@ function renderMap(users) {
 
     if (markers.has(u.deviceId)) {
       const m = markers.get(u.deviceId);
+      m._qgDevice = u;
       m.setLatLng([u.latitude, u.longitude]);
       m.setStyle({ color, fillColor: color, weight: urgent ? 4 : 2 });
       m.setRadius(urgent ? 13 : 10);
       m.setPopupContent(popupHtml(u));
+      // If this popup happens to be open right now, re-wire its button too.
+      if (m.isPopupOpen && m.isPopupOpen()) {
+        const el = m.getPopup() && m.getPopup().getElement();
+        if (el) wireRescueButtons(el, m._qgDevice);
+      }
     } else {
       const marker = L.circleMarker([u.latitude, u.longitude], {
         radius: urgent ? 13 : 10,
@@ -103,7 +125,12 @@ function renderMap(users) {
         fillOpacity: 0.85,
         weight: urgent ? 4 : 2,
       }).addTo(map);
+      marker._qgDevice = u;
       marker.bindPopup(popupHtml(u));
+      marker.on("popupopen", () => {
+        const el = marker.getPopup() && marker.getPopup().getElement();
+        if (el) wireRescueButtons(el, marker._qgDevice);
+      });
       if (urgent) {
         marker.bindTooltip("SOS", {
           permanent: true,
@@ -151,15 +178,37 @@ function setFilter(f) {
 window.setFilter = setFilter;
 
 function popupHtml(u) {
-  return `<b>${u.deviceId}</b><br>${statusLabel(u.status, u.severity)}<br>Battery: ${u.batteryPercent ?? "?"}%`;
+  const mob = mobilityLabel(u.mobility);
+  const showRescue = u.status === "trapped" || u.status === "rescued";
+  const rescueSlot = showRescue
+    ? `<div class="qg-rescue-slot" data-device-id="${u.deviceId}"></div>`
+    : "";
+  return `<b>${u.deviceId}</b><br>${statusLabel(u.status, u.severity)}${mob ? "<br>" + mob : ""}<br>Battery: ${u.batteryPercent ?? "?"}%${rescueSlot}`;
 }
 
 function itemHtml(u) {
+  const mob = mobilityLabel(u.mobility);
+  const showRescue = u.status === "trapped" || u.status === "rescued";
+  const rescueSlot = showRescue
+    ? `<div class="qg-rescue-slot" data-device-id="${u.deviceId}"></div>`
+    : "";
   return `
     <div class="id">${u.deviceId}${isUrgent(u.status, u.severity) ? '<span class="badge sos">SOS</span>' : ""}</div>
-    <div class="meta">${statusLabel(u.status, u.severity)} · Battery ${u.batteryPercent ?? "?"}%</div>
+    <div class="meta">${statusLabel(u.status, u.severity)}${mob ? " · " + mob : ""} · Battery ${u.batteryPercent ?? "?"}%</div>
     <div class="meta">Updated: ${u.lastUpdated ? new Date(u.lastUpdated).toLocaleTimeString() : "—"}</div>
+    ${rescueSlot}
   `;
+}
+
+function wireRescueButtons(root, device) {
+  // Finds .qg-rescue-slot placeholders inside `root` and renders the
+  // Mark/Undo Rescued button into them via the QuakeAngelRescue widget
+  // (defined inline in index.html). No-op if that widget isn't loaded.
+  if (!window.QuakeAngelRescue || !root) return;
+  const slots = root.querySelectorAll ? root.querySelectorAll(".qg-rescue-slot") : [];
+  slots.forEach((slot) => {
+    window.QuakeAngelRescue.renderButton(slot, device);
+  });
 }
 
 function buildGroup(title, cls, items, alwaysOpen) {
@@ -185,6 +234,7 @@ function buildGroup(title, cls, items, alwaysOpen) {
       li.className = statusClass(u.status, u.severity);
       li.innerHTML = itemHtml(u);
       ul.appendChild(li);
+      wireRescueButtons(li, u);
     });
   }
 
@@ -201,23 +251,27 @@ function renderSidebar(users) {
   const red = users.filter((u) => u.status === "trapped" && u.severity === "red").sort(byRecency);
   const yellow = users.filter((u) => u.status === "trapped" && u.severity === "yellow").sort(byRecency);
   const green = users.filter((u) => u.status === "trapped" && (u.severity === "green" || !u.severity)).sort(byRecency);
-  const other = users.filter((u) => u.status !== "trapped").sort(byRecency);
+  const rescued = users.filter((u) => u.status === "rescued").sort(byRecency);
+  const other = users.filter((u) => u.status !== "trapped" && u.status !== "rescued").sort(byRecency);
 
   container.appendChild(buildGroup("🔴 IMMEDIATE — seriously injured / can't move", "group-red", red, true));
   container.appendChild(buildGroup("🟡 SERIOUS — STABLE — hurt but stable", "group-yellow", yellow, true));
   container.appendChild(buildGroup("🟢 MINOR — walking wounded", "group-green", green, true));
+  container.appendChild(buildGroup("✅ Rescued — confirmed found & safe", "group-rescued", rescued, false));
   container.appendChild(buildGroup("⚪ Other — Safe / Not Responding / Unknown", "group-other", other, false));
 
   const safe = users.filter((u) => u.status === "safe").length;
   const trapped = red.length + yellow.length + green.length;
   const danger = users.filter((u) => u.status === "not_responding").length;
-  const waiting = users.length - safe - trapped - danger;
+  const waiting = users.length - safe - trapped - danger - rescued.length;
 
   document.getElementById("count-safe").textContent = safe;
   const trappedEl = document.getElementById("count-trapped");
   if (trappedEl) trappedEl.textContent = trapped;
   document.getElementById("count-waiting").textContent = waiting;
   document.getElementById("count-danger").textContent = danger;
+  const rescuedEl = document.getElementById("count-rescued");
+  if (rescuedEl) rescuedEl.textContent = rescued.length;
 }
 
 async function seedDemoData() {
@@ -228,36 +282,74 @@ async function seedDemoData() {
 refresh();
 setInterval(refresh, 4000);
 
+/* ── Trigger button: confirm + password + broadcast, with prominent feedback ── */
 (function initQuakeGuardTriggerButton() {
   // === EDIT THIS ==========================================================
   var QUAKEGUARD_BACKEND = "https://quake-alert-18.emergent.host"; // no trailing /
   // ========================================================================
 
-  var btn    = document.getElementById("qg-trigger-btn");
-  var status = document.getElementById("qg-trigger-status");
-  if (!btn || !status) {
-    // Button not on this page — nothing to wire up.
+  var btn        = document.getElementById("qg-trigger-btn");
+  var banner     = document.getElementById("qg-banner");
+  var bannerText = banner && banner.querySelector(".qg-banner-text");
+  var bannerIcon = banner && banner.querySelector(".qg-banner-icon");
+  var bannerX    = banner && banner.querySelector(".qg-banner-close");
+  var modal        = document.getElementById("qg-modal-backdrop");
+  var modalOk      = modal && modal.querySelector(".qg-modal-ok");
+  var modalCancel  = modal && modal.querySelector(".qg-modal-cancel");
+  if (!btn || !banner || !modal) {
+    // Not on a page with the trigger UI — nothing to wire up.
     return;
   }
 
-  function setStatus(msg, kind) {
-    status.textContent = msg || "";
-    status.className = kind || "";
+  var bannerTimer = null;
+  function showBanner(kind, text, autoDismissMs) {
+    if (bannerTimer) { clearTimeout(bannerTimer); bannerTimer = null; }
+    banner.classList.remove("ok", "err");
+    banner.classList.add(kind);
+    bannerIcon.textContent = kind === "ok" ? "✓" : "!";
+    bannerText.textContent = text;
+    void banner.offsetWidth;
+    banner.classList.add("show");
+    if (autoDismissMs && autoDismissMs > 0) {
+      bannerTimer = setTimeout(hideBanner, autoDismissMs);
+    }
   }
+  function hideBanner() {
+    banner.classList.remove("show");
+    if (bannerTimer) { clearTimeout(bannerTimer); bannerTimer = null; }
+  }
+  bannerX.addEventListener("click", hideBanner);
 
-  btn.addEventListener("click", async function onTriggerClick() {
-    var confirmed = window.confirm(
-      "Broadcast an EARTHQUAKE ALERT to every registered device?\n\n" +
-      "This will push a notification to all installed apps and flip their " +
-      "dashboard status to 'not responding' until they mark themselves safe."
-    );
-    if (!confirmed) return;
+  function showWrongPasswordModal() {
+    modal.classList.add("show");
+    setTimeout(function () { modalOk && modalOk.focus(); }, 50);
+  }
+  function hideModal() { modal.classList.remove("show"); }
 
+  // "Try Again" re-prompts for the password immediately — no need to
+  // re-confirm the broadcast itself, they already agreed to that once.
+  // "Cancel" just closes the modal; nothing is sent.
+  modalOk.addEventListener("click", function () {
+    hideModal();
+    promptForPasswordAndSend();
+  });
+  modalCancel && modalCancel.addEventListener("click", function () {
+    hideModal();
+    showBanner("err", "Cancelled — no alert sent.", 4000);
+  });
+  modal.addEventListener("click", function (e) {
+    if (e.target === modal) hideModal();
+  });
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape" && modal.classList.contains("show")) hideModal();
+  });
+
+  async function promptForPasswordAndSend() {
     var pwd = window.prompt("Enter emergency personnel password:");
-    if (!pwd) { setStatus("Cancelled.", "info"); return; }
+    if (!pwd) { showBanner("err", "Cancelled — no alert sent.", 4000); return; }
 
     btn.disabled = true;
-    setStatus("Broadcasting…", "info");
+    showBanner("ok", "Broadcasting alert…", 0);
 
     try {
       var res = await fetch(QUAKEGUARD_BACKEND + "/api/trigger-alert", {
@@ -275,28 +367,173 @@ setInterval(refresh, 4000);
       });
 
       if (res.status === 401) {
-        setStatus("Wrong password. Alert not sent.", "err");
+        hideBanner();
+        showWrongPasswordModal();
         return;
       }
       if (!res.ok) {
-        setStatus("Server error (" + res.status + "). Alert not sent.", "err");
+        showBanner("err", "Server error (" + res.status + "). Alert NOT sent.");
         return;
       }
 
       var data = await res.json();
-      var n = (data && typeof data.recipients === "number") ? data.recipients : "?";
+      var n = (data && typeof data.recipients === "number") ? data.recipients : 0;
       var delivered = data && data.push_delivered;
-      setStatus(
-        "Alert broadcast to " + n + " device" + (n === 1 ? "" : "s") +
-          (delivered === false
-            ? " (push queued — check EMERGENT_PUSH_KEY on the backend if this persists)."
-            : "."),
-        "ok"
-      );
+      var text =
+        "ALERT BROADCAST — " + n + " device" + (n === 1 ? "" : "s") +
+        (delivered === false ? " (delivery issue — check /api/admin/last-push-events)" : "");
+      showBanner(delivered === false ? "err" : "ok", text, delivered === false ? 0 : 6000);
     } catch (e) {
-      setStatus("Network error: " + (e && e.message ? e.message : e), "err");
+      showBanner("err", "Network error: " + (e && e.message ? e.message : e));
     } finally {
       btn.disabled = false;
     }
+  }
+
+  btn.addEventListener("click", function onTriggerClick() {
+    var confirmed = window.confirm(
+      "Broadcast an EARTHQUAKE ALERT to every registered device?\n\n" +
+      "This will push a notification to all installed apps and flip their " +
+      "dashboard status to 'not responding' until they mark themselves safe."
+    );
+    if (!confirmed) return;
+    promptForPasswordAndSend();
   });
+})();
+
+/* ── Recent activity / audit log widget ── */
+(function initQuakeGuardAuditLog() {
+  var QUAKEGUARD_BACKEND = "https://quake-alert-18.emergent.host"; // no trailing /
+  var LIMIT = 100;
+  var POLL_MS = 10000;
+
+  var body = document.getElementById("qg-audit-body");
+  var meta = document.getElementById("qg-audit-meta");
+  if (!body || !meta) return;
+
+  function esc(s) {
+    return String(s == null ? "" : s)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  }
+  function sevColor(s) {
+    if (s === "red")    return "#C21818";
+    if (s === "yellow") return "#EA9500";
+    if (s === "green")  return "#2E7D32";
+    return "#666";
+  }
+  function mobBadge(m) {
+    if (m === "mobile")  return '<span class="qg-badge" style="background:#2E7D32">can move</span>';
+    if (m === "trapped") return '<span class="qg-badge" style="background:#C21818">trapped/pinned</span>';
+    return "";
+  }
+
+  function formatEvent(e) {
+    if (e.kind === "trigger") {
+      var delivered = !!e.delivered;
+      var badge =
+        '<span class="qg-badge" style="background:' +
+        (delivered ? "#1F8A3A" : "#C21818") + '">' +
+        (delivered ? "delivered" : "FAILED") + "</span>";
+      var mag = e.magnitude != null ? "M" + esc(e.magnitude) : "M?";
+      var counts =
+        "iOS " + (e.ios_count || 0) + " · Android " + (e.android_count || 0);
+      var err = e.error
+        ? '<div style="color:#c21818;font-size:12px;margin-top:4px"><b>Error:</b> ' + esc(e.error) + "</div>"
+        : "";
+      return (
+        '<div class="qg-audit-row trigger">' +
+          '<div class="qg-audit-title">' +
+            '⚠️ TRIGGER ' + badge +
+            ' · ' + mag + ' · ' + esc(e.recipients_total || 0) + ' device' + (e.recipients_total === 1 ? '' : 's') +
+            ' (' + counts + ')' +
+            ' · by <code>' + esc(e.triggered_by || "dashboard") + '</code>' +
+          '</div>' +
+          err +
+          '<div class="qg-audit-at">' + esc(e.at || "") + '</div>' +
+        '</div>'
+      );
+    }
+    // rescued: responder-attested case closure
+    if (e.kind === "rescued") {
+      var priorSev = e.prior_severity
+        ? '<span class="qg-badge" style="background:' + sevColor(e.prior_severity) + '">' + esc(e.prior_severity) + '</span>'
+        : "";
+      var notes = e.notes
+        ? '<div style="color:#555;font-size:12px;margin-top:4px">📝 ' + esc(e.notes) + '</div>'
+        : "";
+      return (
+        '<div class="qg-audit-row rescued">' +
+          '<div class="qg-audit-title">' +
+            '✅ RESCUED · <code>' + esc(e.device_id || "") + '</code>' +
+            ' was <b>' + esc(e.prior_status || "trapped") + '</b>' + priorSev +
+            ' · closed by <code>' + esc(e.rescued_by || "dashboard") + '</code>' +
+          '</div>' +
+          notes +
+          '<div class="qg-audit-at">' + esc(e.at || "") + '</div>' +
+        '</div>'
+      );
+    }
+
+    // rescue_reverted: undo of a mark-rescued
+    if (e.kind === "rescue_reverted") {
+      var restoredSev = e.restored_severity
+        ? '<span class="qg-badge" style="background:' + sevColor(e.restored_severity) + '">' + esc(e.restored_severity) + '</span>'
+        : "";
+      return (
+        '<div class="qg-audit-row rescue_reverted">' +
+          '<div class="qg-audit-title">' +
+            '↩️ RESCUE REVERTED · <code>' + esc(e.device_id || "") + '</code>' +
+            ' restored to <b>' + esc(e.restored_status || e.status || "trapped") + '</b>' + restoredSev +
+            ' · by <code>' + esc(e.reverted_by || "dashboard") + '</code>' +
+          '</div>' +
+          '<div class="qg-audit-at">' + esc(e.at || "") + '</div>' +
+        '</div>'
+      );
+    }
+
+    // status
+    var sev = e.severity
+      ? '<span class="qg-badge" style="background:' + sevColor(e.severity) + '">' + esc(e.severity) + "</span>"
+      : "";
+    var mob = mobBadge(e.mobility);
+    var loc = "";
+    if (e.latitude != null && e.longitude != null) {
+      loc = ' · <a href="https://www.google.com/maps/place/' +
+            encodeURIComponent(e.latitude + "," + e.longitude) +
+            '" target="_blank" rel="noopener">📍 map</a>';
+    }
+    var bat = e.battery_pct != null ? " · 🔋 " + esc(e.battery_pct) + "%" : "";
+    return (
+      '<div class="qg-audit-row status">' +
+        '<div class="qg-audit-title">' +
+          '📱 STATUS · <code>' + esc(e.device_id || "") + "</code> → " +
+          '<b>' + esc(e.status || "") + '</b>' + sev + mob + loc + bat +
+        '</div>' +
+        '<div class="qg-audit-at">' + esc(e.at || "") + '</div>' +
+      '</div>'
+    );
+  }
+
+  async function refreshAudit() {
+    try {
+      var res = await fetch(QUAKEGUARD_BACKEND + "/api/audit?limit=" + LIMIT, {
+        cache: "no-store"
+      });
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      var data = await res.json();
+      var events = (data && data.events) || [];
+      if (events.length === 0) {
+        body.innerHTML = '<div class="qg-audit-empty">No activity yet.</div>';
+      } else {
+        body.innerHTML = events.map(formatEvent).join("");
+      }
+      meta.textContent = events.length + " events · updated " + new Date().toLocaleTimeString();
+    } catch (e) {
+      meta.textContent = "load error: " + (e && e.message ? e.message : e);
+    }
+  }
+
+  refreshAudit();
+  setInterval(refreshAudit, POLL_MS);
 })();
