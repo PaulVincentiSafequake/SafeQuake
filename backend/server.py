@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Header, Query, Body
+from fastapi import FastAPI, APIRouter, HTTPException, Header, Query, Body, Request
 from fastapi.responses import HTMLResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
@@ -40,6 +40,42 @@ _push_client = httpx.AsyncClient(
 # Admin password for the "Trigger Earthquake Alert" dashboard button and the
 # maintenance purge endpoint. Sent as `X-Admin-Token: <password>`.
 ADMIN_TRIGGER_PASSWORD = os.environ.get("ADMIN_TRIGGER_PASSWORD", "")
+
+# ---------- CORS allowlist (single source of truth) ----------
+# Both the CORSMiddleware wire-up at the bottom of this file AND the
+# /api/cors-debug endpoint read from these constants. If you change one and
+# forget the other, the debug endpoint will call it out on next hit.
+CORS_ALLOWED_ORIGINS: List[str] = [
+    # Original Render-hosted dashboard.
+    "https://safequake.onrender.com",
+    # New custom-domain dashboard (multi-city path style).
+    "https://malta.quakeangel.app",
+    # Root domain — reserved for a future landing page / redirector.
+    "https://quakeangel.app",
+    "https://www.quakeangel.app",
+]
+# Any subdomain of quakeangel.app (e.g. london.quakeangel.app, tokyo.quakeangel.app),
+# plus localhost on any port for dashboard dev (Vite 5173, CRA 3000, etc.).
+CORS_ALLOWED_ORIGIN_REGEX = r"^(http://localhost:\d+|https://[a-z0-9-]+\.quakeangel\.app)$"
+
+# ---------- Deploy fingerprint ----------
+# Computed once at process start. Cheap way to tell whether the running
+# instance actually reloaded this file — useful when the dashboard swears
+# it's talking to the "new" backend but CORS says otherwise.
+import hashlib as _hashlib
+import re as _re
+try:
+    _server_py_bytes = (ROOT_DIR / "server.py").read_bytes()
+    _SERVER_PY_SHA256 = _hashlib.sha256(_server_py_bytes).hexdigest()[:12]
+    _SERVER_PY_MTIME = datetime.fromtimestamp(
+        (ROOT_DIR / "server.py").stat().st_mtime, tz=timezone.utc
+    ).isoformat()
+    _SERVER_PY_LINES = _server_py_bytes.count(b"\n") + 1
+except Exception:
+    _SERVER_PY_SHA256 = "unknown"
+    _SERVER_PY_MTIME = "unknown"
+    _SERVER_PY_LINES = 0
+_PROCESS_STARTED_AT = datetime.now(timezone.utc).isoformat()
 
 app = FastAPI()
 api_router = APIRouter(prefix="/api")
@@ -1561,24 +1597,67 @@ async def apns_status_json(
     return await apns_config_status(db)
 
 
+@api_router.get("/cors-debug")
+async def cors_debug(request: Request):
+    """Echo the deployed CORS allowlist and evaluate the caller's Origin
+    against it. Use this to tell code-vs-deploy drift apart at a glance —
+    if the dashboard is empty and this endpoint says allowed=false for the
+    dashboard's origin, the fix is a redeploy, not a code change.
+
+    Not admin-gated: reveals no secrets, just the CORS config that any
+    browser can already probe with an OPTIONS preflight.
+
+    Response fields:
+      request_origin        The Origin header the caller sent (or null).
+      allowed               true if request_origin would pass CORS.
+      allow_reason          "exact_match" | "regex_match" | "no_origin_header"
+                            | "not_allowlisted"
+      allowed_origins       Exact origins currently whitelisted.
+      allowed_origin_regex  Regex applied to any origin not in the exact list.
+      deploy_fingerprint    SHA + mtime of the running server.py — lets you
+                            check "is the running instance the file I just
+                            edited?" without redeploying blind.
+    """
+    origin = request.headers.get("origin")
+
+    allowed = False
+    allow_reason = "no_origin_header"
+    if origin:
+        if origin in CORS_ALLOWED_ORIGINS:
+            allowed = True
+            allow_reason = "exact_match"
+        elif _re.match(CORS_ALLOWED_ORIGIN_REGEX, origin):
+            allowed = True
+            allow_reason = "regex_match"
+        else:
+            allowed = False
+            allow_reason = "not_allowlisted"
+
+    return {
+        "request_origin": origin,
+        "allowed": allowed,
+        "allow_reason": allow_reason,
+        "allowed_origins": CORS_ALLOWED_ORIGINS,
+        "allowed_origin_regex": CORS_ALLOWED_ORIGIN_REGEX,
+        "deploy_fingerprint": {
+            "server_py_sha256_prefix": _SERVER_PY_SHA256,
+            "server_py_mtime_utc": _SERVER_PY_MTIME,
+            "server_py_lines": _SERVER_PY_LINES,
+            "process_started_at_utc": _PROCESS_STARTED_AT,
+        },
+    }
+
+
+
+
 # ---------- Wire up ----------
 app.include_router(api_router)
 
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
-    allow_origins=[
-        # Original Render-hosted dashboard.
-        "https://safequake.onrender.com",
-        # New custom-domain dashboard (multi-city path style).
-        "https://malta.quakeangel.app",
-        # Root domain — reserved for a future landing page / redirector.
-        "https://quakeangel.app",
-        "https://www.quakeangel.app",
-    ],
-    # Any subdomain of quakeangel.app (e.g. london.quakeangel.app, tokyo.quakeangel.app),
-    # plus localhost on any port for dashboard dev (Vite 5173, CRA 3000, etc.).
-    allow_origin_regex=r"^(http://localhost:\d+|https://[a-z0-9-]+\.quakeangel\.app)$",
+    allow_origins=CORS_ALLOWED_ORIGINS,
+    allow_origin_regex=CORS_ALLOWED_ORIGIN_REGEX,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
