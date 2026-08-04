@@ -210,7 +210,8 @@ async def get_devices(
 ):
     """Return every known device's latest state for the rescuer dashboard.
 
-    CORS is limited to https://safequake.onrender.com and http://localhost:*
+    CORS is limited to https://safequake.onrender.com,
+    https://*.quakeangel.app (any subdomain), and http://localhost:*
     (see middleware config below). Response is snake_case, null-safe, and
     stable — field names will not change after this ship.
     """
@@ -283,7 +284,8 @@ async def get_audit_log(
       - `rescue_reverted`:  the rescued mark was undone (from status_events
                             with rescue_reverted=True)
 
-    CORS is limited to https://safequake.onrender.com and http://localhost:*
+    CORS is limited to https://safequake.onrender.com,
+    https://*.quakeangel.app (any subdomain), and http://localhost:*
     (see middleware config). Field names are stable snake_case.
     """
     events: List[dict] = []
@@ -1566,10 +1568,17 @@ app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
     allow_origins=[
+        # Original Render-hosted dashboard.
         "https://safequake.onrender.com",
+        # New custom-domain dashboard (multi-city path style).
+        "https://malta.quakeangel.app",
+        # Root domain — reserved for a future landing page / redirector.
+        "https://quakeangel.app",
+        "https://www.quakeangel.app",
     ],
-    # Localhost on any port for dashboard dev (Vite 5173, CRA 3000, etc.)
-    allow_origin_regex=r"^http://localhost:\d+$",
+    # Any subdomain of quakeangel.app (e.g. london.quakeangel.app, tokyo.quakeangel.app),
+    # plus localhost on any port for dashboard dev (Vite 5173, CRA 3000, etc.).
+    allow_origin_regex=r"^(http://localhost:\d+|https://[a-z0-9-]+\.quakeangel\.app)$",
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
