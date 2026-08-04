@@ -22,7 +22,7 @@
     color: #222;
   }
   header {
-    background: #1c2b36;
+    background: linear-gradient(135deg, #1c2b36 0%, #23384a 55%, #1a2a35 100%);
     color: #fff;
     padding: 14px 20px;
     display: flex;
@@ -30,8 +30,17 @@
     justify-content: space-between;
     flex-wrap: wrap;
     gap: 10px;
+    box-shadow: 0 2px 14px rgba(0,0,0,0.25);
   }
-  header h1 { font-size: 18px; margin: 0; font-weight: 600; }
+  .header-brand { display: flex; align-items: center; gap: 12px; }
+  .header-brand img {
+    width: 40px;
+    height: 40px;
+    border-radius: 10px;
+    box-shadow: 0 3px 10px rgba(0,0,0,0.35), 0 0 0 1px rgba(255,255,255,0.08);
+    flex-shrink: 0;
+  }
+  header h1 { font-size: 18px; margin: 0; font-weight: 700; letter-spacing: .2px; }
   header p { margin: 2px 0 0; font-size: 12px; color: #b7c2cc; }
   .layout { display: flex; height: calc(100vh - 60px); flex-wrap: wrap; }
   #map-wrap { position: relative; flex: 1 1 60%; min-height: 400px; }
@@ -71,18 +80,40 @@
   .stat-row { display: flex; gap: 10px; margin-bottom: 16px; flex-wrap: wrap; }
   .stat {
     flex: 1 1 calc(50% - 5px);
-    background: var(--bg);
-    border-radius: 8px;
-    padding: 10px;
-    text-align: center;
+    background: #fff;
+    border-radius: 14px;
+    padding: 12px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    box-shadow: 0 2px 8px rgba(20,30,40,0.08);
+    border: 1px solid #edeff2;
+    transition: transform .12s ease, box-shadow .12s ease;
   }
-  .stat .num { font-size: 22px; font-weight: 700; }
+  .stat:hover { transform: translateY(-1px); box-shadow: 0 5px 16px rgba(20,30,40,0.13); }
+  .stat-icon {
+    flex-shrink: 0;
+    width: 38px;
+    height: 38px;
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .stat-icon svg { width: 20px; height: 20px; }
+  .stat-text { min-width: 0; }
+  .stat .num { font-size: 21px; font-weight: 800; line-height: 1.05; }
   .stat.safe .num { color: var(--safe); }
   .stat.trapped .num { color: var(--trapped); }
   .stat.waiting .num { color: var(--waiting); }
   .stat.danger .num { color: var(--danger); }
   .stat.rescued .num { color: var(--rescued); }
-  .stat .label { font-size: 11px; color: #666; text-transform: uppercase; }
+  .stat.safe .stat-icon    { background: #e6f4e8; color: var(--safe); }
+  .stat.trapped .stat-icon { background: #fbe6e6; color: var(--trapped); }
+  .stat.waiting .stat-icon { background: #fdf1da; color: #b9790a; }
+  .stat.danger .stat-icon  { background: #ececec; color: var(--danger); }
+  .stat.rescued .stat-icon { background: #e2f5e7; color: var(--rescued); }
+  .stat .label { font-size: 10.5px; color: #777; text-transform: uppercase; letter-spacing: .3px; }
 
   .triage-group {
     margin-bottom: 10px;
@@ -401,9 +432,12 @@
 </div>
 
 <header>
-  <div>
-    <h1>Quake Angel — Emergency Response Dashboard (PILOT / DEMO)</h1>
-    <p>Live device data. Refreshes every 4 seconds.</p>
+  <div class="header-brand">
+    <img src="data:image/png;base64,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" alt="Quake Angel">
+    <div>
+      <h1>Quake Angel &mdash; Emergency Response Dashboard (PILOT / DEMO)</h1>
+      <p>Live device data. Refreshes every 4 seconds.</p>
+    </div>
   </div>
   <button class="demo" onclick="seedDemoData()">Load demo test users</button>
 </header>
@@ -420,11 +454,11 @@
   </div>
   <div class="sidebar">
     <div class="stat-row">
-      <div class="stat safe"><div class="num" id="count-safe">0</div><div class="label">Safe</div></div>
-      <div class="stat trapped"><div class="num" id="count-trapped">0</div><div class="label">Trapped</div></div>
-      <div class="stat waiting"><div class="num" id="count-waiting">0</div><div class="label">Unknown</div></div>
-      <div class="stat danger"><div class="num" id="count-danger">0</div><div class="label">Not Responding</div></div>
-      <div class="stat rescued"><div class="num" id="count-rescued">0</div><div class="label">Rescued</div></div>
+      <div class="stat safe"><div class="stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg></div><div class="stat-text"><div class="num" id="count-safe">0</div><div class="label">Safe</div></div></div>
+      <div class="stat trapped"><div class="stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg></div><div class="stat-text"><div class="num" id="count-trapped">0</div><div class="label">Trapped</div></div></div>
+      <div class="stat waiting"><div class="stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><line x1="12" y1="17" x2="12.01" y2="17"></line></svg></div><div class="stat-text"><div class="num" id="count-waiting">0</div><div class="label">Unknown</div></div></div>
+      <div class="stat danger"><div class="stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.68 13.31a16 16 0 0 0 3.41 2.6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 17.92z"></path><line x1="23" y1="1" x2="1" y2="23"></line></svg></div><div class="stat-text"><div class="num" id="count-danger">0</div><div class="label">Not Responding</div></div></div>
+      <div class="stat rescued"><div class="stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path><path d="m9 12 2 2 4-4"></path></svg></div><div class="stat-text"><div class="num" id="count-rescued">0</div><div class="label">Rescued</div></div></div>
     </div>
     <div class="triage-groups" id="userlist"></div>
   </div>
@@ -513,6 +547,17 @@
     line-height: 1.5;
     margin-bottom: 18px;
   }
+  #qg-rescue-modal .qg-rescue-modal-error {
+    display: none;
+    background: #FDECEA;
+    color: #C21818;
+    border: 1px solid #F5C6C6;
+    border-radius: 8px;
+    padding: 10px 12px;
+    font-size: 13px;
+    margin-bottom: 14px;
+    text-align: left;
+  }
   #qg-rescue-modal .qg-rescue-modal-body code {
     background: #f4f4f6;
     padding: 1px 6px;
@@ -593,6 +638,52 @@
     font-size: 18px; font-weight: 900;
     cursor: pointer; padding: 0;
   }
+
+  /* ── Group-rescue: select multiple, mark together ── */
+  .qg-bulk-check {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: #555;
+    margin-bottom: 6px;
+    cursor: pointer;
+    user-select: none;
+  }
+  .qg-bulk-check input { cursor: pointer; }
+
+  #qg-bulk-bar {
+    position: fixed;
+    left: 50%;
+    bottom: 22px;
+    transform: translateX(-50%) translateY(140%);
+    z-index: 99997;
+    background: #1c2b36;
+    color: #fff;
+    border-radius: 14px;
+    padding: 12px 16px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    box-shadow: 0 10px 34px rgba(0,0,0,0.35);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    transition: transform .25s ease;
+  }
+  #qg-bulk-bar.show { transform: translateX(-50%) translateY(0); }
+  #qg-bulk-bar #qg-bulk-count { font-weight: 700; font-size: 14px; white-space: nowrap; }
+  #qg-bulk-bar button {
+    border: 0;
+    border-radius: 8px;
+    padding: 9px 14px;
+    font-size: 13px;
+    font-weight: 700;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  #qg-bulk-mark-btn { background: #1F8A3A; color: #fff; }
+  #qg-bulk-mark-btn:hover { background: #187030; }
+  #qg-bulk-clear-btn { background: rgba(255,255,255,0.15); color: #fff; }
+  #qg-bulk-clear-btn:hover { background: rgba(255,255,255,0.26); }
 </style>
 
 <!-- Modal (single instance reused for both mark + undo flows) -->
@@ -601,6 +692,7 @@
     <div class="qg-rescue-modal-icon" aria-hidden="true">✅</div>
     <div class="qg-rescue-modal-title">Mark as Rescued?</div>
     <div class="qg-rescue-modal-body"></div>
+    <div class="qg-rescue-modal-error"></div>
     <textarea placeholder="Optional notes (location found, condition, etc.)" style="display:none"></textarea>
     <div class="qg-rescue-modal-btns">
       <button class="qg-rescue-modal-btn cancel" type="button">Cancel</button>
@@ -613,6 +705,13 @@
 <div id="qg-rescue-toast" role="status" aria-live="polite">
   <span class="msg">Ready.</span>
   <button class="close" type="button" aria-label="Dismiss">×</button>
+</div>
+
+<!-- Group-rescue floating bar -->
+<div id="qg-bulk-bar">
+  <span id="qg-bulk-count">0 selected</span>
+  <button id="qg-bulk-mark-btn" type="button">✅ Mark Selected as Rescued</button>
+  <button id="qg-bulk-clear-btn" type="button">Clear</button>
 </div>
 
 <script>
@@ -655,16 +754,27 @@ window.QuakeAngelRescue = (function () {
   var modal    = document.getElementById("qg-rescue-modal");
   var titleEl  = modal.querySelector(".qg-rescue-modal-title");
   var bodyEl   = modal.querySelector(".qg-rescue-modal-body");
+  var errorEl  = modal.querySelector(".qg-rescue-modal-error");
   var iconEl   = modal.querySelector(".qg-rescue-modal-icon");
   var textEl   = modal.querySelector("textarea");
   var okBtn    = modal.querySelector(".qg-rescue-modal-btn.primary");
   var cancelBtn = modal.querySelector(".qg-rescue-modal-btn.cancel");
+
+  function showModalError(msg) {
+    errorEl.textContent = msg;
+    errorEl.style.display = "block";
+  }
+  function clearModalError() {
+    errorEl.style.display = "none";
+    errorEl.textContent = "";
+  }
 
   function closeModal() {
     backdrop.classList.remove("show");
     modal.classList.remove("undo");
     textEl.style.display = "none";
     textEl.value = "";
+    clearModalError();
   }
   cancelBtn.addEventListener("click", closeModal);
   backdrop.addEventListener("click", function (e) {
@@ -679,6 +789,7 @@ window.QuakeAngelRescue = (function () {
     iconEl.textContent = opts.icon;
     titleEl.textContent = opts.title;
     bodyEl.innerHTML = opts.bodyHtml;
+    clearModalError();
     textEl.style.display = opts.showNotes ? "block" : "none";
     textEl.value = "";
     okBtn.textContent = opts.ctaLabel;
@@ -735,13 +846,13 @@ window.QuakeAngelRescue = (function () {
       ctaLabel: "Confirm",
       showNotes: true,
       onConfirm: async function (notes) {
-        closeModal();
-        showToast("warn", "Marking rescued…", 0);
+        clearModalError();
         try {
           var data = await postJson("/api/mark-rescued", {
             deviceId: deviceId,
             notes: notes,
           });
+          closeModal();
           showToast(
             "ok",
             data.already_rescued
@@ -751,14 +862,17 @@ window.QuakeAngelRescue = (function () {
           );
           if (opts.onDone) opts.onDone(data);
         } catch (e) {
+          // Keep the modal open (with notes intact) so the operator can
+          // just retype the password and click Confirm again — no need to
+          // go find this device in the list a second time.
           if (e.status === 401) {
-            showToast("err", "Wrong password. No change made.", 6000);
+            showModalError("Wrong password. Your notes are still here — click Confirm to try again.");
           } else if (e.status === 404) {
-            showToast("err", "Device not found: " + deviceId, 6000);
+            showModalError("Device not found: " + deviceId + ". This case may have already been handled elsewhere.");
           } else if (e.message === "cancelled") {
-            showToast("warn", "Cancelled — no change.", 4000);
+            showModalError("Cancelled — click Confirm to try again, or Cancel to close.");
           } else {
-            showToast("err", "Failed to mark rescued: " + e.message, 0);
+            showModalError("Failed: " + e.message + " — click Confirm to try again.");
           }
         }
       },
@@ -777,10 +891,10 @@ window.QuakeAngelRescue = (function () {
       ctaLabel: "Revert",
       undo: true,
       onConfirm: async function () {
-        closeModal();
-        showToast("warn", "Reverting rescue…", 0);
+        clearModalError();
         try {
           var data = await postJson("/api/unmark-rescued", { deviceId: deviceId });
+          closeModal();
           showToast(
             "ok",
             "Reverted — restored to " + (data.restored_status || "trapped"),
@@ -789,15 +903,70 @@ window.QuakeAngelRescue = (function () {
           if (opts.onDone) opts.onDone(data);
         } catch (e) {
           if (e.status === 401) {
-            showToast("err", "Wrong password. No change made.", 6000);
+            showModalError("Wrong password. Click Revert to try again.");
           } else if (e.status === 409) {
-            showToast("warn", "Device is not currently rescued.", 5000);
+            showModalError("Device is not currently rescued — it may have already been reverted.");
           } else if (e.message === "cancelled") {
-            showToast("warn", "Cancelled — no change.", 4000);
+            showModalError("Cancelled — click Revert to try again, or Cancel to close.");
           } else {
-            showToast("err", "Failed to revert: " + e.message, 0);
+            showModalError("Failed: " + e.message + " — click Revert to try again.");
           }
         }
+      },
+    });
+  }
+
+  function markBulk(deviceIds, opts) {
+    opts = opts || {};
+    deviceIds = (deviceIds || []).slice();
+    if (deviceIds.length === 0) return;
+    openConfirm({
+      icon: "✅",
+      title: "Mark " + deviceIds.length + " as Rescued?",
+      bodyHtml:
+        'Confirm all <b>' + deviceIds.length + '</b> selected people have ' +
+        'been physically found and are safe — for example, a group found ' +
+        'together at the same location. Each will move out of the trapped ' +
+        'groups into <b>Rescued</b>.',
+      ctaLabel: "Confirm All",
+      showNotes: true,
+      onConfirm: async function (notes) {
+        clearModalError();
+        showToast("warn", "Marking " + deviceIds.length + " rescued…", 0);
+        var okCount = 0;
+        var results = [];
+        for (var i = 0; i < deviceIds.length; i++) {
+          try {
+            var data = await postJson("/api/mark-rescued", {
+              deviceId: deviceIds[i],
+              notes: notes,
+            });
+            okCount++;
+            results.push({ deviceId: deviceIds[i], ok: true, data: data });
+          } catch (e) {
+            // Devices already successfully marked in this same run are safe
+            // (the backend call is idempotent) — clicking Confirm All again
+            // simply re-confirms them at no cost, so we just stop here and
+            // let the operator retry the whole batch.
+            hideToast();
+            if (e.status === 401) {
+              showModalError(
+                "Wrong password — stopped after " + okCount + " of " + deviceIds.length +
+                ". Your notes are still here — click Confirm All to retry the rest."
+              );
+            } else {
+              showModalError(
+                "Failed on one device (" + deviceIds[i] + "): " + e.message +
+                ". " + okCount + " succeeded so far — click Confirm All to retry the rest."
+              );
+            }
+            if (opts.onPartialDone) opts.onPartialDone(results);
+            return;
+          }
+        }
+        closeModal();
+        showToast("ok", okCount + " marked rescued.", 6000);
+        if (opts.onDone) opts.onDone(results);
       },
     });
   }
@@ -848,7 +1017,7 @@ window.QuakeAngelRescue = (function () {
       .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
   }
 
-  return { mark: mark, unmark: unmark, renderButton: renderButton };
+  return { mark: mark, unmark: unmark, renderButton: renderButton, markBulk: markBulk };
 })();
 </script>
 
