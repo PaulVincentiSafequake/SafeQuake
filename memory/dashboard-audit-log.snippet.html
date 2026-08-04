@@ -56,8 +56,10 @@
     padding: 10px 14px;
     margin-bottom: 8px;
   }
-  #qg-audit .qg-audit-row.trigger { border-left-color: #C21818; }
-  #qg-audit .qg-audit-row.status  { border-left-color: #4A90E2; }
+  #qg-audit .qg-audit-row.trigger         { border-left-color: #C21818; }
+  #qg-audit .qg-audit-row.status          { border-left-color: #4A90E2; }
+  #qg-audit .qg-audit-row.rescued         { border-left-color: #1F8A3A; background: #f7fdf9; }
+  #qg-audit .qg-audit-row.rescue_reverted { border-left-color: #EA9500; background: #fff8ec; }
   #qg-audit .qg-audit-title { font-weight: 700; font-size: 14px; color: #222; }
   #qg-audit .qg-audit-at {
     color: #888;
@@ -149,9 +151,51 @@
         '</div>'
       );
     }
-    // status
+
+    // ── rescued: responder-attested case closure ────────────────────────
+    if (e.kind === "rescued") {
+      var priorSev = e.prior_severity
+        ? '<span class="qg-badge" style="background:' + sevColor(e.prior_severity) + '">' + esc(e.prior_severity) + '</span>'
+        : "";
+      var notes = e.notes
+        ? '<div style="color:#555;font-size:12px;margin-top:4px">📝 ' + esc(e.notes) + '</div>'
+        : "";
+      return (
+        '<div class="qg-audit-row rescued">' +
+          '<div class="qg-audit-title">' +
+            '✅ RESCUED · <code>' + esc(e.device_id || "") + '</code>' +
+            ' was <b>' + esc(e.prior_status || "trapped") + '</b>' + priorSev +
+            ' · closed by <code>' + esc(e.rescued_by || "dashboard") + '</code>' +
+          '</div>' +
+          notes +
+          '<div class="qg-audit-at">' + esc(e.at || "") + '</div>' +
+        '</div>'
+      );
+    }
+
+    // ── rescue_reverted: undo of a mark-rescued ─────────────────────────
+    if (e.kind === "rescue_reverted") {
+      var restoredSev = e.restored_severity
+        ? '<span class="qg-badge" style="background:' + sevColor(e.restored_severity) + '">' + esc(e.restored_severity) + '</span>'
+        : "";
+      return (
+        '<div class="qg-audit-row rescue_reverted">' +
+          '<div class="qg-audit-title">' +
+            '↩️ RESCUE REVERTED · <code>' + esc(e.device_id || "") + '</code>' +
+            ' restored to <b>' + esc(e.restored_status || e.status || "trapped") + '</b>' + restoredSev +
+            ' · by <code>' + esc(e.reverted_by || "dashboard") + '</code>' +
+          '</div>' +
+          '<div class="qg-audit-at">' + esc(e.at || "") + '</div>' +
+        '</div>'
+      );
+    }
+
+    // ── status: mobile self-report ──────────────────────────────────────
     var sev = e.severity
       ? '<span class="qg-badge" style="background:' + sevColor(e.severity) + '">' + esc(e.severity) + "</span>"
+      : "";
+    var mob = e.mobility
+      ? '<span class="qg-badge" style="background:' + (e.mobility === "trapped" ? "#C21818" : "#2E7D32") + '">' + (e.mobility === "trapped" ? "trapped/pinned" : "can move") + "</span>"
       : "";
     var loc = "";
     if (e.latitude != null && e.longitude != null) {
@@ -164,7 +208,7 @@
       '<div class="qg-audit-row status">' +
         '<div class="qg-audit-title">' +
           '📱 STATUS · <code>' + esc(e.device_id || "") + "</code> → " +
-          '<b>' + esc(e.status || "") + '</b>' + sev + loc + bat +
+          '<b>' + esc(e.status || "") + '</b>' + sev + mob + loc + bat +
         '</div>' +
         '<div class="qg-audit-at">' + esc(e.at || "") + '</div>' +
       '</div>'

@@ -1,0 +1,458 @@
+<!--
+  Quake Angel — "Mark as Rescued" widget for the safequake.onrender.com
+  responder dashboard.
+
+  This snippet gives you two things:
+
+  1. A drop-in styled button + confirm modal + banner UI. Paste the entire
+     block into your dashboard once (it's self-contained — CSS + HTML + JS).
+  2. A tiny JS API you can call from your existing map-pin popup code:
+
+        QuakeAngelRescue.mark(deviceId, { onDone, notes })      // opens confirm → POST /api/mark-rescued
+        QuakeAngelRescue.unmark(deviceId, { onDone })           // POST /api/unmark-rescued
+        QuakeAngelRescue.renderButton(container, device)        // renders a Mark/Undo button that flips
+                                                                // based on device.status === 'rescued'
+
+     Where `device` is the object your dashboard already has from GET /api/devices
+     (it needs at minimum `device_id`, `status`, and — for Undo — the object
+     retains its own state; no need to fetch again).
+
+  HOW TO WIRE INTO YOUR EXISTING MAP POPUP
+  ----------------------------------------
+  Wherever you currently build the HTML for the trapped-pin popup, add:
+
+        var btnHost = document.createElement('div');
+        QuakeAngelRescue.renderButton(btnHost, device);
+        popupElement.appendChild(btnHost);
+
+  When the operator clicks the button:
+    - If device.status !== 'rescued' → confirm modal → POST /api/mark-rescued
+    - If device.status === 'rescued' → POST /api/unmark-rescued (a second
+      confirm keeps mis-clicks in check)
+  On success we call `onDone(updatedDevice)` so your popup can re-render and
+  the pin can move between the sidebar groups (Immediate / Serious / Minor
+  → Rescued, or Rescued → back to its prior group).
+
+  REQUIRED SETUP
+  --------------
+  1. Set QUAKEGUARD_BACKEND to your deployed backend URL. No trailing /.
+  2. The operator will be prompted for the admin password on first use
+     during a session; it's cached in memory only (never persisted) so
+     they don't have to re-enter it every click.
+  3. Requires CORS on the backend (already configured for
+     https://safequake.onrender.com).
+-->
+
+<style>
+  /* ── Mark-Rescued button (renders inline in map popups + sidebar rows) ── */
+  .qg-rescue-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 14px;
+    border: 0;
+    border-radius: 8px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+    cursor: pointer;
+    transition: transform .08s ease, opacity .15s ease, background .15s ease;
+  }
+  .qg-rescue-btn:hover  { transform: translateY(-1px); }
+  .qg-rescue-btn:active { transform: translateY(0); opacity: .9; }
+  .qg-rescue-btn[disabled] { opacity: .55; cursor: not-allowed; }
+
+  .qg-rescue-btn.mark {
+    background: #1F8A3A;
+    color: #fff;
+    box-shadow: 0 3px 10px rgba(31, 138, 58, 0.28);
+  }
+  .qg-rescue-btn.mark:hover { background: #187030; }
+
+  .qg-rescue-btn.undo {
+    background: #F5E9C8;
+    color: #7A5300;
+    border: 1px solid #E9C97E;
+  }
+  .qg-rescue-btn.undo:hover { background: #EFDFA8; }
+
+  /* ── Confirm modal ── */
+  #qg-rescue-modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.72);
+    z-index: 99999;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+  }
+  #qg-rescue-modal-backdrop.show { display: flex; }
+  #qg-rescue-modal {
+    background: #fff;
+    border-radius: 16px;
+    padding: 28px 28px 22px;
+    max-width: 460px;
+    width: 100%;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.4);
+    text-align: center;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    border-top: 8px solid #1F8A3A;
+  }
+  #qg-rescue-modal.undo { border-top-color: #EA9500; }
+  #qg-rescue-modal .qg-rescue-modal-icon {
+    font-size: 48px;
+    line-height: 1;
+    margin-bottom: 10px;
+  }
+  #qg-rescue-modal .qg-rescue-modal-title {
+    font-size: 22px;
+    font-weight: 900;
+    color: #222;
+    margin-bottom: 8px;
+  }
+  #qg-rescue-modal .qg-rescue-modal-body {
+    font-size: 15px;
+    color: #444;
+    line-height: 1.5;
+    margin-bottom: 18px;
+  }
+  #qg-rescue-modal .qg-rescue-modal-body code {
+    background: #f4f4f6;
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 13px;
+  }
+  #qg-rescue-modal textarea {
+    width: 100%;
+    min-height: 60px;
+    max-height: 160px;
+    padding: 8px 10px;
+    border: 1px solid #d0d0d5;
+    border-radius: 8px;
+    font-family: inherit;
+    font-size: 14px;
+    resize: vertical;
+    margin-bottom: 18px;
+    box-sizing: border-box;
+  }
+  #qg-rescue-modal .qg-rescue-modal-btns {
+    display: flex;
+    gap: 10px;
+    justify-content: center;
+  }
+  #qg-rescue-modal .qg-rescue-modal-btn {
+    flex: 1;
+    padding: 12px 20px;
+    border-radius: 10px;
+    font-size: 14px;
+    font-weight: 800;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    cursor: pointer;
+    border: 0;
+  }
+  #qg-rescue-modal .qg-rescue-modal-btn.primary {
+    background: #1F8A3A; color: #fff;
+  }
+  #qg-rescue-modal.undo .qg-rescue-modal-btn.primary {
+    background: #EA9500; color: #1B1005;
+  }
+  #qg-rescue-modal .qg-rescue-modal-btn.primary:hover  { opacity: 0.9; }
+  #qg-rescue-modal .qg-rescue-modal-btn.cancel {
+    background: #eee; color: #333;
+  }
+  #qg-rescue-modal .qg-rescue-modal-btn.cancel:hover { background: #ddd; }
+
+  /* ── Toast banner (fixed top, mirrors trigger button pattern) ── */
+  #qg-rescue-toast {
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    min-height: 56px;
+    padding: 12px 22px;
+    z-index: 99998;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    font-size: 16px;
+    font-weight: 700;
+    color: #fff;
+    text-align: center;
+    transform: translateY(-100%);
+    transition: transform .35s cubic-bezier(.2,.9,.3,1);
+    box-shadow: 0 4px 24px rgba(0,0,0,0.25);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  #qg-rescue-toast.show { transform: translateY(0); }
+  #qg-rescue-toast.ok    { background: #1F8A3A; }
+  #qg-rescue-toast.err   { background: #C21818; }
+  #qg-rescue-toast.warn  { background: #EA9500; color: #1B1005; }
+  #qg-rescue-toast .close {
+    background: rgba(255,255,255,0.2);
+    border: 0; color: inherit;
+    border-radius: 999px;
+    width: 28px; height: 28px;
+    font-size: 18px; font-weight: 900;
+    cursor: pointer; padding: 0;
+  }
+</style>
+
+<!-- Modal (single instance reused for both mark + undo flows) -->
+<div id="qg-rescue-modal-backdrop" role="alertdialog" aria-modal="true">
+  <div id="qg-rescue-modal">
+    <div class="qg-rescue-modal-icon" aria-hidden="true">✅</div>
+    <div class="qg-rescue-modal-title">Mark as Rescued?</div>
+    <div class="qg-rescue-modal-body"></div>
+    <textarea placeholder="Optional notes (location found, condition, etc.)" style="display:none"></textarea>
+    <div class="qg-rescue-modal-btns">
+      <button class="qg-rescue-modal-btn cancel" type="button">Cancel</button>
+      <button class="qg-rescue-modal-btn primary" type="button">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toast -->
+<div id="qg-rescue-toast" role="status" aria-live="polite">
+  <span class="msg">Ready.</span>
+  <button class="close" type="button" aria-label="Dismiss">×</button>
+</div>
+
+<script>
+window.QuakeAngelRescue = (function () {
+  // === EDIT THIS ==========================================================
+  var QUAKEGUARD_BACKEND = "https://quake-alert-18.emergent.host"; // no trailing /
+  // ========================================================================
+
+  // Cached admin token — held in memory only for the current tab session.
+  // Reset when the operator refreshes / closes the tab.
+  var cachedToken = null;
+
+  function getAdminToken() {
+    if (cachedToken) return cachedToken;
+    var pwd = window.prompt("Enter emergency personnel password:");
+    if (pwd) cachedToken = pwd;
+    return cachedToken;
+  }
+
+  var toast = document.getElementById("qg-rescue-toast");
+  var toastMsg = toast && toast.querySelector(".msg");
+  var toastX = toast && toast.querySelector(".close");
+  var toastTimer = null;
+  function showToast(kind, text, autoDismissMs) {
+    if (!toast) return;
+    if (toastTimer) { clearTimeout(toastTimer); toastTimer = null; }
+    toast.classList.remove("ok", "err", "warn");
+    toast.classList.add(kind);
+    toastMsg.textContent = text;
+    void toast.offsetWidth;
+    toast.classList.add("show");
+    if (autoDismissMs && autoDismissMs > 0) {
+      toastTimer = setTimeout(hideToast, autoDismissMs);
+    }
+  }
+  function hideToast() { toast && toast.classList.remove("show"); }
+  toastX && toastX.addEventListener("click", hideToast);
+
+  var backdrop = document.getElementById("qg-rescue-modal-backdrop");
+  var modal    = document.getElementById("qg-rescue-modal");
+  var titleEl  = modal.querySelector(".qg-rescue-modal-title");
+  var bodyEl   = modal.querySelector(".qg-rescue-modal-body");
+  var iconEl   = modal.querySelector(".qg-rescue-modal-icon");
+  var textEl   = modal.querySelector("textarea");
+  var okBtn    = modal.querySelector(".qg-rescue-modal-btn.primary");
+  var cancelBtn = modal.querySelector(".qg-rescue-modal-btn.cancel");
+
+  function closeModal() {
+    backdrop.classList.remove("show");
+    modal.classList.remove("undo");
+    textEl.style.display = "none";
+    textEl.value = "";
+  }
+  cancelBtn.addEventListener("click", closeModal);
+  backdrop.addEventListener("click", function (e) {
+    if (e.target === backdrop) closeModal();
+  });
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape" && backdrop.classList.contains("show")) closeModal();
+  });
+
+  function openConfirm(opts) {
+    // opts: { icon, title, bodyHtml, ctaLabel, undo?: bool, showNotes?: bool, onConfirm }
+    iconEl.textContent = opts.icon;
+    titleEl.textContent = opts.title;
+    bodyEl.innerHTML = opts.bodyHtml;
+    textEl.style.display = opts.showNotes ? "block" : "none";
+    textEl.value = "";
+    okBtn.textContent = opts.ctaLabel;
+    modal.classList.toggle("undo", !!opts.undo);
+
+    // Rebind onClick freshly each time so we don't stack listeners.
+    okBtn.onclick = async function () {
+      okBtn.disabled = true;
+      try {
+        await opts.onConfirm(textEl.value.trim() || null);
+      } finally {
+        okBtn.disabled = false;
+      }
+    };
+    backdrop.classList.add("show");
+    setTimeout(function () { okBtn.focus(); }, 40);
+  }
+
+  async function postJson(path, body) {
+    var token = getAdminToken();
+    if (!token) throw new Error("cancelled");
+    var res = await fetch(QUAKEGUARD_BACKEND + path, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Admin-Token": token,
+      },
+      body: JSON.stringify(body),
+    });
+    if (res.status === 401) {
+      // Wrong password — flush cached token so we re-prompt on next click.
+      cachedToken = null;
+      var err = new Error("wrong password");
+      err.status = 401;
+      throw err;
+    }
+    if (!res.ok) {
+      var err2 = new Error("HTTP " + res.status);
+      err2.status = res.status;
+      throw err2;
+    }
+    return await res.json();
+  }
+
+  function mark(deviceId, opts) {
+    opts = opts || {};
+    openConfirm({
+      icon: "✅",
+      title: "Mark as Rescued?",
+      bodyHtml:
+        'Confirm <code>' + escapeHtml(deviceId) + '</code> has been ' +
+        'physically found and is safe. This will move the pin out of the ' +
+        'trapped groups into <b>Rescued</b>.',
+      ctaLabel: "Confirm",
+      showNotes: true,
+      onConfirm: async function (notes) {
+        closeModal();
+        showToast("warn", "Marking rescued…", 0);
+        try {
+          var data = await postJson("/api/mark-rescued", {
+            deviceId: deviceId,
+            notes: notes,
+          });
+          showToast(
+            "ok",
+            data.already_rescued
+              ? "Already marked rescued."
+              : "Marked rescued — " + deviceId,
+            5000,
+          );
+          if (opts.onDone) opts.onDone(data);
+        } catch (e) {
+          if (e.status === 401) {
+            showToast("err", "Wrong password. No change made.", 6000);
+          } else if (e.status === 404) {
+            showToast("err", "Device not found: " + deviceId, 6000);
+          } else if (e.message === "cancelled") {
+            showToast("warn", "Cancelled — no change.", 4000);
+          } else {
+            showToast("err", "Failed to mark rescued: " + e.message, 0);
+          }
+        }
+      },
+    });
+  }
+
+  function unmark(deviceId, opts) {
+    opts = opts || {};
+    openConfirm({
+      icon: "↩️",
+      title: "Undo rescue?",
+      bodyHtml:
+        'Revert <code>' + escapeHtml(deviceId) + '</code> back to its ' +
+        'previous trapped state. Use this only if the rescued mark was a ' +
+        'mis-click. This is logged in the audit trail.',
+      ctaLabel: "Revert",
+      undo: true,
+      onConfirm: async function () {
+        closeModal();
+        showToast("warn", "Reverting rescue…", 0);
+        try {
+          var data = await postJson("/api/unmark-rescued", { deviceId: deviceId });
+          showToast(
+            "ok",
+            "Reverted — restored to " + (data.restored_status || "trapped"),
+            5000,
+          );
+          if (opts.onDone) opts.onDone(data);
+        } catch (e) {
+          if (e.status === 401) {
+            showToast("err", "Wrong password. No change made.", 6000);
+          } else if (e.status === 409) {
+            showToast("warn", "Device is not currently rescued.", 5000);
+          } else if (e.message === "cancelled") {
+            showToast("warn", "Cancelled — no change.", 4000);
+          } else {
+            showToast("err", "Failed to revert: " + e.message, 0);
+          }
+        }
+      },
+    });
+  }
+
+  function renderButton(container, device) {
+    // container: DOM element to render into (we replace its contents)
+    // device: { device_id, status, ... } from GET /api/devices
+    if (!container || !device) return;
+    var isRescued = device.status === "rescued";
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "qg-rescue-btn " + (isRescued ? "undo" : "mark");
+    btn.textContent = isRescued ? "↩️ Undo Rescued" : "✅ Mark as Rescued";
+    btn.addEventListener("click", function () {
+      if (isRescued) {
+        unmark(device.device_id, {
+          onDone: function (updated) {
+            // Rebuild button in-place with restored device shape.
+            device.status = updated.restored_status || "trapped";
+            device.severity = updated.restored_severity || device.severity;
+            device.mobility = updated.restored_mobility || device.mobility;
+            device.rescued_at = null;
+            device.rescued_by = null;
+            renderButton(container, device);
+          },
+        });
+      } else {
+        mark(device.device_id, {
+          onDone: function (updated) {
+            device.status = "rescued";
+            device.rescued_at = updated.rescued_at;
+            device.rescued_by = updated.rescued_by;
+            device.pre_rescue_status = updated.prior_status;
+            device.pre_rescue_severity = updated.prior_severity;
+            device.pre_rescue_mobility = updated.prior_mobility;
+            renderButton(container, device);
+          },
+        });
+      }
+    });
+    container.innerHTML = "";
+    container.appendChild(btn);
+  }
+
+  function escapeHtml(s) {
+    return String(s == null ? "" : s)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  }
+
+  return { mark: mark, unmark: unmark, renderButton: renderButton };
+})();
+</script>

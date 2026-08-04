@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Header, Query
+from fastapi import FastAPI, APIRouter, HTTPException, Header, Query, Body
 from fastapi.responses import HTMLResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
@@ -233,6 +233,16 @@ async def get_devices(
             "battery_state": r.get("battery_state"),
             "platform": r.get("platform"),
             "updated_at": r.get("updated_at"),
+            # Rescue fields — set when a dashboard operator marks a case
+            # closed via POST /api/mark-rescued. Distinct from `safe` (which
+            # is self-reported by the user via the mobile app). The
+            # `pre_rescue_*` fields let the dashboard offer an Undo that
+            # restores the exact prior triage state.
+            "rescued_at": r.get("rescued_at"),
+            "rescued_by": r.get("rescued_by"),
+            "pre_rescue_status": r.get("pre_rescue_status"),
+            "pre_rescue_severity": r.get("pre_rescue_severity"),
+            "pre_rescue_mobility": r.get("pre_rescue_mobility"),
         }
 
     return {
@@ -259,14 +269,19 @@ async def get_audit_log(
     ),
     kind: Optional[str] = Query(
         default=None,
-        description="Filter to a single event kind: 'trigger' or 'status'.",
+        description="Filter to a single event kind: 'trigger', 'status', 'rescued', or 'rescue_reverted'.",
     ),
 ):
     """Unified, dashboard-facing audit feed.
 
-    Interleaves two event kinds by timestamp, most recent first:
-      - `trigger`: an alert was broadcast (from push_events)
-      - `status`:  a device reported a status change (from status_events)
+    Interleaves four event kinds by timestamp, most recent first:
+      - `trigger`:          an alert was broadcast (from push_events)
+      - `status`:           a device self-reported a status change (from
+                            status_events with status ∈ safe/trapped/not_responding)
+      - `rescued`:          a dashboard operator marked a trapped case as
+                            found & safe (from status_events with status='rescued')
+      - `rescue_reverted`:  the rescued mark was undone (from status_events
+                            with rescue_reverted=True)
 
     CORS is limited to https://safequake.onrender.com and http://localhost:*
     (see middleware config). Field names are stable snake_case.
@@ -293,15 +308,20 @@ async def get_audit_log(
                 "error": r.get("push_error"),
             })
 
-    # ---- Status change events ----
-    if kind in (None, "status"):
+    # ---- Status / rescue events (all live in status_events) ----
+    # We do a single query and classify each row into one of three kinds
+    # based on its shape. This keeps the ledger single-source-of-truth and
+    # avoids a proliferation of collections.
+    want_status = kind in (None, "status")
+    want_rescued = kind in (None, "rescued")
+    want_reverted = kind in (None, "rescue_reverted")
+    if want_status or want_rescued or want_reverted:
         sq: dict = {}
         if since:
             sq["recorded_at"] = {"$gte": since}
         rows = await db.status_events.find(sq, {"_id": 0}).sort("recorded_at", -1).to_list(limit)
         for r in rows:
-            events.append({
-                "kind": "status",
+            base = {
                 "at": r.get("recorded_at") or r.get("updated_at"),
                 "device_id": r.get("device_id"),
                 "status": r.get("status"),
@@ -313,7 +333,34 @@ async def get_audit_log(
                 "battery_pct": r.get("battery_pct"),
                 "battery_state": r.get("battery_state"),
                 "platform": r.get("platform"),
-            })
+            }
+            if r.get("rescue_reverted"):
+                if not want_reverted:
+                    continue
+                events.append({
+                    **base,
+                    "kind": "rescue_reverted",
+                    "reverted_by": r.get("reverted_by") or "dashboard",
+                    "restored_status": r.get("status"),
+                    "restored_severity": r.get("severity"),
+                    "restored_mobility": r.get("mobility"),
+                })
+            elif r.get("status") == "rescued":
+                if not want_rescued:
+                    continue
+                events.append({
+                    **base,
+                    "kind": "rescued",
+                    "rescued_by": r.get("rescued_by") or "dashboard",
+                    "notes": r.get("notes"),
+                    "prior_status": r.get("prior_status"),
+                    "prior_severity": r.get("prior_severity"),
+                    "prior_mobility": r.get("prior_mobility"),
+                })
+            else:
+                if not want_status:
+                    continue
+                events.append({**base, "kind": "status"})
 
     # Merge and clip.
     events.sort(key=lambda e: e.get("at") or "", reverse=True)
@@ -358,6 +405,26 @@ async def audit_log_browser(
             err = e.get("error")
             error_html = f'<div style="color:#c21818;font-size:12px;margin-top:4px"><b>Error:</b> {_html.escape(str(err))}</div>' if err else ""
             return f'<div class="row trigger">{badge}<div class="body">{body}{error_html}<div class="at">{at}</div></div></div>'
+        elif e.get("kind") == "rescued":
+            rescued_by = _html.escape(str(e.get("rescued_by") or "dashboard"))
+            prior = e.get("prior_status") or "trapped"
+            prior_sev = e.get("prior_severity")
+            prior_badge = f' <span style="background:{sev_color(prior_sev)};color:#fff;padding:2px 6px;border-radius:999px;font-size:11px;font-weight:700">{_html.escape(prior_sev)}</span>' if prior_sev else ""
+            notes_html = ""
+            if e.get("notes"):
+                notes_html = f'<div style="color:#555;font-size:12px;margin-top:4px">📝 {_html.escape(str(e.get("notes")))}</div>'
+            body = (
+                f'<b>RESCUED</b> ✅ · <code>{_html.escape(str(e.get("device_id") or ""))}</code> '
+                f'was <b>{_html.escape(str(prior))}</b>{prior_badge} · closed by <code>{rescued_by}</code>'
+            )
+            return f'<div class="row rescued">{body}{notes_html}<div class="at">{at}</div></div>'
+        elif e.get("kind") == "rescue_reverted":
+            reverted_by = _html.escape(str(e.get("reverted_by") or "dashboard"))
+            body = (
+                f'<b>RESCUE REVERTED</b> ↩️ · <code>{_html.escape(str(e.get("device_id") or ""))}</code> '
+                f'restored to <b>{_html.escape(str(e.get("status") or ""))}</b> · by <code>{reverted_by}</code>'
+            )
+            return f'<div class="row reverted">{body}<div class="at">{at}</div></div>'
         else:
             sev = e.get("severity")
             sev_badge = f'<span style="background:{sev_color(sev)};color:#fff;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700;margin-left:6px">{_html.escape(sev)}</span>' if sev else ""
@@ -393,6 +460,8 @@ h1{{font-size:20px;margin:0 0 6px}}
 .row{{background:#fff;border:1px solid #e6e6ea;border-left-width:4px;border-radius:8px;padding:10px 14px;margin-bottom:8px;display:flex;gap:10px;align-items:flex-start}}
 .row.trigger{{border-left-color:#c21818}}
 .row.status{{border-left-color:#4a90e2}}
+.row.rescued{{border-left-color:#1f8a3a;background:#f2fbf5}}
+.row.reverted{{border-left-color:#EA9500;background:#fff8ec}}
 .row .body{{flex:1}}
 .row .at{{color:#888;font-size:11px;margin-top:4px;font-family:ui-monospace,Menlo,monospace}}
 code{{background:#f4f4f6;padding:1px 6px;border-radius:4px;font-size:12px;font-family:ui-monospace,Menlo,monospace}}
@@ -545,6 +614,189 @@ async def send_push(
             logging.warning(f"Push trigger failed (non-blocking): {e}")
         events.append(event)
     return events
+
+@api_router.post("/mark-rescued")
+async def mark_rescued(
+    payload: dict = Body(...),
+    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
+):
+    """Dashboard operator marks a trapped case as physically found & safe.
+
+    Distinct from a `safe` self-report — this is a responder attestation.
+    The prior triage state (status/severity/mobility) is snapshotted onto
+    the device doc as `pre_rescue_*` so an Undo can restore the exact
+    situation the operator saw before clicking.
+
+    Auth: header `X-Admin-Token` matching ADMIN_TRIGGER_PASSWORD.
+
+    Body: `{"deviceId": "qg-...", "notes": "optional freeform text"}`
+    """
+    if not ADMIN_TRIGGER_PASSWORD:
+        raise HTTPException(500, "ADMIN_TRIGGER_PASSWORD not configured on server")
+    if x_admin_token != ADMIN_TRIGGER_PASSWORD:
+        raise HTTPException(401, "Invalid or missing X-Admin-Token")
+
+    device_id = str(payload.get("deviceId") or payload.get("device_id") or "").strip()
+    if not device_id:
+        raise HTTPException(400, "deviceId is required")
+    notes = payload.get("notes")
+    rescued_by = str(payload.get("rescued_by") or "dashboard").strip() or "dashboard"
+
+    # Find the current row so we can snapshot prior state before overwriting.
+    current = await db.device_status.find_one({"device_id": device_id}, {"_id": 0})
+    if not current:
+        raise HTTPException(404, f"Unknown device_id: {device_id}")
+
+    # Idempotent: if already rescued, don't overwrite the original prior-state
+    # snapshot — return the existing doc.
+    now = datetime.now(timezone.utc).isoformat()
+    if current.get("status") == "rescued":
+        return {
+            "status": "ok",
+            "already_rescued": True,
+            "device_id": device_id,
+            "rescued_at": current.get("rescued_at"),
+            "rescued_by": current.get("rescued_by"),
+        }
+
+    prior_status = current.get("status")
+    prior_severity = current.get("severity")
+    prior_mobility = current.get("mobility")
+
+    update_doc = {
+        "status": "rescued",
+        "severity": None,
+        "mobility": None,
+        "rescued_at": now,
+        "rescued_by": rescued_by,
+        "pre_rescue_status": prior_status,
+        "pre_rescue_severity": prior_severity,
+        "pre_rescue_mobility": prior_mobility,
+        "updated_at": now,
+    }
+    await db.device_status.update_one(
+        {"device_id": device_id},
+        {"$set": update_doc},
+    )
+
+    # Append immutable audit trail entry.
+    try:
+        await db.status_events.insert_one({
+            "device_id": device_id,
+            "status": "rescued",
+            "severity": None,
+            "mobility": None,
+            "latitude": current.get("latitude"),
+            "longitude": current.get("longitude"),
+            "accuracy_m": current.get("accuracy_m"),
+            "battery_pct": current.get("battery_pct"),
+            "battery_state": current.get("battery_state"),
+            "platform": current.get("platform"),
+            "rescued_by": rescued_by,
+            "notes": notes,
+            "prior_status": prior_status,
+            "prior_severity": prior_severity,
+            "prior_mobility": prior_mobility,
+            "recorded_at": now,
+        })
+    except Exception as e:
+        logging.warning(f"Failed to append rescue status_events: {e}")
+
+    return {
+        "status": "ok",
+        "device_id": device_id,
+        "rescued_at": now,
+        "rescued_by": rescued_by,
+        "prior_status": prior_status,
+        "prior_severity": prior_severity,
+        "prior_mobility": prior_mobility,
+    }
+
+
+@api_router.post("/unmark-rescued")
+async def unmark_rescued(
+    payload: dict = Body(...),
+    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
+):
+    """Undo a mark-rescued — restores the exact prior triage state from
+    `pre_rescue_*` snapshot. Use this to recover from a mis-click.
+
+    Auth: header `X-Admin-Token` matching ADMIN_TRIGGER_PASSWORD.
+    """
+    if not ADMIN_TRIGGER_PASSWORD:
+        raise HTTPException(500, "ADMIN_TRIGGER_PASSWORD not configured on server")
+    if x_admin_token != ADMIN_TRIGGER_PASSWORD:
+        raise HTTPException(401, "Invalid or missing X-Admin-Token")
+
+    device_id = str(payload.get("deviceId") or payload.get("device_id") or "").strip()
+    if not device_id:
+        raise HTTPException(400, "deviceId is required")
+    reverted_by = str(payload.get("reverted_by") or "dashboard").strip() or "dashboard"
+
+    current = await db.device_status.find_one({"device_id": device_id}, {"_id": 0})
+    if not current:
+        raise HTTPException(404, f"Unknown device_id: {device_id}")
+    if current.get("status") != "rescued":
+        raise HTTPException(
+            409, f"device is not rescued (current status: {current.get('status')})"
+        )
+
+    # Restore snapshot. Default fall-back is 'not_responding' — if we don't
+    # know the prior status, that's the most conservative option (keeps
+    # the pin visible on the dashboard).
+    restored_status = current.get("pre_rescue_status") or "not_responding"
+    restored_severity = current.get("pre_rescue_severity")
+    restored_mobility = current.get("pre_rescue_mobility")
+    now = datetime.now(timezone.utc).isoformat()
+
+    await db.device_status.update_one(
+        {"device_id": device_id},
+        {
+            "$set": {
+                "status": restored_status,
+                "severity": restored_severity,
+                "mobility": restored_mobility,
+                "updated_at": now,
+            },
+            "$unset": {
+                "rescued_at": "",
+                "rescued_by": "",
+                "pre_rescue_status": "",
+                "pre_rescue_severity": "",
+                "pre_rescue_mobility": "",
+            },
+        },
+    )
+
+    try:
+        await db.status_events.insert_one({
+            "device_id": device_id,
+            "status": restored_status,
+            "severity": restored_severity,
+            "mobility": restored_mobility,
+            "latitude": current.get("latitude"),
+            "longitude": current.get("longitude"),
+            "accuracy_m": current.get("accuracy_m"),
+            "battery_pct": current.get("battery_pct"),
+            "battery_state": current.get("battery_state"),
+            "platform": current.get("platform"),
+            "rescue_reverted": True,
+            "reverted_by": reverted_by,
+            "recorded_at": now,
+        })
+    except Exception as e:
+        logging.warning(f"Failed to append revert status_events: {e}")
+
+    return {
+        "status": "ok",
+        "device_id": device_id,
+        "restored_status": restored_status,
+        "restored_severity": restored_severity,
+        "restored_mobility": restored_mobility,
+        "reverted_by": reverted_by,
+        "reverted_at": now,
+    }
+
 
 @api_router.post("/trigger-alert")
 async def trigger_alert(
