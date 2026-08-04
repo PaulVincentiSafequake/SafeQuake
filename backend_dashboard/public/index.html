@@ -578,6 +578,29 @@
     margin-bottom: 18px;
     box-sizing: border-box;
   }
+  #qg-rescue-modal .qg-rescue-modal-password {
+    width: 100%;
+    padding: 10px 12px;
+    border: 1px solid #d0d0d5;
+    border-radius: 8px;
+    font-family: inherit;
+    font-size: 14px;
+    margin-bottom: 14px;
+    box-sizing: border-box;
+  }
+  #qg-rescue-modal .qg-rescue-modal-password:focus {
+    outline: none;
+    border-color: #1F8A3A;
+    box-shadow: 0 0 0 3px rgba(31,138,58,0.15);
+  }
+  #qg-rescue-modal .qg-rescue-modal-password-label {
+    display: block;
+    font-size: 12px;
+    font-weight: 700;
+    color: #555;
+    margin-bottom: 6px;
+    text-align: left;
+  }
   #qg-rescue-modal .qg-rescue-modal-btns {
     display: flex;
     gap: 10px;
@@ -693,6 +716,10 @@
     <div class="qg-rescue-modal-title">Mark as Rescued?</div>
     <div class="qg-rescue-modal-body"></div>
     <div class="qg-rescue-modal-error"></div>
+    <div class="qg-rescue-modal-password-wrap" style="display:none">
+      <label class="qg-rescue-modal-password-label" for="qg-rescue-modal-password">Emergency personnel password</label>
+      <input type="password" class="qg-rescue-modal-password" id="qg-rescue-modal-password" autocomplete="off" placeholder="Enter password">
+    </div>
     <textarea placeholder="Optional notes (location found, condition, etc.)" style="display:none"></textarea>
     <div class="qg-rescue-modal-btns">
       <button class="qg-rescue-modal-btn cancel" type="button">Cancel</button>
@@ -724,13 +751,6 @@ window.QuakeAngelRescue = (function () {
   // Reset when the operator refreshes / closes the tab.
   var cachedToken = null;
 
-  function getAdminToken() {
-    if (cachedToken) return cachedToken;
-    var pwd = window.prompt("Enter emergency personnel password:");
-    if (pwd) cachedToken = pwd;
-    return cachedToken;
-  }
-
   var toast = document.getElementById("qg-rescue-toast");
   var toastMsg = toast && toast.querySelector(".msg");
   var toastX = toast && toast.querySelector(".close");
@@ -757,8 +777,20 @@ window.QuakeAngelRescue = (function () {
   var errorEl  = modal.querySelector(".qg-rescue-modal-error");
   var iconEl   = modal.querySelector(".qg-rescue-modal-icon");
   var textEl   = modal.querySelector("textarea");
+  var pwdWrap  = modal.querySelector(".qg-rescue-modal-password-wrap");
+  var pwdEl    = modal.querySelector(".qg-rescue-modal-password");
   var okBtn    = modal.querySelector(".qg-rescue-modal-btn.primary");
   var cancelBtn = modal.querySelector(".qg-rescue-modal-btn.cancel");
+
+  function showPasswordField(focus) {
+    pwdWrap.style.display = "block";
+    pwdEl.value = "";
+    if (focus) setTimeout(function () { pwdEl.focus(); }, 40);
+  }
+  function hidePasswordField() {
+    pwdWrap.style.display = "none";
+    pwdEl.value = "";
+  }
 
   function showModalError(msg) {
     errorEl.textContent = msg;
@@ -775,10 +807,17 @@ window.QuakeAngelRescue = (function () {
     textEl.style.display = "none";
     textEl.value = "";
     clearModalError();
+    hidePasswordField();
   }
   cancelBtn.addEventListener("click", closeModal);
   backdrop.addEventListener("click", function (e) {
     if (e.target === backdrop) closeModal();
+  });
+  pwdEl.addEventListener("keydown", function (e) {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      okBtn.click();
+    }
   });
   document.addEventListener("keydown", function (e) {
     if (e.key === "Escape" && backdrop.classList.contains("show")) closeModal();
@@ -795,6 +834,17 @@ window.QuakeAngelRescue = (function () {
     okBtn.textContent = opts.ctaLabel;
     modal.classList.toggle("undo", !!opts.undo);
 
+    // Show the inline password field unless we already have a cached token
+    // for this tab session — no more native browser prompt() popups.
+    // Exception: undo/revert actions always require a fresh password, even
+    // if already authenticated this session, since reverting a confirmed
+    // rescue is a higher-stakes action than marking one.
+    if (cachedToken && !opts.forcePassword) {
+      hidePasswordField();
+    } else {
+      showPasswordField(false);
+    }
+
     // Rebind onClick freshly each time so we don't stack listeners.
     okBtn.onclick = async function () {
       okBtn.disabled = true;
@@ -805,12 +855,13 @@ window.QuakeAngelRescue = (function () {
       }
     };
     backdrop.classList.add("show");
-    setTimeout(function () { okBtn.focus(); }, 40);
+    setTimeout(function () {
+      if (pwdWrap.style.display === "block") pwdEl.focus();
+      else okBtn.focus();
+    }, 40);
   }
 
-  async function postJson(path, body) {
-    var token = getAdminToken();
-    if (!token) throw new Error("cancelled");
+  async function postJson(path, body, token) {
     var res = await fetch(QUAKEGUARD_BACKEND + path, {
       method: "POST",
       headers: {
@@ -820,7 +871,7 @@ window.QuakeAngelRescue = (function () {
       body: JSON.stringify(body),
     });
     if (res.status === 401) {
-      // Wrong password — flush cached token so we re-prompt on next click.
+      // Wrong password — flush cached token so the field re-shows next time.
       cachedToken = null;
       var err = new Error("wrong password");
       err.status = 401;
@@ -847,11 +898,18 @@ window.QuakeAngelRescue = (function () {
       showNotes: true,
       onConfirm: async function (notes) {
         clearModalError();
+        var token = cachedToken || pwdEl.value.trim();
+        if (!token) {
+          showModalError("Enter the password to continue.");
+          showPasswordField(true);
+          return;
+        }
         try {
           var data = await postJson("/api/mark-rescued", {
             deviceId: deviceId,
             notes: notes,
-          });
+          }, token);
+          cachedToken = token;
           closeModal();
           showToast(
             "ok",
@@ -866,11 +924,10 @@ window.QuakeAngelRescue = (function () {
           // just retype the password and click Confirm again — no need to
           // go find this device in the list a second time.
           if (e.status === 401) {
-            showModalError("Wrong password. Your notes are still here — click Confirm to try again.");
+            showModalError("Wrong password. Your notes are still here — retype it below and click Confirm to try again.");
+            showPasswordField(true);
           } else if (e.status === 404) {
             showModalError("Device not found: " + deviceId + ". This case may have already been handled elsewhere.");
-          } else if (e.message === "cancelled") {
-            showModalError("Cancelled — click Confirm to try again, or Cancel to close.");
           } else {
             showModalError("Failed: " + e.message + " — click Confirm to try again.");
           }
@@ -890,10 +947,21 @@ window.QuakeAngelRescue = (function () {
         'mis-click. This is logged in the audit trail.',
       ctaLabel: "Revert",
       undo: true,
+      forcePassword: true,
       onConfirm: async function () {
         clearModalError();
+        // Undo always requires a freshly-typed password, even if the
+        // operator is already authenticated for this session — reverting a
+        // confirmed rescue is a higher-stakes action than marking one.
+        var token = pwdEl.value.trim();
+        if (!token) {
+          showModalError("Enter the password to continue.");
+          showPasswordField(true);
+          return;
+        }
         try {
-          var data = await postJson("/api/unmark-rescued", { deviceId: deviceId });
+          var data = await postJson("/api/unmark-rescued", { deviceId: deviceId }, token);
+          cachedToken = token;
           closeModal();
           showToast(
             "ok",
@@ -903,11 +971,10 @@ window.QuakeAngelRescue = (function () {
           if (opts.onDone) opts.onDone(data);
         } catch (e) {
           if (e.status === 401) {
-            showModalError("Wrong password. Click Revert to try again.");
+            showModalError("Wrong password. Retype it below and click Revert to try again.");
+            showPasswordField(true);
           } else if (e.status === 409) {
             showModalError("Device is not currently rescued — it may have already been reverted.");
-          } else if (e.message === "cancelled") {
-            showModalError("Cancelled — click Revert to try again, or Cancel to close.");
           } else {
             showModalError("Failed: " + e.message + " — click Revert to try again.");
           }
@@ -932,6 +999,12 @@ window.QuakeAngelRescue = (function () {
       showNotes: true,
       onConfirm: async function (notes) {
         clearModalError();
+        var token = cachedToken || pwdEl.value.trim();
+        if (!token) {
+          showModalError("Enter the password to continue.");
+          showPasswordField(true);
+          return;
+        }
         showToast("warn", "Marking " + deviceIds.length + " rescued…", 0);
         var okCount = 0;
         var results = [];
@@ -940,7 +1013,8 @@ window.QuakeAngelRescue = (function () {
             var data = await postJson("/api/mark-rescued", {
               deviceId: deviceIds[i],
               notes: notes,
-            });
+            }, token);
+            cachedToken = token;
             okCount++;
             results.push({ deviceId: deviceIds[i], ok: true, data: data });
           } catch (e) {
@@ -952,8 +1026,9 @@ window.QuakeAngelRescue = (function () {
             if (e.status === 401) {
               showModalError(
                 "Wrong password — stopped after " + okCount + " of " + deviceIds.length +
-                ". Your notes are still here — click Confirm All to retry the rest."
+                ". Retype it below and click Confirm All to retry the rest."
               );
+              showPasswordField(true);
             } else {
               showModalError(
                 "Failed on one device (" + deviceIds[i] + "): " + e.message +
