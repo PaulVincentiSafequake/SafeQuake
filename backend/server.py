@@ -28,6 +28,14 @@ from apns import (
     send_critical_alerts,
 )
 
+# EMSC/USGS shadow-mode monitoring (Phase 1, 2026-08).
+# Poll loop runs in-process alongside the FastAPI app; started in the
+# `startup` handler and cancelled cleanly in `shutdown`. Does not fire
+# any user-facing pushes in Phase 1 — logs would_have_fired decisions
+# to emsc_events for a 1-2 week soak.
+from emsc.poller import EMSCPoller
+from emsc.seed import seed_country_configs
+
 # Auth module — per-user Google sign-in (task #9, 2026-08-04).
 # Handles: Google ID token verification, JWT issuance/decoding, request-time
 # principal resolution (JWT-first with legacy X-Admin-Token fallback), role
@@ -122,6 +130,11 @@ _PROCESS_STARTED_AT = datetime.now(timezone.utc).isoformat()
 
 app = FastAPI()
 api_router = APIRouter(prefix="/api")
+
+# EMSC/USGS poller — instantiated at import time, started in the
+# `startup` handler. Held as a module global so admin endpoints
+# further down can read `.started_at` etc.
+emsc_poller = EMSCPoller(db)
 
 # ---------- Legacy status-check demo endpoints ----------
 class StatusCheck(BaseModel):
@@ -2195,6 +2208,189 @@ async def enable_user(email: str, request: Request):
     return {"ok": True}
 
 
+# ── EMSC/USGS shadow-mode monitoring (Phase 1) ──────────────────────────
+# Three admin-only JSON endpoints for inspecting the poll data during the
+# 1-2 week soak. No HTML dashboard — the JSON is consumed by scripts and
+# by summarised reports we write for Paul.
+#
+# Auth: admin OR operator (both can inspect); admin is not required
+# because a shift operator may want to eyeball recent seismic activity
+# without needing admin escalation. If we later want to restrict to
+# admin only, tighten `require_role` on each endpoint.
+
+@api_router.get("/admin/emsc/health")
+async def emsc_health(request: Request):
+    """Per-provider poller health. Answers: 'is the poller alive right now?'
+
+    Returns one document per provider with last_poll_attempt_at,
+    last_success_at, consecutive_failures, last_error, and counters.
+    A silently-dead poller during soak means two wasted weeks — this
+    endpoint is how we (and any external uptime monitor) confirm it's
+    still doing its job.
+    """
+    principal = await resolve_principal(
+        request,
+        request.headers.get("x-admin-token"),
+        ADMIN_TRIGGER_PASSWORD,
+        db,
+    )
+    require_role(principal, "admin", "operator")
+
+    rows = await db.emsc_poller_health.find({}, {"_id": 1, "last_poll_attempt_at": 1,
+        "last_success_at": 1, "last_error": 1, "consecutive_failures": 1,
+        "total_polls": 1, "total_failures": 1, "total_events_fetched": 1,
+        "total_new_rows": 1, "last_fetched_count": 1, "last_new_rows_count": 1,
+        "last_poll_duration_ms": 1, "poller_started_at": 1, "poll_interval_sec": 1,
+    }).to_list(20)
+    now = datetime.now(timezone.utc)
+
+    def _healthy(row: dict) -> bool:
+        # Healthy = successful poll within the last 3 intervals AND no
+        # currently-outstanding consecutive failures.
+        last = row.get("last_success_at")
+        if not last:
+            return False
+        if isinstance(last, datetime) and last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        interval = row.get("poll_interval_sec") or 60
+        return (now - last).total_seconds() < (interval * 3) and \
+               (row.get("consecutive_failures") or 0) == 0
+
+    return {
+        "checked_at": now.isoformat(),
+        "poller_task_running": bool(emsc_poller.task and not emsc_poller.task.done()),
+        "poller_started_at": emsc_poller.started_at.isoformat() if emsc_poller.started_at else None,
+        "providers": [
+            {
+                "name": r["_id"],
+                "healthy": _healthy(r),
+                "last_poll_attempt_at": _iso(r.get("last_poll_attempt_at")),
+                "last_success_at": _iso(r.get("last_success_at")),
+                "last_error": r.get("last_error"),
+                "consecutive_failures": r.get("consecutive_failures") or 0,
+                "total_polls": r.get("total_polls") or 0,
+                "total_failures": r.get("total_failures") or 0,
+                "total_events_fetched": r.get("total_events_fetched") or 0,
+                "total_new_rows": r.get("total_new_rows") or 0,
+                "last_fetched_count": r.get("last_fetched_count"),
+                "last_new_rows_count": r.get("last_new_rows_count"),
+                "last_poll_duration_ms": r.get("last_poll_duration_ms"),
+                "poll_interval_sec": r.get("poll_interval_sec") or 60,
+            }
+            for r in rows
+        ],
+    }
+
+
+@api_router.get("/admin/emsc/recent")
+async def emsc_recent(
+    request: Request,
+    limit: int = Query(50, ge=1, le=500),
+    since: Optional[str] = Query(None, description="ISO-8601 UTC. Only return events ingested at-or-after this time."),
+    would_have_fired: Optional[bool] = Query(None, description="Filter to rows where at least one evaluation would_have_fired=this."),
+    threshold_set: Optional[str] = Query(None, description="Filter to rows whose evaluations include this threshold_set name."),
+    provider: Optional[str] = Query(None, description="Filter to a single provider (EMSC or USGS)."),
+    country_code: Optional[str] = Query(None, description="Filter to a single country_code."),
+):
+    """Query recent EMSC/USGS events with soak-relevant filters.
+
+    All filters combine with AND. Ordering: newest ingested first.
+    """
+    principal = await resolve_principal(
+        request,
+        request.headers.get("x-admin-token"),
+        ADMIN_TRIGGER_PASSWORD,
+        db,
+    )
+    require_role(principal, "admin", "operator")
+
+    query: dict = {}
+    if since:
+        try:
+            since_dt = datetime.fromisoformat(since.replace("Z", "+00:00"))
+            if since_dt.tzinfo is None:
+                since_dt = since_dt.replace(tzinfo=timezone.utc)
+            query["ingested_at"] = {"$gte": since_dt}
+        except ValueError:
+            raise HTTPException(400, f"Invalid `since` format (expected ISO-8601): {since}")
+    if provider:
+        query["provider"] = provider
+
+    # threshold_set / country_code / would_have_fired are all filters on
+    # elements of the `evaluations` array. If more than one is set, we
+    # combine into a single $elemMatch so they all apply to the SAME
+    # evaluation entry — otherwise a row could match on evaluation A for
+    # one filter and evaluation B for another, which is misleading.
+    eval_match: dict = {}
+    if threshold_set:
+        eval_match["threshold_set"] = threshold_set
+    if country_code:
+        eval_match["country_code"] = country_code
+    if would_have_fired is not None:
+        eval_match["would_have_fired"] = would_have_fired
+    if eval_match:
+        query["evaluations"] = {"$elemMatch": eval_match}
+
+    rows = await db.emsc_events.find(
+        query,
+        {"_id": 0, "raw": 0},   # strip raw payload to keep responses small
+    ).sort("ingested_at", -1).limit(limit).to_list(limit)
+
+    return {
+        "count": len(rows),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "filters": {
+            "limit": limit, "since": since, "would_have_fired": would_have_fired,
+            "threshold_set": threshold_set, "provider": provider, "country_code": country_code,
+        },
+        "events": [_serialize_emsc_row(r) for r in rows],
+    }
+
+
+@api_router.get("/admin/emsc/config/{country_code}")
+async def emsc_get_config(country_code: str, request: Request):
+    """Return the country_config for a given ISO-2 code. Useful during
+    soak to confirm exactly what thresholds the poller is applying.
+    """
+    principal = await resolve_principal(
+        request,
+        request.headers.get("x-admin-token"),
+        ADMIN_TRIGGER_PASSWORD,
+        db,
+    )
+    require_role(principal, "admin", "operator")
+    doc = await db.country_configs.find_one({"country_code": country_code.upper()}, {"_id": 0})
+    if not doc:
+        raise HTTPException(404, f"No country_config for {country_code}")
+    return _serialize_country_config(doc)
+
+
+def _iso(v):
+    if not v:
+        return None
+    if isinstance(v, datetime):
+        if v.tzinfo is None:
+            v = v.replace(tzinfo=timezone.utc)
+        return v.astimezone(timezone.utc).isoformat()
+    return v
+
+
+def _serialize_emsc_row(r: dict) -> dict:
+    """Convert datetimes to ISO strings for JSON transport."""
+    out = dict(r)
+    for k in ("observed_at", "ingested_at"):
+        out[k] = _iso(r.get(k))
+    return out
+
+
+def _serialize_country_config(r: dict) -> dict:
+    out = dict(r)
+    for k in ("created_at", "updated_at"):
+        if k in out:
+            out[k] = _iso(out.get(k))
+    return out
+
+
 
 
 # ---------- Wire up ----------
@@ -2264,8 +2460,33 @@ async def bootstrap_users_and_indexes():
     logger.info("Bootstrapped first admin user: %s", bootstrap_email)
 
 
+@app.on_event("startup")
+async def start_emsc_poller():
+    """Seed the country_configs collection (idempotent) and start the
+    in-process EMSC/USGS shadow-mode poll loop. Separated from the users
+    bootstrap so a failure in one doesn't block the other.
+
+    The poller runs as an asyncio task tied to the FastAPI event loop —
+    it stops cleanly when the app shuts down. Failures inside the poll
+    loop are logged and recoverable; a bug in the evaluator cannot
+    crash the API surface.
+    """
+    try:
+        await seed_country_configs(db)
+    except Exception as e:
+        logger.warning("EMSC country_config seed failed: %s", e)
+    try:
+        await emsc_poller.start()
+    except Exception as e:
+        logger.warning("EMSC poller start failed: %s", e)
+
+
 @app.on_event("shutdown")
 async def shutdown_db_client():
+    try:
+        await emsc_poller.stop()
+    except Exception as e:
+        logger.warning("EMSC poller stop failed: %s", e)
     client.close()
     await _push_client.aclose()
     await apns_aclose()

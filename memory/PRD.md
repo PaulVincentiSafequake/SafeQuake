@@ -96,8 +96,60 @@ Helps on-site responders identify WHICH pin corresponds to the physical phone in
     (b) Cross-provider corroboration — an event seen by both providers
         is higher confidence than either alone; useful signal for the
         threshold evaluator (future v2 enhancement).
-- Provider abstraction lives in `backend/emsc.py` (misnamed for now —
-  will rename to `backend/seismic_providers.py` when USGS is added).
+- Provider code lives in `backend/emsc/providers.py` (module structure:
+  `emsc/providers.py`, `emsc/evaluator.py`, `emsc/poller.py`, `emsc/seed.py`).
+
+## EMSC Phase 1 — Shadow-mode soak (landed 2026-08-05)
+
+In-process asyncio poll loop, 60s cadence, both providers concurrent,
+zero user-facing pushes. Runs for 1-2 weeks to gather calibration data
+before any live firing.
+
+### Design decisions (per user direction, 2026-08-05)
+- **Wide-net polling:** min_magnitude 2.5, radius 600km, NO depth filter.
+  Rationale: filtering during soak destroys the data needed to set the
+  filter. Shadow-mode logging is cheap; log everything remotely relevant.
+- **Multi-set evaluation:** every event is scored against ALL threshold_sets
+  in one pass. Malta seeds `quiet_tier` (M3.0+/100km/sev2.0),
+  `critical_tier` (M5.0+/300km/sev4.0), and `neo_original` (M4.0+/300km/sev3.0).
+  Answering "how often would quiet_tier have fired?" is a single DB query.
+- **No cross-provider dedup:** EMSC and USGS are stored side-by-side and
+  tagged by provider. Divergence between the feeds is precisely the signal
+  soak is designed to observe. Cross-matching is a Phase 2 concern.
+- **Revision tracking:** repeat polls of the same `(provider, external_id)`
+  are deduped on unchanged content, but any change to
+  magnitude/lat/lon/depth writes a new row with `revision: n+1`.
+  Preserves the timeline so we can measure how often a magnitude revision
+  would flip an event across a threshold boundary (drives future
+  escalation-alert design).
+- **Severity formula:** `magnitude - log10(distance_km/10) - depth_km/200`.
+  Log-decay on distance, gentle depth penalty. Tunable in
+  `emsc/evaluator.py:severity_score()`.
+
+### Admin endpoints (JSON, admin OR operator role)
+- `GET /api/admin/emsc/health` — per-provider poller health, `healthy` boolean,
+  last_success_at, consecutive_failures, counters. Uptime-monitorable.
+- `GET /api/admin/emsc/recent` — recent events with filters: `limit`,
+  `since` (ISO-8601), `would_have_fired` (bool), `threshold_set`, `provider`,
+  `country_code`. All filters combine with AND; the would/threshold/country
+  filters use `$elemMatch` so they all apply to the SAME evaluation entry.
+- `GET /api/admin/emsc/config/{country_code}` — inspect the active thresholds.
+
+### Collections created
+- `country_configs` — one doc per supported country (Malta seeded on first boot).
+  Idempotent — never overwritten by redeploy.
+- `emsc_events` — one row per event revision. Indexed on
+  `(provider, external_id, revision)` unique.
+- `emsc_poller_health` — one doc per provider (upserted). Source of truth
+  for "is the poller alive".
+
+### Phase 2 (NOT in this landing)
+- Cross-provider dedup / corroboration signal
+- Circuit breaker + exponential backoff (Phase 1 uses simple retry)
+- Move poller to a separate worker process (Phase 1 is in-process for
+  inspection simplicity; safe because no pushes fire)
+- Firing pushes based on `would_have_fired` — gated by manual flip of
+  `country_configs.shadow_mode: false` after soak analysis
 
 ## Task #9 — Per-user Google sign-in (landed 2026-08-05)
 
@@ -189,3 +241,36 @@ failure class from 2026-08-04.
 - **Mirror rule** (locked): NEVER tell a user they're unprotected when they are. During Apple's billing grace period, protection is still active; the warning must reflect that (yellow banner, "your protection continues until [date]") — no red, no NOT PROTECTED state. False alarms train people to ignore the warnings that count.
 - **Accessibility rule** (locked): hold-to-confirm is a trap for elderly / tremor / arthritis / motor-impaired users — precisely our highest-risk lapse cohort. Hold gesture is a shortcut for able users only. Primary path for anyone who can't hold (short-tap, VoiceOver, TalkBack, Switch Control, reduced-motion) is a two-step confirm dialog. Both paths record identical acknowledgement events. Hold duration: 2 seconds with visible progress ring (not 3s — long enough that users release early thinking it's broken).
 - **Statutory language rule**: EU disclosure (auto-renewal, 14-day withdrawal, pre-contract info, easy cancel) sits with Paul as seller, not with Apple. Copy doc uses `[STATUTORY_TEXT_TBD]` placeholders; lawyer to draft. Never invent statutory wording.
+
+## Backlog — scoped 2026-08-05, to build after EMSC soak + subscription A+B
+
+### Session idle timeout (P2, before/alongside subscription A+B)
+- **Why:** Paul's concern — an operator who walks away leaving the dashboard tab open lets the next person act under their identity, quietly undermining the entire per-user attribution we just built in Task #9.
+- **Design:** 15 minutes of no activity → session expires → re-sign-in required. Configurable. Activity = mouse/keyboard/click. Calls `qaAuth.signOut()` internally so the same audit trail path fires.
+- **Not per-action friction** — decided against re-prompting on Undo etc. Idle timeout is the right knob for the unattended-dashboard case; per-action friction just trains operators to avoid the action.
+- Belongs in `dashboard-auth.snippet.html` so all dashboards inherit it once.
+
+### Audit log export (P3, after subscription A+B)
+- Admin-only export of `/api/audit` rows.
+- Formats: CSV + PDF.
+- Filters: date range.
+- **Respects notes-behind-auth contract** — operator-role export omits note text (only `notes_present: true` boolean); admin-role export includes note text verbatim. Different endpoint per role, not a runtime flag.
+
+### Printable casualty reports — TWO distinct documents (P3)
+- **B1 — Operational report** (rescue teams, Civil Protection):
+  - Full detail: per-person short code, first name, coordinates + accuracy, status, severity, mobility, last-updated, battery %.
+  - Grouped by triage: Immediate / Serious-Stable / Minor / Not responding / Safe / Rescued.
+  - Count summary top of page.
+  - "Generated at [exact date + time, local]" prominently — snapshot of a moving situation.
+  - **"CONFIDENTIAL — OPERATIONAL USE ONLY"** watermark on every page.
+  - Admin/operator auth required.
+- **B2 — Public/media summary**:
+  - Aggregate counts ONLY. No names, no short codes, no coordinates, no per-row detail, no health/mobility data.
+  - Format: "As at HH:MM on DATE: N people have reported themselves safe. N have reported being trapped. N have been confirmed rescued."
+  - **GDPR rationale (locked):** injury and mobility data is arguably special-category health data under Article 9. Sending casualty detail to press is both a legal risk AND a human one — families should not learn a relative's condition from a news bulletin.
+- **Structural separation** (locked): different endpoints, different buttons, different visual styling, explicit label on each. Impossible to generate B1 and hand it to press by accident.
+
+### Dashboard category filter (P3)
+- Sidebar filter — one triage category at a time (trapped / rescued / walking wounded / etc). Extends the map filter buttons pattern to the list view.
+- **Rescued view specifically:** show `rescued_at` timestamp next to each entry.
+- **Wire to exports:** "filter the view → export exactly what you're looking at" is the natural workflow. Both B1 report and CSV export should respect the active filter.
