@@ -201,6 +201,63 @@
     cursor: pointer;
     font-size: 12px;
   }
+
+  /* ── Phone / narrow-screen layout ──────────────────────────────────────
+     The desktop layout pins .layout to calc(100vh - 60px). On a narrow
+     screen the map and sidebar wrap onto separate rows, so the content
+     becomes taller than that fixed height and spills out — drawing on top
+     of the Recent Activity panel below it. Overlapping, unreadable text.
+
+     On phones we drop the fixed height entirely and let the page flow
+     normally: map on top with its own height, list underneath, activity
+     panel below that. Also enlarges tap targets, because an operator may
+     be doing this one-handed in the field.
+     ─────────────────────────────────────────────────────────────────── */
+  @media (max-width: 820px) {
+    .layout {
+      display: block;
+      height: auto;
+    }
+    #map-wrap {
+      height: 50vh;
+      min-height: 280px;
+      width: 100%;
+    }
+    .sidebar {
+      max-width: none;
+      width: 100%;
+      overflow-y: visible;
+      border-left: none;
+      border-top: 1px solid #e0e0e0;
+    }
+    #qg-audit { margin: 16px 12px 40px; }
+
+    /* Stat cards: two per row is still readable on a phone. */
+    .stat { flex: 1 1 calc(50% - 5px); }
+
+    /* Finger-sized tap targets. */
+    .map-filter-btn { padding: 9px 12px; font-size: 13px; }
+    .qg-bulk-check { padding: 6px 0; font-size: 13px; }
+    .qg-bulk-check input { width: 18px; height: 18px; }
+
+    header { padding: 12px 14px; }
+    header h1 { font-size: 15px; }
+    #qg-trigger-btn { width: 100%; justify-content: center; }
+    #qg-trigger-wrap { display: block; }
+
+    /* Modals: full-width with breathing room rather than a fixed box. */
+    #qg-rescue-modal, #qg-modal { width: calc(100vw - 32px); max-width: none; }
+
+    /* Bulk bar spans the screen bottom instead of floating centred. */
+    #qg-bulk-bar {
+      left: 12px;
+      right: 12px;
+      transform: translateY(140%);
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+    #qg-bulk-bar.show { transform: translateY(0); }
+  }
 </style>
 <style>
   #qg-trigger-wrap {
