@@ -412,8 +412,10 @@ export default function HomeScreen() {
 
     // 2) NOTE: Mobile app trigger is a LOCAL TEST — it no longer broadcasts to
     //    every registered device. Real cross-device broadcasts go through the
-    //    password-protected "Trigger Earthquake Alert" button on the emergency
-    //    personnel dashboard (POST /api/trigger-alert with X-Admin-Token).
+    //    dashboard's "Trigger Earthquake Alert" button, which authenticates
+    //    per-operator with a Google Sign-In JWT (POST /api/trigger-alert with
+    //    Authorization: Bearer <jwt>) — every trigger is now attributed to a
+    //    named operator in the audit trail. See Task #9 (2026-08).
 
     // 3) Ask for notification permission and schedule local reminder
     //    notifications every ~90s until the user marks themselves safe.

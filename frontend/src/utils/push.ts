@@ -140,6 +140,13 @@ export async function registerForPushNotifications(): Promise<void> {
 }
 
 /**
+ * @deprecated As of 2026-08 (Task #9), the mobile "TRIGGER TEST ALERT" button
+ * no longer fans out to every registered device — it's a local drill only.
+ * The dashboard's operator-authenticated flow is the only production path
+ * that broadcasts. This function is retained for one release cycle in case
+ * we reintroduce it as an admin-gated action; it will 401 in production
+ * because the mobile app does not carry a JWT. Do NOT call from new code.
+ *
  * Ask our FastAPI backend to broadcast an earthquake alert push to every
  * OTHER registered device (excludes the current device via triggeredBy).
  */
