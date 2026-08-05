@@ -403,6 +403,232 @@
 </style>
 </head>
 <body>
+<!-- ═════════════════════════════════════════════════════════════════════
+     Quake Angel dashboard auth guard — per-user Google sign-in.
+     Must load BEFORE any script that calls qaApi() or qaAuth.jwt().
+     Exposes: qaAuth.jwt() / .user() / .signIn() / .signOut() / .onChange(cb)
+              qaApi(path, options) -> raw Response, attaches Bearer JWT,
+              clears local session on 401 before returning.
+     ═════════════════════════════════════════════════════════════════════ -->
+
+<div id="qa-auth-container"></div>
+
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<script>
+(function () {
+  "use strict";
+
+  // ── Config ────────────────────────────────────────────────────────────
+  const CONFIG = {
+    API_BASE: "https://quake-alert-18.emergent.host",
+    GOOGLE_CLIENT_ID: "182168290060-ak0g5brvumsehktg0co4iulnd464fc19.apps.googleusercontent.com",
+    CONTAINER_ID: "qa-auth-container",
+    REQUIRE_ROLES: ["admin", "operator"],
+    STORAGE_KEY: "qa_jwt",
+    STORAGE_USER_KEY: "qa_user",
+  };
+
+  // ── State ─────────────────────────────────────────────────────────────
+  const listeners = new Set();
+  function notify() { listeners.forEach(fn => { try { fn(qaAuth.user()); } catch (_) {} }); }
+
+  // ── Persistence helpers ───────────────────────────────────────────────
+  function getStoredJwt() { try { return sessionStorage.getItem(CONFIG.STORAGE_KEY); } catch (_) { return null; } }
+  function getStoredUser() {
+    try {
+      const raw = sessionStorage.getItem(CONFIG.STORAGE_USER_KEY);
+      return raw ? JSON.parse(raw) : null;
+    } catch (_) { return null; }
+  }
+  function setStored(jwt, user) {
+    try {
+      if (jwt) sessionStorage.setItem(CONFIG.STORAGE_KEY, jwt);
+      else sessionStorage.removeItem(CONFIG.STORAGE_KEY);
+      if (user) sessionStorage.setItem(CONFIG.STORAGE_USER_KEY, JSON.stringify(user));
+      else sessionStorage.removeItem(CONFIG.STORAGE_USER_KEY);
+    } catch (_) { /* private-mode etc. — session is memory-only, which is fine */ }
+    renderChip();
+    notify();
+  }
+
+  // ── Google credential callback ────────────────────────────────────────
+  async function onGoogleCredential(response) {
+    if (!response || !response.credential) return;
+    try {
+      const r = await fetch(CONFIG.API_BASE + "/api/auth/google", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({id_token: response.credential}),
+      });
+      if (!r.ok) {
+        const detail = (await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`;
+        showError("Sign-in failed: " + detail);
+        setStored(null, null);
+        return;
+      }
+      const data = await r.json();
+      setStored(data.token, data.user);
+    } catch (e) {
+      showError("Sign-in failed: " + (e.message || "network error"));
+      setStored(null, null);
+    }
+  }
+
+  window.__qaGoogleCredential = onGoogleCredential;
+
+  // ── UI rendering ──────────────────────────────────────────────────────
+  const CSS = `
+    .qa-auth-root { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    .qa-signed-out { display: flex; align-items: center; gap: 12px; padding: 12px; background: #f8f8f8; border: 1px solid #e5e5e5; border-radius: 8px; }
+    .qa-signed-out h3 { margin: 0; font-size: 14px; color: #333; font-weight: 600; }
+    .qa-signed-out .g_id_signin { flex-shrink: 0; }
+    .qa-chip { display: inline-flex; align-items: center; gap: 8px; padding: 6px 10px; background: #fff; border: 1px solid #e0e0e0; border-radius: 999px; font-size: 12px; color: #444; }
+    .qa-chip b { color: #111; }
+    .qa-chip .qa-role { background: #eef; color: #226; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; }
+    .qa-chip .qa-role.admin { background: #fee; color: #a11; }
+    .qa-chip button { background: none; border: none; color: #a44; cursor: pointer; font-size: 12px; padding: 0; }
+    .qa-chip button:hover { text-decoration: underline; }
+    .qa-error { margin-top: 8px; padding: 8px 12px; background: #fee; border: 1px solid #fbb; color: #a11; border-radius: 6px; font-size: 13px; }
+    .qa-role-denied { padding: 16px; background: #fee; border: 1px solid #fbb; border-radius: 8px; color: #700; font-size: 14px; }
+  `;
+  const styleEl = document.createElement("style");
+  styleEl.textContent = CSS;
+  document.head.appendChild(styleEl);
+
+  const container = document.getElementById(CONFIG.CONTAINER_ID);
+  if (!container) {
+    console.error("[QuakeAngel] Auth container #" + CONFIG.CONTAINER_ID + " not found");
+    return;
+  }
+  container.className = "qa-auth-root";
+
+  function showError(msg) {
+    let el = container.querySelector(".qa-error");
+    if (!el) { el = document.createElement("div"); el.className = "qa-error"; container.appendChild(el); }
+    el.textContent = msg;
+    setTimeout(() => { if (el.parentNode) el.parentNode.removeChild(el); }, 6000);
+  }
+
+  function renderChip() {
+    const user = getStoredUser();
+    if (!user) {
+      renderSignInButton();
+      return;
+    }
+    if (CONFIG.REQUIRE_ROLES && CONFIG.REQUIRE_ROLES.length &&
+        !CONFIG.REQUIRE_ROLES.includes(user.role)) {
+      container.innerHTML =
+        '<div class="qa-role-denied">Your account (<b>' +
+        escapeHtml(user.email) + '</b>) does not have permission to use this dashboard. ' +
+        'Required role: <code>' + CONFIG.REQUIRE_ROLES.join(" or ") + '</code>. ' +
+        'Ask an admin to upgrade your role.</div>';
+      return;
+    }
+    container.innerHTML = "";
+    const chip = document.createElement("div");
+    chip.className = "qa-chip";
+    chip.innerHTML =
+      '<span>Signed in as <b>' + escapeHtml(user.email) + '</b></span>' +
+      '<span class="qa-role ' + (user.role === "admin" ? "admin" : "operator") + '">' +
+      escapeHtml(user.role) + '</span>' +
+      '<button type="button" data-qa-logout>Sign out</button>';
+    chip.querySelector("[data-qa-logout]").addEventListener("click", () => qaAuth.signOut());
+    container.appendChild(chip);
+  }
+
+  function renderSignInButton() {
+    container.innerHTML = "";
+    const wrap = document.createElement("div");
+    wrap.className = "qa-signed-out";
+    wrap.innerHTML =
+      '<h3>Dashboard sign-in</h3>' +
+      '<div id="qa-google-button"></div>';
+    container.appendChild(wrap);
+
+    const tryInit = () => {
+      if (!window.google || !window.google.accounts || !window.google.accounts.id) {
+        return setTimeout(tryInit, 100);
+      }
+      window.google.accounts.id.initialize({
+        client_id: CONFIG.GOOGLE_CLIENT_ID,
+        callback: window.__qaGoogleCredential,
+        auto_select: false,
+        cancel_on_tap_outside: true,
+      });
+      window.google.accounts.id.renderButton(
+        document.getElementById("qa-google-button"),
+        {
+          theme: "outline",
+          size: "large",
+          type: "standard",
+          text: "signin_with",
+          shape: "rectangular",
+          logo_alignment: "left",
+        },
+      );
+    };
+    tryInit();
+  }
+
+  function escapeHtml(s) {
+    return String(s ?? "").replace(/[&<>"']/g, c => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+    }[c]));
+  }
+
+  // ── Public API ────────────────────────────────────────────────────────
+  window.qaAuth = {
+    jwt: () => getStoredJwt(),
+    user: () => getStoredUser(),
+    signIn: () => {
+      if (!getStoredJwt()) renderSignInButton();
+    },
+    signOut: async () => {
+      const jwt = getStoredJwt();
+      if (jwt) {
+        try {
+          await fetch(CONFIG.API_BASE + "/api/auth/logout", {
+            method: "POST",
+            headers: {"Authorization": "Bearer " + jwt},
+          });
+        } catch (_) { /* offline logout is fine */ }
+      }
+      setStored(null, null);
+    },
+    onChange: (cb) => { listeners.add(cb); return () => listeners.delete(cb); },
+  };
+
+  // ── Global fetch wrapper ──────────────────────────────────────────────
+  window.qaApi = async function (path, options) {
+    options = options || {};
+    const headers = Object.assign(
+      {"Content-Type": "application/json"},
+      options.headers || {},
+    );
+    const jwt = getStoredJwt();
+    if (jwt) headers["Authorization"] = "Bearer " + jwt;
+    const r = await fetch(CONFIG.API_BASE + path, Object.assign({}, options, {headers}));
+    if (r.status === 401) {
+      setStored(null, null);
+    }
+    return r;
+  };
+
+  // ── Boot ──────────────────────────────────────────────────────────────
+  renderChip();
+  (async () => {
+    if (!getStoredJwt()) return;
+    try {
+      const r = await window.qaApi("/api/auth/me");
+      if (r.ok) {
+        const data = await r.json();
+        if (data.user) setStored(getStoredJwt(), data.user);
+      }
+    } catch (_) { /* offline is fine — cached state remains */ }
+  })();
+})();
+</script>
+
 <div id="qg-trigger-wrap">
   <button id="qg-trigger-btn" type="button" aria-label="Trigger earthquake alert">
     <span aria-hidden="true">⚠️</span>
@@ -439,7 +665,6 @@
       <p>Live device data. Refreshes every 4 seconds.</p>
     </div>
   </div>
-  <button class="demo" onclick="seedDemoData()">Load demo test users</button>
 </header>
 
 <div class="layout">
@@ -601,6 +826,17 @@
     margin-bottom: 6px;
     text-align: left;
   }
+  #qg-rescue-modal .qg-rescue-modal-authed {
+    background: #EAF6EC;
+    color: #1F8A3A;
+    border: 1px solid #C9E9CE;
+    border-radius: 8px;
+    padding: 8px 12px;
+    font-size: 12px;
+    font-weight: 700;
+    margin-bottom: 14px;
+    text-align: left;
+  }
   #qg-rescue-modal .qg-rescue-modal-btns {
     display: flex;
     gap: 10px;
@@ -716,10 +952,15 @@
     <div class="qg-rescue-modal-title">Mark as Rescued?</div>
     <div class="qg-rescue-modal-body"></div>
     <div class="qg-rescue-modal-error"></div>
+    <!-- Password field retained but permanently hidden: auth is now per-user
+         Google sign-in via the dashboard auth guard. Kept (rather than
+         deleted) so the widget still degrades safely if an older build of
+         the auth snippet is ever served. -->
     <div class="qg-rescue-modal-password-wrap" style="display:none">
       <label class="qg-rescue-modal-password-label" for="qg-rescue-modal-password">Emergency personnel password</label>
       <input type="password" class="qg-rescue-modal-password" id="qg-rescue-modal-password" autocomplete="off" placeholder="Enter password">
     </div>
+    <div class="qg-rescue-modal-authed" style="display:none">🔓 Signed in — no password needed.</div>
     <textarea placeholder="Optional notes (location found, condition, etc.)" style="display:none"></textarea>
     <div class="qg-rescue-modal-btns">
       <button class="qg-rescue-modal-btn cancel" type="button">Cancel</button>
@@ -779,16 +1020,28 @@ window.QuakeAngelRescue = (function () {
   var textEl   = modal.querySelector("textarea");
   var pwdWrap  = modal.querySelector(".qg-rescue-modal-password-wrap");
   var pwdEl    = modal.querySelector(".qg-rescue-modal-password");
+  var authedEl = modal.querySelector(".qg-rescue-modal-authed");
   var okBtn    = modal.querySelector(".qg-rescue-modal-btn.primary");
   var cancelBtn = modal.querySelector(".qg-rescue-modal-btn.cancel");
 
   function showPasswordField(focus) {
     pwdWrap.style.display = "block";
+    authedEl.style.display = "none";
     pwdEl.value = "";
     if (focus) setTimeout(function () { pwdEl.focus(); }, 40);
   }
   function hidePasswordField() {
+    // Hidden because we already have a valid session token — make that
+    // explicit so the operator never mistakes the notes box for a place
+    // to type the password (this is exactly how the password ended up
+    // saved into a notes field previously).
     pwdWrap.style.display = "none";
+    authedEl.style.display = "block";
+    pwdEl.value = "";
+  }
+  function resetPasswordArea() {
+    pwdWrap.style.display = "none";
+    authedEl.style.display = "none";
     pwdEl.value = "";
   }
 
@@ -807,7 +1060,7 @@ window.QuakeAngelRescue = (function () {
     textEl.style.display = "none";
     textEl.value = "";
     clearModalError();
-    hidePasswordField();
+    resetPasswordArea();
   }
   cancelBtn.addEventListener("click", closeModal);
   backdrop.addEventListener("click", function (e) {
@@ -834,16 +1087,11 @@ window.QuakeAngelRescue = (function () {
     okBtn.textContent = opts.ctaLabel;
     modal.classList.toggle("undo", !!opts.undo);
 
-    // Show the inline password field unless we already have a cached token
-    // for this tab session — no more native browser prompt() popups.
-    // Exception: undo/revert actions always require a fresh password, even
-    // if already authenticated this session, since reverting a confirmed
-    // rescue is a higher-stakes action than marking one.
-    if (cachedToken && !opts.forcePassword) {
-      hidePasswordField();
-    } else {
-      showPasswordField(false);
-    }
+    // Auth is now per-user Google sign-in — there is no password to type,
+    // so the inline password field is never shown. Accountability comes
+    // from the JWT identifying the operator in the audit trail, which is
+    // what the old forced re-auth on Undo was trying to achieve.
+    resetPasswordArea();
 
     // Rebind onClick freshly each time so we don't stack listeners.
     okBtn.onclick = async function () {
@@ -855,27 +1103,33 @@ window.QuakeAngelRescue = (function () {
       }
     };
     backdrop.classList.add("show");
-    setTimeout(function () {
-      if (pwdWrap.style.display === "block") pwdEl.focus();
-      else okBtn.focus();
-    }, 40);
+    setTimeout(function () { okBtn.focus(); }, 40);
   }
 
-  async function postJson(path, body, token) {
-    var res = await fetch(QUAKEGUARD_BACKEND + path, {
+  async function postJson(path, body) {
+    // Auth delegated to dashboard-auth.snippet — window.qaApi() attaches the
+    // operator's JWT and clears the local session on 401.
+    if (!window.qaApi) {
+      throw new Error("dashboard auth snippet must load before this widget");
+    }
+    if (!window.qaAuth || !window.qaAuth.jwt()) {
+      var errAuth = new Error("not signed in");
+      errAuth.status = 401;
+      throw errAuth;
+    }
+    var res = await window.qaApi(path, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Admin-Token": token,
-      },
       body: JSON.stringify(body),
     });
     if (res.status === 401) {
-      // Wrong password — flush cached token so the field re-shows next time.
-      cachedToken = null;
-      var err = new Error("wrong password");
+      var err = new Error("session expired");
       err.status = 401;
       throw err;
+    }
+    if (res.status === 403) {
+      var err403 = new Error("not permitted");
+      err403.status = 403;
+      throw err403;
     }
     if (!res.ok) {
       var err2 = new Error("HTTP " + res.status);
@@ -898,18 +1152,11 @@ window.QuakeAngelRescue = (function () {
       showNotes: true,
       onConfirm: async function (notes) {
         clearModalError();
-        var token = cachedToken || pwdEl.value.trim();
-        if (!token) {
-          showModalError("Enter the password to continue.");
-          showPasswordField(true);
-          return;
-        }
         try {
           var data = await postJson("/api/mark-rescued", {
             deviceId: deviceId,
             notes: notes,
-          }, token);
-          cachedToken = token;
+          });
           closeModal();
           showToast(
             "ok",
@@ -920,12 +1167,13 @@ window.QuakeAngelRescue = (function () {
           );
           if (opts.onDone) opts.onDone(data);
         } catch (e) {
-          // Keep the modal open (with notes intact) so the operator can
-          // just retype the password and click Confirm again — no need to
-          // go find this device in the list a second time.
+          // Keep the modal open (with notes intact) so the operator doesn't
+          // have to go find this device in the list a second time.
           if (e.status === 401) {
-            showModalError("Wrong password. Your notes are still here — retype it below and click Confirm to try again.");
-            showPasswordField(true);
+            showModalError("Your session has expired. Sign in again, then click Confirm — your notes are still here.");
+            if (window.qaAuth) window.qaAuth.signIn();
+          } else if (e.status === 403) {
+            showModalError("Your account isn't allowed to mark people as rescued.");
           } else if (e.status === 404) {
             showModalError("Device not found: " + deviceId + ". This case may have already been handled elsewhere.");
           } else {
@@ -947,21 +1195,14 @@ window.QuakeAngelRescue = (function () {
         'mis-click. This is logged in the audit trail.',
       ctaLabel: "Revert",
       undo: true,
-      forcePassword: true,
       onConfirm: async function () {
         clearModalError();
-        // Undo always requires a freshly-typed password, even if the
-        // operator is already authenticated for this session — reverting a
-        // confirmed rescue is a higher-stakes action than marking one.
-        var token = pwdEl.value.trim();
-        if (!token) {
-          showModalError("Enter the password to continue.");
-          showPasswordField(true);
-          return;
-        }
+        // No password re-entry: every revert is attributable to a named
+        // account in the audit trail via the JWT, which is what the old
+        // forced re-auth was trying to achieve. The two-step confirm in
+        // this modal is the deliberate friction.
         try {
-          var data = await postJson("/api/unmark-rescued", { deviceId: deviceId }, token);
-          cachedToken = token;
+          var data = await postJson("/api/unmark-rescued", { deviceId: deviceId });
           closeModal();
           showToast(
             "ok",
@@ -971,8 +1212,10 @@ window.QuakeAngelRescue = (function () {
           if (opts.onDone) opts.onDone(data);
         } catch (e) {
           if (e.status === 401) {
-            showModalError("Wrong password. Retype it below and click Revert to try again.");
-            showPasswordField(true);
+            showModalError("Your session has expired. Sign in again, then click Revert.");
+            if (window.qaAuth) window.qaAuth.signIn();
+          } else if (e.status === 403) {
+            showModalError("Your account isn't allowed to revert a rescue.");
           } else if (e.status === 409) {
             showModalError("Device is not currently rescued — it may have already been reverted.");
           } else {
@@ -999,12 +1242,6 @@ window.QuakeAngelRescue = (function () {
       showNotes: true,
       onConfirm: async function (notes) {
         clearModalError();
-        var token = cachedToken || pwdEl.value.trim();
-        if (!token) {
-          showModalError("Enter the password to continue.");
-          showPasswordField(true);
-          return;
-        }
         showToast("warn", "Marking " + deviceIds.length + " rescued…", 0);
         var okCount = 0;
         var results = [];
@@ -1013,8 +1250,7 @@ window.QuakeAngelRescue = (function () {
             var data = await postJson("/api/mark-rescued", {
               deviceId: deviceIds[i],
               notes: notes,
-            }, token);
-            cachedToken = token;
+            });
             okCount++;
             results.push({ deviceId: deviceIds[i], ok: true, data: data });
           } catch (e) {
@@ -1025,10 +1261,15 @@ window.QuakeAngelRescue = (function () {
             hideToast();
             if (e.status === 401) {
               showModalError(
-                "Wrong password — stopped after " + okCount + " of " + deviceIds.length +
-                ". Retype it below and click Confirm All to retry the rest."
+                "Session expired — stopped after " + okCount + " of " + deviceIds.length +
+                ". Sign in again, then click Confirm All to retry the rest."
               );
-              showPasswordField(true);
+              if (window.qaAuth) window.qaAuth.signIn();
+            } else if (e.status === 403) {
+              showModalError(
+                "Your account isn't allowed to mark people as rescued — stopped after " +
+                okCount + " of " + deviceIds.length + "."
+              );
             } else {
               showModalError(
                 "Failed on one device (" + deviceIds[i] + "): " + e.message +
