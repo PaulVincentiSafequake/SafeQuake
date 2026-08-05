@@ -333,11 +333,6 @@ function renderSidebar(users) {
   updateBulkBar();
 }
 
-async function seedDemoData() {
-  await fetch("/api/demo-seed", { method: "POST" });
-  refresh();
-}
-
 initBulkBar();
 refresh();
 setInterval(refresh, 4000);
@@ -386,12 +381,13 @@ setInterval(refresh, 4000);
   }
   function hideModal() { modal.classList.remove("show"); }
 
-  // "Try Again" re-prompts for the password immediately — no need to
-  // re-confirm the broadcast itself, they already agreed to that once.
-  // "Cancel" just closes the modal; nothing is sent.
+  // The legacy "wrong password" modal is retained only as a fallback for
+  // unexpected auth states. With Google sign-in there is no password to
+  // retype — a 401 means the session expired, so we send them back to
+  // sign-in rather than re-prompting for a secret that no longer exists.
   modalOk.addEventListener("click", function () {
     hideModal();
-    promptForPasswordAndSend();
+    if (window.qaAuth) window.qaAuth.signIn();
   });
   modalCancel && modalCancel.addEventListener("click", function () {
     hideModal();
@@ -404,21 +400,27 @@ setInterval(refresh, 4000);
     if (e.key === "Escape" && modal.classList.contains("show")) hideModal();
   });
 
-  async function promptForPasswordAndSend() {
-    var pwd = window.prompt("Enter emergency personnel password:");
-    if (!pwd) { showBanner("err", "Cancelled — no alert sent.", 4000); return; }
+  async function sendTriggerAlert() {
+    if (!window.qaApi) {
+      showBanner("err", "Auth not loaded — reload the page.", 8000);
+      return;
+    }
+    if (!window.qaAuth || !window.qaAuth.jwt()) {
+      showBanner("err", "Please sign in before triggering an alert.", 6000);
+      if (window.qaAuth) window.qaAuth.signIn();
+      return;
+    }
 
     btn.disabled = true;
     showBanner("ok", "Broadcasting alert…", 0);
 
     try {
-      var res = await fetch(QUAKEGUARD_BACKEND + "/api/trigger-alert", {
+      var res = await window.qaApi("/api/trigger-alert", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Admin-Token": pwd
-        },
         body: JSON.stringify({
+          // triggeredBy is now only a hint to exclude the operator's own
+          // device from the broadcast. Attribution in the audit trail comes
+          // from the JWT, not from this field.
           triggeredBy: "dashboard",
           magnitude: 6.4,
           distance_km: 12,
@@ -427,8 +429,14 @@ setInterval(refresh, 4000);
       });
 
       if (res.status === 401) {
+        // qaApi has already cleared the local session.
         hideBanner();
-        showWrongPasswordModal();
+        showBanner("err", "Session expired — please sign in again.", 6000);
+        if (window.qaAuth) window.qaAuth.signIn();
+        return;
+      }
+      if (res.status === 403) {
+        showBanner("err", "Your account isn't allowed to trigger alerts.", 8000);
         return;
       }
       if (!res.ok) {
@@ -457,7 +465,7 @@ setInterval(refresh, 4000);
       "dashboard status to 'not responding' until they mark themselves safe."
     );
     if (!confirmed) return;
-    promptForPasswordAndSend();
+    sendTriggerAlert();
   });
 })();
 
@@ -577,9 +585,17 @@ setInterval(refresh, 4000);
 
   async function refreshAudit() {
     try {
-      var res = await fetch(QUAKEGUARD_BACKEND + "/api/audit?limit=" + LIMIT, {
-        cache: "no-store"
-      });
+      // Prefer qaApi when available so an authenticated caller gets the full
+      // response (including operator note text). Falls back to anonymous
+      // fetch for public embeds — the endpoint is public but strips notes
+      // for anonymous callers (2026-08-04 leak-class fix).
+      var auditUrl = "/api/audit?limit=" + LIMIT;
+      var res;
+      if (window.qaApi) {
+        res = await window.qaApi(auditUrl, { cache: "no-store" });
+      } else {
+        res = await fetch(QUAKEGUARD_BACKEND + auditUrl, { cache: "no-store" });
+      }
       if (!res.ok) throw new Error("HTTP " + res.status);
       var data = await res.json();
       var events = (data && data.events) || [];
