@@ -63,3 +63,38 @@ Helps on-site responders identify WHICH pin corresponds to the physical phone in
 ### Backwards compatibility
 - Existing check-ins without `display_name` continue to work — the dashboard falls back to `short_code`-only rendering (or raw `device_id` if `short_code` can't be derived, e.g. very short IDs).
 - Snippets accept both a raw `deviceId` string OR the full device object.
+
+## EMSC licensing — resolved 2026-08-04
+
+- FDSN Event service (`fdsnws/event/1/query`) is distributed under **CC BY 4.0**
+  per its own per-service documentation at `seismicportal.eu/fdsn-wsevent.html`.
+  The umbrella `terms.html` page's default "all rights reserved, non-commercial only"
+  clause does NOT apply to this service — the umbrella terms explicitly defer
+  to per-service docs, and this service's docs grant CC BY 4.0.
+- Testimonies (felt reports) are separately CC BY 4.0 per the umbrella terms.
+- User has ALSO emailed EMSC (contact@emsc-csem.org) for written confirmation
+  as a belt-and-suspenders documentation step, but we are NOT blocked pending
+  their reply — the per-service license grant is self-executing.
+
+### Attribution obligations under CC BY 4.0 (must ship with Phase 2)
+
+- Every auto-triggered quiet notification body ends with `Source: EMSC`.
+- `/quake/[unid]` screen shows full credit: `Data © EMSC/CSEM · CC BY 4.0 · seismicportal.eu`,
+  license URL tappable.
+- App About/Credits screen carries the same full attribution + a one-line
+  "indicate changes" clause: "Threshold-based alerting decisions are our own;
+  underlying event data is unmodified from EMSC."
+- Dashboard audit rows for `triggered_by = "emsc-auto:*"` credit the source
+  inline in the audit UI.
+
+## Provider strategy — EMSC + USGS parallel from day one
+
+- USGS FDSN Event service (public domain, US government work) will be
+  stood up as a first-class parallel provider from Phase 1, not a fallback
+  afterthought. This gives us:
+    (a) Commercial-safety redundancy independent of EMSC's licensing.
+    (b) Cross-provider corroboration — an event seen by both providers
+        is higher confidence than either alone; useful signal for the
+        threshold evaluator (future v2 enhancement).
+- Provider abstraction lives in `backend/emsc.py` (misnamed for now —
+  will rename to `backend/seismic_providers.py` when USGS is added).
