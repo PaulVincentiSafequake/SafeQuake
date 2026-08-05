@@ -274,3 +274,64 @@ failure class from 2026-08-04.
 - Sidebar filter — one triage category at a time (trapped / rescued / walking wounded / etc). Extends the map filter buttons pattern to the list view.
 - **Rescued view specifically:** show `rescued_at` timestamp next to each entry.
 - **Wire to exports:** "filter the view → export exactly what you're looking at" is the natural workflow. Both B1 report and CSV export should respect the active filter.
+
+## User management + auto-expiring accounts (P2, scoped 2026-08-05)
+
+Together with Task #9 (per-user auth) and the planned session idle timeout,
+this completes the realistic threat model:
+  - Fired employee → instant disable (Task #9's `session_version` bump)
+  - Walked-away unlocked desk → idle timeout (planned P2)
+  - Forgotten volunteer → auto-expiry (this scope)
+
+### Locked reasoning
+- **No master password on top of per-user auth.** A shared secret is strictly a regression: can't attribute actions, leaks (as ours did 2026-08-04), one departure forces rotation for everyone, creates a false "second factor" impression without adding real independence. Per-user Google + idle timeout + auto-expiry is the complete answer.
+- **No hard delete of users.** Removal creates audit-trail holes. Disable is the operational action. GDPR erasure = separate `/admin/users/{email}/anonymize` endpoint that replaces email with `deleted-user-<uuid>@quakeangel.internal` but preserves the row.
+
+### Request 1 — User management screen
+
+**Backend endpoint additions (small):**
+- Enhance `GET /api/admin/users` to include `last_login_at`, `last_activity_at`, `disabled_at`, `disabled_by`, `expires_at`, `expires_in_days`.
+- New `POST /api/admin/users/{email}/role` — role change with `session_version` bump so it takes effect immediately. Refuses last-admin demotion.
+- New middleware: update `users.last_activity_at` on every authenticated request. Powers "currently signed in" indicator without server-side session storage.
+- New `POST /api/admin/users/{email}/anonymize` — GDPR erasure preserving audit rows.
+
+**Dashboard surface (new `dashboard-users.snippet.html`):**
+- Admin-only. Table: email · role · last-active · status · expires · actions.
+- "Currently signed in" green dot = `last_activity_at < 15 min ago` (aligns with idle-timeout window). Honest given the JWT model.
+- Actions: Change role, Disable, Re-enable, Renew expiry, Anonymize (GDPR).
+- Add-operator modal: email + display_name + role + initial expiry (default 90 days).
+- Self-row banner: "You cannot disable your own account or remove your own admin role."
+
+### Request 2 — Auto-expiring accounts
+
+**Schema additions:**
+- `users.expires_at: datetime | null` (null = never expires; bootstrap admin defaults to null).
+- `users.expiry_warned_at: datetime | null` — dedup guard for warning emails.
+- Default expiry on new user creation: **90 days**.
+
+**Expiry sweeper:**
+- Coroutine on the EMSC poller loop, but at 60-min cadence (not 60-sec).
+- Also runs on startup so a long-down deploy catches up.
+- Per sweep:
+  1. Users where `expires_at < now AND NOT disabled AND NOT active_alert_defer` → disable + `session_version++` + audit row `kind: "user_expired"`.
+  2. Users where `expires_at < now + 7d AND expiry_warned_at IS NULL` → send warning + set warned_at.
+
+**Active-alert-window defer (decisions):**
+- Trigger conditions: (`push_events.kind == "trigger"` in last 12h) OR (any device in `not_responding` OR `trapped`). Either is "active".
+- Defer duration per sweep: 24h. Re-checked every sweep, only expires if conditions clear.
+- Warnings ALSO deferred during active alert. Not the moment to prompt account maintenance.
+- **7-day cap on defer.** After a week of continuous active-alert conditions, expire anyway with escalated warning to all admins.
+
+**Warning delivery:**
+- Email via Emergent Resend integration (inherits from subscription lapse Phase D landing).
+- Dashboard banner in user-management screen: red badge < 7d, yellow < 30d.
+- Cadence: T-14, T-7, T-1 days. No more.
+- Copy inherits subscription-lapse rules: exact date + local time, no relative language, one-click renew CTA.
+
+**Renewal:**
+- One-click "Renew 90 days" from user table.
+- Custom duration dropdown: 30/90/180/365/never. No free-form input — prevents "expires 2099" degeneracy.
+- Bumps `expires_at`, clears `expiry_warned_at`, writes audit row.
+
+### Priority
+After EMSC Phase 1 and subscription lapse A+B. Ahead of QR feature and report exports — every added operator makes this matter more.
