@@ -85,20 +85,26 @@
     );
     if (!confirmed) return;
 
-    var pwd = window.prompt("Enter emergency personnel password:");
-    if (!pwd) { showBanner("err", "Cancelled — no alert sent.", 4000); return; }
+    // Auth is handled by the shared dashboard-auth.snippet — qaApi()
+    // attaches the operator's JWT automatically and re-opens the
+    // Google sign-in flow on 401. The old pwd-prompt path is gone.
+    if (!window.qaAuth || !window.qaAuth.jwt()) {
+      showBanner("err", "Please sign in first (top of page).", 6000);
+      if (window.qaAuth) window.qaAuth.signIn();
+      return;
+    }
 
     btn.disabled = true;
     showBanner("ok", "Broadcasting alert…", 0);
 
     try {
-      var res = await fetch(QUAKEGUARD_BACKEND + "/api/trigger-alert", {
+      var res = await window.qaApi("/api/trigger-alert", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Admin-Token": pwd
-        },
         body: JSON.stringify({
+          // triggeredBy is now a hint to the backend for BROADCAST EXCLUSION
+          // (i.e. "don't send the alert to my own device") — it no longer
+          // determines who gets credited in the audit trail. Attribution
+          // comes from the authenticated user's JWT.
           triggeredBy: "dashboard",
           magnitude: 6.4,
           distance_km: 12,
@@ -107,8 +113,12 @@
       });
 
       if (res.status === 401) {
-        hideBanner();
-        showWrongPasswordModal();
+        // qaApi already cleared the session; show a gentle prompt.
+        showBanner("err", "Session expired — please sign in again.", 6000);
+        return;
+      }
+      if (res.status === 403) {
+        showBanner("err", "Your account isn't allowed to trigger alerts.", 8000);
         return;
       }
       if (!res.ok) {

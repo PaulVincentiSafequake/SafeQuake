@@ -257,9 +257,18 @@
 
   async function refresh() {
     try {
-      var res = await fetch(QUAKEGUARD_BACKEND + "/api/audit?limit=" + LIMIT, {
-        cache: "no-store"
-      });
+      // Use qaApi if available so an authenticated call is made — otherwise
+      // fall back to anonymous fetch. The audit endpoint is public, but the
+      // `notes` field is only included in the response when the caller is
+      // authenticated (see the notes-behind-auth contract, task-#8-followup).
+      // qaApi automatically attaches the JWT if the operator is signed in.
+      var url = "/api/audit?limit=" + LIMIT;
+      var res;
+      if (window.qaApi) {
+        res = await window.qaApi(url, {cache: "no-store"});
+      } else {
+        res = await fetch(QUAKEGUARD_BACKEND + url, {cache: "no-store"});
+      }
       if (!res.ok) throw new Error("HTTP " + res.status);
       var data = await res.json();
       var events = (data && data.events) || [];

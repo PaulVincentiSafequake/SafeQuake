@@ -13,15 +13,39 @@ from typing import List, Optional
 import uuid
 from datetime import datetime, timezone
 
+# .env must load BEFORE any module that reads env at import time.
+# We used to have `from auth import ...` above load_dotenv, which meant
+# the auth module's config helpers (if they'd been eager) saw an empty
+# environment. Belt-and-suspenders: auth.py now reads env lazily on each
+# call, AND we load .env early. Either alone would suffice; both together
+# make the import order noise-free.
+ROOT_DIR = Path(__file__).parent
+load_dotenv(ROOT_DIR / '.env')
+
 from apns import (
     aclose as apns_aclose,
     apns_config_status,
     send_critical_alerts,
 )
 
+# Auth module — per-user Google sign-in (task #9, 2026-08-04).
+# Handles: Google ID token verification, JWT issuance/decoding, request-time
+# principal resolution (JWT-first with legacy X-Admin-Token fallback), role
+# enforcement, and audit attribution. See /app/backend/auth.py for the full
+# architecture write-up.
+from auth import (
+    AuthError,
+    LEGACY_PRINCIPAL,
+    VALID_ROLES,
+    audit_attribution,
+    decode_app_jwt,
+    issue_app_jwt,
+    legacy_token_enabled,
+    require_role,
+    resolve_principal,
+    verify_google_id_token,
+)
 
-ROOT_DIR = Path(__file__).parent
-load_dotenv(ROOT_DIR / '.env')
 
 # MongoDB connection
 mongo_url = os.environ['MONGO_URL']
@@ -779,6 +803,7 @@ async def send_push(
 @api_router.post("/mark-rescued")
 async def mark_rescued(
     payload: dict = Body(...),
+    request: Request = None,
     x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
 ):
     """Dashboard operator marks a trapped case as physically found & safe.
@@ -788,20 +813,27 @@ async def mark_rescued(
     the device doc as `pre_rescue_*` so an Undo can restore the exact
     situation the operator saw before clicking.
 
-    Auth: header `X-Admin-Token` matching ADMIN_TRIGGER_PASSWORD.
+    Auth (either):
+      - Preferred: `Authorization: Bearer <jwt>` (from /api/auth/google flow).
+        Role required: admin OR operator. The user's email is captured
+        into `rescued_by` for the audit trail.
+      - Legacy (deprecated): `X-Admin-Token` matching ADMIN_TRIGGER_PASSWORD.
+        Attributed as `legacy@dashboard` in the audit trail. Disable by
+        setting `LEGACY_TOKEN_ENABLED=false` once dashboards are cut over.
 
     Body: `{"deviceId": "qg-...", "notes": "optional freeform text"}`
     """
-    if not ADMIN_TRIGGER_PASSWORD:
-        raise HTTPException(500, "ADMIN_TRIGGER_PASSWORD not configured on server")
-    if x_admin_token != ADMIN_TRIGGER_PASSWORD:
-        raise HTTPException(401, "Invalid or missing X-Admin-Token")
+    principal = await resolve_principal(request, x_admin_token, ADMIN_TRIGGER_PASSWORD, db)
+    require_role(principal, "admin", "operator")
 
     device_id = str(payload.get("deviceId") or payload.get("device_id") or "").strip()
     if not device_id:
         raise HTTPException(400, "deviceId is required")
     notes = payload.get("notes")
-    rescued_by = str(payload.get("rescued_by") or "dashboard").strip() or "dashboard"
+    # The body-supplied `rescued_by` is IGNORED — we trust the authenticated
+    # principal, not client input. This is a deliberate change from the
+    # pre-#9 behavior where a caller could put anything in `rescued_by`.
+    rescued_by = audit_attribution(principal)
 
     # Find the current row so we can snapshot prior state before overwriting.
     current = await db.device_status.find_one({"device_id": device_id}, {"_id": 0})
@@ -878,22 +910,24 @@ async def mark_rescued(
 @api_router.post("/unmark-rescued")
 async def unmark_rescued(
     payload: dict = Body(...),
+    request: Request = None,
     x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
 ):
     """Undo a mark-rescued — restores the exact prior triage state from
     `pre_rescue_*` snapshot. Use this to recover from a mis-click.
 
-    Auth: header `X-Admin-Token` matching ADMIN_TRIGGER_PASSWORD.
+    Auth: JWT (Authorization: Bearer) OR legacy X-Admin-Token. Role
+    required: admin OR operator. See mark-rescued for full auth notes.
     """
-    if not ADMIN_TRIGGER_PASSWORD:
-        raise HTTPException(500, "ADMIN_TRIGGER_PASSWORD not configured on server")
-    if x_admin_token != ADMIN_TRIGGER_PASSWORD:
-        raise HTTPException(401, "Invalid or missing X-Admin-Token")
+    principal = await resolve_principal(request, x_admin_token, ADMIN_TRIGGER_PASSWORD, db)
+    require_role(principal, "admin", "operator")
 
     device_id = str(payload.get("deviceId") or payload.get("device_id") or "").strip()
     if not device_id:
         raise HTTPException(400, "deviceId is required")
-    reverted_by = str(payload.get("reverted_by") or "dashboard").strip() or "dashboard"
+    # Body-supplied reverted_by is ignored — attribution comes from the
+    # authenticated principal only.
+    reverted_by = audit_attribution(principal)
 
     current = await db.device_status.find_one({"device_id": device_id}, {"_id": 0})
     if not current:
@@ -964,6 +998,7 @@ async def unmark_rescued(
 @api_router.post("/admin/redact-notes")
 async def redact_notes(
     payload: dict = Body(...),
+    request: Request = None,
     x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
 ):
     """Blank the `notes` field on rescued / rescue_reverted audit rows for
@@ -971,11 +1006,12 @@ async def redact_notes(
     that was accidentally typed into the notes field (which is currently
     rendered in the public dashboard Recent-Activity feed).
 
-    Admin-gated. Idempotent — re-running on an already-redacted row is a
-    no-op. Also blanks any `notes` field on the corresponding device_status
-    row as defence-in-depth (mark-rescued doesn't persist notes onto
-    device_status today, but we redact there too in case a future writer
-    starts).
+    ADMIN-ONLY (operators can't redact — this is deliberately a higher-bar
+    action per the task-#9 role split). Idempotent — re-running on an
+    already-redacted row is a no-op. Also blanks any `notes` field on the
+    corresponding device_status row as defence-in-depth.
+
+    Auth: JWT (Bearer) OR legacy X-Admin-Token. Requires admin role.
 
     Payload:
         {
@@ -994,10 +1030,9 @@ async def redact_notes(
 
     Never echoes the redacted content back — that would defeat the point.
     """
-    if not ADMIN_TRIGGER_PASSWORD:
-        raise HTTPException(500, "ADMIN_TRIGGER_PASSWORD not configured on server")
-    if x_admin_token != ADMIN_TRIGGER_PASSWORD:
-        raise HTTPException(401, "Invalid or missing X-Admin-Token")
+    principal = await resolve_principal(request, x_admin_token, ADMIN_TRIGGER_PASSWORD, db)
+    require_role(principal, "admin")
+    redacted_by = audit_attribution(principal)
 
     raw_ids = payload.get("device_ids") or payload.get("deviceIds")
     if not isinstance(raw_ids, list) or not raw_ids:
@@ -1027,7 +1062,7 @@ async def redact_notes(
     reason = str(payload.get("reason") or "").strip()
     reason_suffix = f"; reason={reason}" if reason else ""
     marker = (
-        f"[REDACTED — notes purged by admin{reason_suffix}; "
+        f"[REDACTED — notes purged by {redacted_by}{reason_suffix}; "
         f"see /api/admin/redact-notes]"
     )
 
@@ -1074,18 +1109,20 @@ async def redact_notes(
 @api_router.post("/trigger-alert")
 async def trigger_alert(
     body: TriggerAlertBody,
+    request: Request = None,
     x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
 ):
     """Broadcast a Quake Angel alert to every registered device (except the
     device that triggered it, if provided). Push delivery failure is logged
     but never blocks the response.
 
-    Requires header `X-Admin-Token` matching ADMIN_TRIGGER_PASSWORD.
+    Auth: JWT (Bearer) OR legacy X-Admin-Token. Role: admin OR operator.
+    The authenticated user's email is written into push_events.triggered_by
+    for the audit trail — replacing the pre-#9 hardcoded "dashboard" value.
     """
-    if not ADMIN_TRIGGER_PASSWORD:
-        raise HTTPException(500, "ADMIN_TRIGGER_PASSWORD not configured on server")
-    if x_admin_token != ADMIN_TRIGGER_PASSWORD:
-        raise HTTPException(401, "Invalid or missing X-Admin-Token")
+    principal = await resolve_principal(request, x_admin_token, ADMIN_TRIGGER_PASSWORD, db)
+    require_role(principal, "admin", "operator")
+    triggered_by_user = audit_attribution(principal)
 
     query = {}
     if body.triggeredBy:
@@ -1173,7 +1210,13 @@ async def trigger_alert(
         await db.push_events.insert_one({
             "idempotency_key": idem,
             "created_at": datetime.now(timezone.utc).isoformat(),
-            "triggered_by": body.triggeredBy,
+            # Post-#9: triggered_by holds the AUTHENTICATED USER's email (or
+            # "legacy@dashboard" during migration). The body.triggeredBy
+            # field, if provided, now carries the CALLER'S device_id and is
+            # only used to exclude that device from the broadcast — it no
+            # longer determines who gets credited in the audit trail.
+            "triggered_by": triggered_by_user,
+            "excluded_device_id": body.triggeredBy,
             "magnitude": magnitude,
             "recipients_total": len(devices),
             "recipients_sample": [d["user_id"] for d in devices][:20],
@@ -1885,6 +1928,275 @@ async def cors_debug(request: Request):
 
 
 
+# ═════════════════════════════════════════════════════════════════════════
+# Per-user Google sign-in (task #9)
+# ═════════════════════════════════════════════════════════════════════════
+
+class GoogleLoginPayload(BaseModel):
+    """Request body for POST /api/auth/google.
+
+    id_token: the JWT Google Identity Services returns to the browser after
+    a successful sign-in. We verify it server-side (signature, audience,
+    issuer, expiry, email_verified) via the google-auth library, then check
+    the resulting email against our own users collection.
+    """
+    id_token: str = Field(..., min_length=20, max_length=4096)
+
+
+class UserCreatePayload(BaseModel):
+    email: str = Field(..., min_length=3, max_length=200)
+    role: str = Field(..., pattern=r"^(admin|operator)$")
+    display_name: Optional[str] = Field(default=None, max_length=80)
+
+
+def _user_public(u: dict) -> dict:
+    """Shape a users doc for API responses. Never returns fields that
+    would be sensitive if the response were misrouted (session_version,
+    google_sub, timestamps of the LAST login, are all fine — no secrets)."""
+    return {
+        "email": u.get("email_normalized"),
+        "display_name": u.get("display_name") or u.get("email_normalized"),
+        "role": u.get("role"),
+        "allowed": bool(u.get("allowed")),
+        "disabled": bool(u.get("disabled")),
+        "google_linked": bool(u.get("google_sub")),
+        "last_login_at": u.get("last_login_at"),
+        "created_at": u.get("created_at"),
+        "created_by": u.get("created_by"),
+        "disabled_at": u.get("disabled_at"),
+        "disabled_by": u.get("disabled_by"),
+    }
+
+
+@api_router.post("/auth/google")
+async def auth_google(payload: GoogleLoginPayload):
+    """Exchange a Google-signed ID token for our own dashboard JWT.
+
+    Flow:
+      1. Verify the Google ID token (signature, aud, iss, exp, email_verified).
+      2. Look up the email in our users allowlist.
+      3. Reject if not allowlisted, or disabled, or explicitly not allowed.
+      4. First-successful-sign-in for an allowlisted email links the account
+         to Google's stable `sub` identifier so future logins are matched
+         on `sub` (email can change; sub cannot).
+      5. Issue our own 15-min JWT and return it.
+
+    Never accepts an email as authoritative from the client — only from
+    Google's signed token.
+    """
+    info = verify_google_id_token(payload.id_token)
+    google_sub = info["sub"]
+    email = str(info.get("email") or "").strip()
+    if not email:
+        raise AuthError("Google token missing email", status_code=400)
+    email_norm = email.lower()
+
+    # Match by google_sub first (stable), then fall back to email for the
+    # first sign-in of a pre-created allowlist entry.
+    user = await db.users.find_one({"google_sub": google_sub})
+    if not user:
+        user = await db.users.find_one({"email_normalized": email_norm})
+
+    if not user or not user.get("allowed") or user.get("disabled"):
+        # Log the denial so an admin can see failed sign-in attempts, but
+        # don't reveal WHY (existence-of-account vs disabled) — same
+        # 403 for both to avoid enumeration.
+        logger.info("Sign-in denied for %s (google_sub=%s...)", email_norm, google_sub[:8])
+        raise AuthError("This Google account is not authorized for the dashboard", status_code=403)
+
+    # Link/refresh: bind sub if this is the first login, record last_login_at.
+    now = datetime.now(timezone.utc)
+    updates: dict = {
+        "last_login_at": now,
+        "last_login_email": email,           # so we see the display-form email in logs
+    }
+    if not user.get("google_sub"):
+        updates["google_sub"] = google_sub
+        updates["google_linked_at"] = now
+    if user.get("display_name") is None and info.get("name"):
+        updates["display_name"] = info["name"][:80]
+    await db.users.update_one({"_id": user["_id"]}, {"$set": updates})
+
+    # Re-fetch so the issued JWT reflects the freshest fields (in
+    # particular the newly-set google_sub on first login).
+    user = await db.users.find_one({"_id": user["_id"]})
+    token, exp = issue_app_jwt(user)
+    return {
+        "token": token,
+        "expires_at": exp.isoformat(),
+        "user": _user_public(user),
+    }
+
+
+@api_router.get("/auth/me")
+async def auth_me(request: Request):
+    """Return the current caller's identity + role.
+
+    Used by the dashboard on load to (a) decide whether to show a sign-in
+    button or the operator UI, and (b) refresh cached role info so
+    role-gated buttons update without a full re-login.
+    """
+    principal = await resolve_principal(
+        request,
+        request.headers.get("x-admin-token"),
+        ADMIN_TRIGGER_PASSWORD,
+        db,
+    )
+    # For real users, resolve to the users doc so we can return created_at etc.
+    if not principal.get("is_legacy"):
+        u = await db.users.find_one({"email_normalized": principal["email"]})
+        if u:
+            return {"authenticated": True, "user": _user_public(u), "is_legacy": False}
+    return {
+        "authenticated": True,
+        "user": {
+            "email": principal["email"],
+            "display_name": principal["display_name"],
+            "role": principal["role"],
+        },
+        "is_legacy": principal.get("is_legacy", False),
+    }
+
+
+@api_router.post("/auth/logout")
+async def auth_logout(request: Request):
+    """Client-side logout — nothing to invalidate server-side unless we
+    bump session_version. Returns 200 unconditionally so the client can
+    always clear its stored token.
+
+    Rationale: a Bearer JWT logout is inherently client-side (the client
+    forgets the token). For hard-revocation, an admin should disable the
+    user OR the user should hit /api/auth/revoke-me (below) which bumps
+    their session_version and invalidates every issued JWT for them.
+    """
+    return {"ok": True}
+
+
+@api_router.post("/auth/revoke-me")
+async def auth_revoke_me(request: Request):
+    """Bump the caller's session_version, invalidating every issued JWT
+    for them. Use when you suspect your device was compromised.
+    """
+    principal = await resolve_principal(
+        request,
+        request.headers.get("x-admin-token"),
+        ADMIN_TRIGGER_PASSWORD,
+        db,
+    )
+    if principal.get("is_legacy"):
+        raise AuthError("Legacy principal cannot self-revoke", status_code=400)
+    await db.users.update_one(
+        {"email_normalized": principal["email"]},
+        {"$inc": {"session_version": 1}},
+    )
+    return {"ok": True}
+
+
+# ── User management (admin-only) ────────────────────────────────────────
+@api_router.get("/admin/users")
+async def list_users(request: Request):
+    principal = await resolve_principal(
+        request,
+        request.headers.get("x-admin-token"),
+        ADMIN_TRIGGER_PASSWORD,
+        db,
+    )
+    require_role(principal, "admin")
+    users = await db.users.find({}, {"_id": 0}).sort("created_at", 1).to_list(200)
+    return {"count": len(users), "users": [_user_public(u) for u in users]}
+
+
+@api_router.post("/admin/users")
+async def create_user(payload: UserCreatePayload, request: Request):
+    """Add a new user to the allowlist. They can sign in from that moment
+    on with their Google account — no invite email, no temp password."""
+    principal = await resolve_principal(
+        request,
+        request.headers.get("x-admin-token"),
+        ADMIN_TRIGGER_PASSWORD,
+        db,
+    )
+    require_role(principal, "admin")
+
+    email_norm = payload.email.strip().lower()
+    if "@" not in email_norm or " " in email_norm:
+        raise HTTPException(400, "Invalid email")
+
+    existing = await db.users.find_one({"email_normalized": email_norm})
+    if existing:
+        raise HTTPException(409, f"User {email_norm} already exists")
+
+    doc = {
+        "email": payload.email.strip(),
+        "email_normalized": email_norm,
+        "display_name": (payload.display_name or email_norm.split("@", 1)[0]).strip(),
+        "role": payload.role,
+        "allowed": True,
+        "disabled": False,
+        "session_version": 1,
+        "google_sub": None,
+        "created_at": datetime.now(timezone.utc),
+        "created_by": principal["email"],
+    }
+    await db.users.insert_one(doc)
+    return {"ok": True, "user": _user_public(doc)}
+
+
+@api_router.post("/admin/users/{email}/disable")
+async def disable_user(email: str, request: Request):
+    """Disable a user AND bump session_version so their in-flight JWTs
+    are immediately invalidated. Cannot disable yourself (safety rail
+    against accidental self-lockout by the last admin)."""
+    principal = await resolve_principal(
+        request,
+        request.headers.get("x-admin-token"),
+        ADMIN_TRIGGER_PASSWORD,
+        db,
+    )
+    require_role(principal, "admin")
+    email_norm = email.strip().lower()
+    if email_norm == principal["email"]:
+        raise HTTPException(400, "Cannot disable your own account")
+    res = await db.users.update_one(
+        {"email_normalized": email_norm},
+        {
+            "$set": {
+                "disabled": True,
+                "disabled_at": datetime.now(timezone.utc),
+                "disabled_by": principal["email"],
+            },
+            "$inc": {"session_version": 1},
+        },
+    )
+    if res.matched_count == 0:
+        raise HTTPException(404, f"User {email_norm} not found")
+    return {"ok": True}
+
+
+@api_router.post("/admin/users/{email}/enable")
+async def enable_user(email: str, request: Request):
+    principal = await resolve_principal(
+        request,
+        request.headers.get("x-admin-token"),
+        ADMIN_TRIGGER_PASSWORD,
+        db,
+    )
+    require_role(principal, "admin")
+    email_norm = email.strip().lower()
+    res = await db.users.update_one(
+        {"email_normalized": email_norm},
+        {
+            "$set": {"disabled": False},
+            "$unset": {"disabled_at": "", "disabled_by": ""},
+        },
+    )
+    if res.matched_count == 0:
+        raise HTTPException(404, f"User {email_norm} not found")
+    return {"ok": True}
+
+
+
+
 # ---------- Wire up ----------
 app.include_router(api_router)
 
@@ -1902,6 +2214,55 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
 )
 logger = logging.getLogger(__name__)
+
+@app.on_event("startup")
+async def bootstrap_users_and_indexes():
+    """Ensure the users collection has the right indexes AND the first
+    admin exists. Idempotent — safe to run on every startup.
+
+    The first-admin bootstrap is baked into startup (not a one-shot script)
+    so that:
+      (a) A fresh deploy of the backend can never come up "empty" with no
+          way for anyone to sign in — the admin whose email is baked in
+          via BOOTSTRAP_ADMIN_EMAIL is always usable.
+      (b) Rotating that email later is a .env change + redeploy, not a
+          manual DB edit.
+      (c) The first-admin email is version-controlled alongside the code
+          that trusts it, so history is auditable.
+
+    Note: bootstrap ONLY inserts. It never modifies an existing user's role
+    or `allowed` state — so an admin who was disabled by another admin
+    can't be silently re-enabled by a redeploy.
+    """
+    try:
+        # Idempotent index creation. sparse=true on google_sub so pre-linked
+        # allowlist entries (email-only, no google_sub yet) don't collide.
+        await db.users.create_index("google_sub", unique=True, sparse=True)
+        await db.users.create_index("email_normalized", unique=True)
+    except Exception as e:
+        logger.warning("users index creation failed: %s", e)
+
+    bootstrap_email = os.environ.get("BOOTSTRAP_ADMIN_EMAIL", "pmvincenti@gmail.com").strip().lower()
+    if not bootstrap_email:
+        return
+    existing = await db.users.find_one({"email_normalized": bootstrap_email})
+    if existing:
+        return  # never touch existing rows
+    await db.users.insert_one({
+        "email": bootstrap_email,
+        "email_normalized": bootstrap_email,
+        "display_name": bootstrap_email.split("@", 1)[0],
+        "role": "admin",
+        "allowed": True,
+        "disabled": False,
+        "session_version": 1,
+        "google_sub": None,        # populated on first successful sign-in
+        "created_at": datetime.now(timezone.utc),
+        "created_by": "bootstrap",
+        "last_login_at": None,
+    })
+    logger.info("Bootstrapped first admin user: %s", bootstrap_email)
+
 
 @app.on_event("shutdown")
 async def shutdown_db_client():

@@ -1,0 +1,277 @@
+<!-- ═════════════════════════════════════════════════════════════════════
+     Quake Angel dashboard auth guard — shared drop-in
+     ═════════════════════════════════════════════════════════════════════
+     Paste this snippet ONCE at the top of the dashboard's <body>. It
+     provides:
+
+       • A "Sign in with Google" button rendered via Google Identity
+         Services (ID-token flow — no redirects, no client secret).
+       • A logged-in chip showing the operator's email + role + logout.
+       • A global `window.qaAuth` object with:
+           - qaAuth.jwt()        → current bearer token, or null
+           - qaAuth.user()       → { email, role, display_name } or null
+           - qaAuth.signIn()     → prompts Google sign-in
+           - qaAuth.signOut()    → clears local session + redraws UI
+           - qaAuth.onChange(cb) → subscribe to auth state changes
+       • A global `window.qaApi(path, options)` fetch wrapper that:
+           - Attaches Authorization: Bearer <jwt> automatically
+           - On 401, clears the local session and re-prompts sign-in
+           - Returns the raw Response object (caller handles parsing)
+
+     The feature snippets (dashboard.js.snippet, dashboard-audit-log,
+     dashboard-mark-rescued) call qaApi() instead of raw fetch — so once
+     this guard is loaded, everything else Just Works with per-user auth.
+
+     Config knobs (edit the CONFIG object at the top):
+       - API_BASE:            our FastAPI origin
+       - GOOGLE_CLIENT_ID:    the Web Client ID from Google Cloud Console
+       - CONTAINER_ID:        where the sign-in UI renders
+       - REQUIRE_ROLES:       who can even LOAD this dashboard
+                              (per-page override still available via role guards)
+     ═════════════════════════════════════════════════════════════════════ -->
+
+<div id="qa-auth-container"></div>
+
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<script>
+(function () {
+  "use strict";
+
+  // ── Config ────────────────────────────────────────────────────────────
+  const CONFIG = {
+    API_BASE: "https://quake-alert-18.emergent.host",
+    GOOGLE_CLIENT_ID: "182168290060-ak0g5brvumsehktg0co4iulnd464fc19.apps.googleusercontent.com",
+    CONTAINER_ID: "qa-auth-container",
+    // Roles that can view this dashboard. Both roles for the main dashboard;
+    // for admin-only pages, override on the page itself.
+    REQUIRE_ROLES: ["admin", "operator"],
+    // Session storage key — sessionStorage clears on tab close, which is
+    // desirable for a shared dispatcher workstation. Change to localStorage
+    // only if operators explicitly want cross-tab persistence.
+    STORAGE_KEY: "qa_jwt",
+    STORAGE_USER_KEY: "qa_user",
+  };
+
+  // ── State ─────────────────────────────────────────────────────────────
+  const listeners = new Set();
+  function notify() { listeners.forEach(fn => { try { fn(qaAuth.user()); } catch (_) {} }); }
+
+  // ── Persistence helpers ───────────────────────────────────────────────
+  function getStoredJwt() { try { return sessionStorage.getItem(CONFIG.STORAGE_KEY); } catch (_) { return null; } }
+  function getStoredUser() {
+    try {
+      const raw = sessionStorage.getItem(CONFIG.STORAGE_USER_KEY);
+      return raw ? JSON.parse(raw) : null;
+    } catch (_) { return null; }
+  }
+  function setStored(jwt, user) {
+    try {
+      if (jwt) sessionStorage.setItem(CONFIG.STORAGE_KEY, jwt);
+      else sessionStorage.removeItem(CONFIG.STORAGE_KEY);
+      if (user) sessionStorage.setItem(CONFIG.STORAGE_USER_KEY, JSON.stringify(user));
+      else sessionStorage.removeItem(CONFIG.STORAGE_USER_KEY);
+    } catch (_) { /* private-mode etc. — session is memory-only, which is fine */ }
+    renderChip();
+    notify();
+  }
+
+  // ── Google credential callback ────────────────────────────────────────
+  // Called by Google Identity Services after the user completes sign-in.
+  // We POST the returned ID token to our backend, which verifies it and
+  // returns our own short-lived JWT for subsequent admin calls.
+  async function onGoogleCredential(response) {
+    if (!response || !response.credential) return;
+    try {
+      const r = await fetch(CONFIG.API_BASE + "/api/auth/google", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({id_token: response.credential}),
+      });
+      if (!r.ok) {
+        const detail = (await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`;
+        showError("Sign-in failed: " + detail);
+        setStored(null, null);
+        return;
+      }
+      const data = await r.json();
+      setStored(data.token, data.user);
+    } catch (e) {
+      showError("Sign-in failed: " + (e.message || "network error"));
+      setStored(null, null);
+    }
+  }
+
+  // Expose the credential callback under a stable global name so the GSI
+  // script (loaded async) can invoke it once it's initialized.
+  window.__qaGoogleCredential = onGoogleCredential;
+
+  // ── UI rendering ──────────────────────────────────────────────────────
+  const CSS = `
+    .qa-auth-root { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    .qa-signed-out { display: flex; align-items: center; gap: 12px; padding: 12px; background: #f8f8f8; border: 1px solid #e5e5e5; border-radius: 8px; }
+    .qa-signed-out h3 { margin: 0; font-size: 14px; color: #333; font-weight: 600; }
+    .qa-signed-out .g_id_signin { flex-shrink: 0; }
+    .qa-chip { display: inline-flex; align-items: center; gap: 8px; padding: 6px 10px; background: #fff; border: 1px solid #e0e0e0; border-radius: 999px; font-size: 12px; color: #444; }
+    .qa-chip b { color: #111; }
+    .qa-chip .qa-role { background: #eef; color: #226; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; }
+    .qa-chip .qa-role.admin { background: #fee; color: #a11; }
+    .qa-chip button { background: none; border: none; color: #a44; cursor: pointer; font-size: 12px; padding: 0; }
+    .qa-chip button:hover { text-decoration: underline; }
+    .qa-error { margin-top: 8px; padding: 8px 12px; background: #fee; border: 1px solid #fbb; color: #a11; border-radius: 6px; font-size: 13px; }
+    .qa-role-denied { padding: 16px; background: #fee; border: 1px solid #fbb; border-radius: 8px; color: #700; font-size: 14px; }
+  `;
+  const styleEl = document.createElement("style");
+  styleEl.textContent = CSS;
+  document.head.appendChild(styleEl);
+
+  const container = document.getElementById(CONFIG.CONTAINER_ID);
+  if (!container) {
+    console.error("[QuakeAngel] Auth container #" + CONFIG.CONTAINER_ID + " not found");
+    return;
+  }
+  container.className = "qa-auth-root";
+
+  function showError(msg) {
+    let el = container.querySelector(".qa-error");
+    if (!el) { el = document.createElement("div"); el.className = "qa-error"; container.appendChild(el); }
+    el.textContent = msg;
+    setTimeout(() => { if (el.parentNode) el.parentNode.removeChild(el); }, 6000);
+  }
+
+  function renderChip() {
+    const user = getStoredUser();
+    if (!user) {
+      renderSignInButton();
+      return;
+    }
+    // Optional dashboard-level role gate.
+    if (CONFIG.REQUIRE_ROLES && CONFIG.REQUIRE_ROLES.length &&
+        !CONFIG.REQUIRE_ROLES.includes(user.role)) {
+      container.innerHTML =
+        '<div class="qa-role-denied">Your account (<b>' +
+        escapeHtml(user.email) + '</b>) does not have permission to use this dashboard. ' +
+        'Required role: <code>' + CONFIG.REQUIRE_ROLES.join(" or ") + '</code>. ' +
+        'Ask an admin to upgrade your role.</div>';
+      return;
+    }
+    container.innerHTML = "";
+    const chip = document.createElement("div");
+    chip.className = "qa-chip";
+    chip.innerHTML =
+      '<span>Signed in as <b>' + escapeHtml(user.email) + '</b></span>' +
+      '<span class="qa-role ' + (user.role === "admin" ? "admin" : "operator") + '">' +
+      escapeHtml(user.role) + '</span>' +
+      '<button type="button" data-qa-logout>Sign out</button>';
+    chip.querySelector("[data-qa-logout]").addEventListener("click", () => qaAuth.signOut());
+    container.appendChild(chip);
+  }
+
+  function renderSignInButton() {
+    container.innerHTML = "";
+    const wrap = document.createElement("div");
+    wrap.className = "qa-signed-out";
+    wrap.innerHTML =
+      '<h3>Dashboard sign-in</h3>' +
+      '<div id="qa-google-button"></div>';
+    container.appendChild(wrap);
+
+    // GSI initialization — retry until the async-loaded script exposes the API.
+    const tryInit = () => {
+      if (!window.google || !window.google.accounts || !window.google.accounts.id) {
+        return setTimeout(tryInit, 100);
+      }
+      window.google.accounts.id.initialize({
+        client_id: CONFIG.GOOGLE_CLIENT_ID,
+        callback: window.__qaGoogleCredential,
+        // Auto-select is intentionally OFF: we want an explicit click per session,
+        // because a dashboard is a shared-workstation context.
+        auto_select: false,
+        // No One-Tap prompt — again, shared workstation, don't surprise anyone.
+        cancel_on_tap_outside: true,
+      });
+      window.google.accounts.id.renderButton(
+        document.getElementById("qa-google-button"),
+        {
+          theme: "outline",
+          size: "large",
+          type: "standard",
+          text: "signin_with",
+          shape: "rectangular",
+          logo_alignment: "left",
+        },
+      );
+    };
+    tryInit();
+  }
+
+  function escapeHtml(s) {
+    return String(s ?? "").replace(/[&<>"']/g, c => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+    }[c]));
+  }
+
+  // ── Public API ────────────────────────────────────────────────────────
+  window.qaAuth = {
+    jwt: () => getStoredJwt(),
+    user: () => getStoredUser(),
+    signIn: () => {
+      // Force-refresh the button — if the token was cleared elsewhere,
+      // this puts the Google button back on screen.
+      if (!getStoredJwt()) renderSignInButton();
+    },
+    signOut: async () => {
+      // Fire-and-forget server logout. It's mostly ceremonial for a Bearer
+      // JWT (client-side forgetting is what actually logs out), but it
+      // gives us a server-side audit line.
+      const jwt = getStoredJwt();
+      if (jwt) {
+        try {
+          await fetch(CONFIG.API_BASE + "/api/auth/logout", {
+            method: "POST",
+            headers: {"Authorization": "Bearer " + jwt},
+          });
+        } catch (_) { /* offline logout is fine */ }
+      }
+      setStored(null, null);
+    },
+    onChange: (cb) => { listeners.add(cb); return () => listeners.delete(cb); },
+  };
+
+  // ── Global fetch wrapper ──────────────────────────────────────────────
+  // Feature snippets should call this instead of raw fetch — it attaches
+  // the JWT automatically and handles 401 by re-opening the sign-in flow.
+  window.qaApi = async function (path, options) {
+    options = options || {};
+    const headers = Object.assign(
+      {"Content-Type": "application/json"},
+      options.headers || {},
+    );
+    const jwt = getStoredJwt();
+    if (jwt) headers["Authorization"] = "Bearer " + jwt;
+    const r = await fetch(CONFIG.API_BASE + path, Object.assign({}, options, {headers}));
+    if (r.status === 401) {
+      // Session died — could be expired JWT, disabled user, revoked. Clear
+      // local state and re-open sign-in. Caller still gets the 401 Response
+      // so it can render its own "please sign in again" UX if it wants.
+      setStored(null, null);
+    }
+    return r;
+  };
+
+  // ── Boot ──────────────────────────────────────────────────────────────
+  renderChip();
+  // If we have a cached JWT, verify it against /api/auth/me on load — that
+  // way a disabled/revoked user gets kicked out on page load rather than
+  // when they first click something.
+  (async () => {
+    if (!getStoredJwt()) return;
+    try {
+      const r = await window.qaApi("/api/auth/me");
+      if (r.ok) {
+        const data = await r.json();
+        if (data.user) setStored(getStoredJwt(), data.user);
+      } // 401 already handled by qaApi
+    } catch (_) { /* offline is fine — cached state remains */ }
+  })();
+})();
+</script>

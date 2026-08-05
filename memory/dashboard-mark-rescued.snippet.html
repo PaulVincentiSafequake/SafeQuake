@@ -233,15 +233,25 @@ window.QuakeAngelRescue = (function () {
   var QUAKEGUARD_BACKEND = "https://quake-alert-18.emergent.host"; // no trailing /
   // ========================================================================
 
-  // Cached admin token — held in memory only for the current tab session.
-  // Reset when the operator refreshes / closes the tab.
-  var cachedToken = null;
-
-  function getAdminToken() {
-    if (cachedToken) return cachedToken;
-    var pwd = window.prompt("Enter emergency personnel password:");
-    if (pwd) cachedToken = pwd;
-    return cachedToken;
+  // Auth is now handled by the shared dashboard-auth.snippet — it exposes
+  // window.qaApi() which attaches the operator's JWT automatically. If the
+  // dashboard-auth snippet isn't loaded, we fall back to a minimal no-op
+  // wrapper that throws with a helpful message so the operator knows to
+  // include the auth snippet.
+  function apiCall(path, body) {
+    if (!window.qaApi) {
+      throw new Error("dashboard-auth.snippet.html must be loaded before this snippet");
+    }
+    if (!window.qaAuth || !window.qaAuth.jwt()) {
+      var err = new Error("not signed in");
+      err.status = 401;
+      if (window.qaAuth) window.qaAuth.signIn();
+      throw err;
+    }
+    return window.qaApi(path, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
   }
 
   var toast = document.getElementById("qg-rescue-toast");
@@ -310,22 +320,19 @@ window.QuakeAngelRescue = (function () {
   }
 
   async function postJson(path, body) {
-    var token = getAdminToken();
-    if (!token) throw new Error("cancelled");
-    var res = await fetch(QUAKEGUARD_BACKEND + path, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Admin-Token": token,
-      },
-      body: JSON.stringify(body),
-    });
+    // Delegates to the shared apiCall (which routes through qaApi with the
+    // operator's JWT). Kept as a thin wrapper so the rest of the file
+    // doesn't need to change shape — just the auth mechanism underneath.
+    var res = await apiCall(path, body);
     if (res.status === 401) {
-      // Wrong password — flush cached token so we re-prompt on next click.
-      cachedToken = null;
-      var err = new Error("wrong password");
+      var err = new Error("not signed in");
       err.status = 401;
       throw err;
+    }
+    if (res.status === 403) {
+      var err3 = new Error("insufficient role");
+      err3.status = 403;
+      throw err3;
     }
     if (!res.ok) {
       var err2 = new Error("HTTP " + res.status);
@@ -396,7 +403,9 @@ window.QuakeAngelRescue = (function () {
           if (opts.onDone) opts.onDone(data);
         } catch (e) {
           if (e.status === 401) {
-            showToast("err", "Wrong password. No change made.", 6000);
+            showToast("err", "Please sign in to mark rescued.", 6000);
+          } else if (e.status === 403) {
+            showToast("err", "Your role isn't allowed to mark rescued.", 6000);
           } else if (e.status === 404) {
             showToast("err", "Device not found: " + deviceId, 6000);
           } else if (e.message === "cancelled") {
@@ -434,7 +443,9 @@ window.QuakeAngelRescue = (function () {
           if (opts.onDone) opts.onDone(data);
         } catch (e) {
           if (e.status === 401) {
-            showToast("err", "Wrong password. No change made.", 6000);
+            showToast("err", "Please sign in to undo a rescue.", 6000);
+          } else if (e.status === 403) {
+            showToast("err", "Your role isn't allowed to undo rescues.", 6000);
           } else if (e.status === 409) {
             showToast("warn", "Device is not currently rescued.", 5000);
           } else if (e.message === "cancelled") {

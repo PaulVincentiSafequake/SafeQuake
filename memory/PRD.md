@@ -98,3 +98,55 @@ Helps on-site responders identify WHICH pin corresponds to the physical phone in
         threshold evaluator (future v2 enhancement).
 - Provider abstraction lives in `backend/emsc.py` (misnamed for now —
   will rename to `backend/seismic_providers.py` when USGS is added).
+
+## Task #9 — Per-user Google sign-in (landed 2026-08-05)
+
+Replaces the shared `X-Admin-Token` shared-secret with per-user identities
+backed by Google Identity Services (ID-token flow, no client secret, no
+redirect callback). Direct architectural fix for the security-incident
+failure class from 2026-08-04.
+
+### Architecture
+- Dashboard renders Google's sign-in button via GIS.
+- On success, GIS returns a Google-signed ID token to JS.
+- JS POSTs it to `/api/auth/google` → backend verifies signature/audience/
+  issuer/expiry via `google-auth`, looks up the email in our `users`
+  allowlist, issues a 15-min HS256 JWT.
+- JWT stored in `sessionStorage` (cleared on tab close — appropriate for
+  shared dispatcher workstations). Sent as `Authorization: Bearer <jwt>`
+  on every admin call.
+- Backend re-checks `users.allowed/disabled/session_version` on every request
+  so disabling an operator invalidates their JWT immediately, not on next expiry.
+
+### Roles (MVP)
+- **admin** — everything, incl. user management + redact-notes.
+- **operator** — trigger-alert, mark/unmark-rescued, view audit; cannot
+  touch users or redaction.
+
+### Legacy soft-cutover
+- `LEGACY_TOKEN_ENABLED=true` in .env keeps `X-Admin-Token` working during
+  dashboard-side migration. Legacy callers attributed as `legacy@dashboard`
+  in audit trail (grep-friendly for cutover-progress tracking).
+- Flip flag to `false` in .env → shared secret is dead, JWT-only.
+
+### Files
+- `backend/auth.py` (new, ~240 LOC) — JWT + Google ID token + principal resolution.
+- `backend/server.py` — bootstrap first admin on startup; four migrated admin
+  endpoints (`mark-rescued`, `unmark-rescued`, `redact-notes`, `trigger-alert`);
+  new `/api/auth/google`, `/api/auth/me`, `/api/auth/logout`, `/api/auth/revoke-me`,
+  `/api/admin/users` (list/create/disable/enable).
+- `memory/dashboard-auth.snippet.html` (new) — shared GIS button + `qaApi()` wrapper.
+- `memory/dashboard.js.snippet` — swapped password prompt for JWT via qaApi.
+- `memory/dashboard-mark-rescued.snippet.html` — same.
+- `memory/dashboard-audit-log.snippet.html` — same (also gets notes when signed in).
+
+### Attribution
+- `push_events.triggered_by` — now the authenticated user's email (was `"dashboard"`).
+- `status_events.rescued_by` / `reverted_by` — same.
+- Redaction marker on notes — includes the redactor's email inline.
+- Historic rows untouched. New rows properly attributed from cutover onward.
+
+### Test users / bootstrap
+- `pmvincenti@gmail.com` seeded as first admin on backend startup.
+- Additional operators added via `POST /api/admin/users` + Google Cloud
+  Console test-user allowlist (consent screen is in Testing status).
