@@ -150,3 +150,34 @@ failure class from 2026-08-04.
 - `pmvincenti@gmail.com` seeded as first admin on backend startup.
 - Additional operators added via `POST /api/admin/users` + Google Cloud
   Console test-user allowlist (consent screen is in Testing status).
+
+## Subscription lapse handling (planned — landing after EMSC Phase 1)
+
+### Business model (decided 2026-08-05)
+- €2.99/year, auto-renewing, everything included. No free/paid split of safety features.
+- Framed as cost recovery, not profit.
+- Plan values: "individual" (€2.99/yr) at launch. Schema keeps room for "b2b_hotel", "b2b_school", "b2b_care_home".
+
+### iOS payment path — StoreKit + ASSN v2 (NOT Stripe)
+- Apple App Store Review Guideline 3.1.1 requires In-App Purchase for any subscription unlocking in-app functionality. Stripe would be a rejection.
+- Entitlement truth: App Store Server Notifications V2 (Apple pushes DID_RENEW, EXPIRED, GRACE_PERIOD_EXPIRED, DID_FAIL_TO_RENEW, REFUND, etc.) + receipt validation.
+- `subscriptions.entitlement_ends_at` mirrors Apple's `expiresDate` — never our scheduler's guess.
+- Apple's own billing grace period (configurable in App Store Connect up to 16 days) handles most card-retry cases automatically. Our 14-day grace period sits AFTER Apple's expires, not duplicating it. Composition: [Apple auto-renew] → [Apple billing grace, up to 16d] → [Apple expiresDate reached] → [our 14d grace period, aggressive banners] → [expired NOT PROTECTED state].
+- Reactivation from NOT PROTECTED state is a StoreKit purchase / subscription-management sheet (`SKPaymentQueue.presentCodeRedemptionSheetIfEligible` / `showManageSubscriptions`), not a Stripe checkout URL.
+
+### Execution order (confirmed 2026-08-05)
+1. Finish task #9 — user Publishes and validates the Google sign-in end-to-end.
+2. EMSC/USGS Phase 1 shadow mode — starts the mandatory 1-2 week soak clock ticking, inert to users. Priority-first because the soak can't be shortened.
+3. Subscription lapse Phase A+B in parallel while EMSC soaks — state machine + audit trail + in-app UI + acknowledgement. Get in front of user for feedback.
+4. Phase C (push warnings), D (email via Emergent Resend), E (StoreKit reactivation) as follow-ups.
+
+### Copy shipping rules (per 2026-08-05 sign-off)
+- Never "subscription", "payment", "billing". Always "cover" + explicit safety consequence.
+- 1-day warning MUST state exact date + time in user's local timezone, not "tomorrow."
+- "You will not be alerted to earthquakes near you" is accurate under €2.99-everything-included and is the strongest line — keep it.
+- Consequences bolded at each tier.
+- One-tap "Reactivate now" CTA on every warning.
+- No cheerful marketing language. Only ⚠️ emoji, on the terminal NOT PROTECTED state.
+
+### Apple HIG check
+- Deferred to start of Phase A+B implementation (not now). Focus is on §4.2.2 (coercive UX) — the design already has the mitigation (3s-hold secondary action), plus specific check on subscription-lapse messaging rules. If HIG suggests softening further, prioritise "impossible to misunderstand" over "impossible to dismiss" — evidence comes from the recorded ack, not from trapping them.
