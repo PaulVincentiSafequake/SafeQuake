@@ -38,12 +38,24 @@ StoreKit code exists. This unblocks:
    subscription settings), so our banner doesn't disagree with what
    iOS is showing the same user in Settings > Subscriptions.
 
-4. **Lazy transitions on read.** The state stored in Mongo is a
-   snapshot at last write. On every GET we recompute whether the
-   snapshot is still true given wall-clock now, and if not we
-   transition (idempotently) and persist. No background job required
-   for MVP — a user who never opens the app has no banner to see
-   anyway.
+4. **Lazy state computation on read.** The state stored in Mongo is a
+   snapshot at last write. On every GET we RECOMPUTE the correct
+   state given wall-clock now — active-past-period-end reads as
+   `grace`, grace-past-grace-ends-at reads as `lapsed`. We do NOT
+   write the recomputed state back to Mongo: on a read-heavy endpoint
+   that would be a write-amplification footgun, and Phase C (real
+   Apple ASN2 push notifications) will overwrite these compute-only
+   transitions with real events anyway. Consequences for callers:
+     - Mobile client: always sees correct state. Zero staleness risk.
+     - Direct DB queries: the `state` field can lag reality until
+       the next `upsert_entitlement` call. Callers that need
+       real-time state across many devices at once should hit the
+       API, not query the collection directly.
+     - `history[]`: only captures deliberate writes (admin override,
+       Apple ASN2). Time-based auto-transitions are not recorded —
+       they're derivable from `current_period_end` + `grace_ends_at`
+       + wall clock, so no information is lost, just not duplicated
+       into an append log.
 
 5. **Never a hard paywall on launch.** No blocking modal, no "renew or
    quit" screen. HIG explicitly discourages hard paywalls at launch
