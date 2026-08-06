@@ -1,0 +1,125 @@
+# QuakeAngel backend — Fly.io app configuration.
+#
+# Design intent (locked with Paul 2026-08-06, migration prep):
+#
+#   1. **Region: fra (Frankfurt).**
+#      Malta is the target audience. Frankfurt is ~1,700 km from
+#      Malta; the next-closest Fly.io EU regions are Amsterdam (~2,000
+#      km) and Madrid (~2,100 km). Frankfurt also colocates with
+#      MongoDB Atlas Frankfurt (eu-central-1) which minimises
+#      cross-region hops on every EMSC poll write.
+#
+#   2. **min_machines_running = 1, auto_stop_machines = "off".**
+#      NON-NEGOTIABLE. The EMSC poller must never stop. A single
+#      seismic event during a pod hibernation window is one
+#      false-negative pushed to real users — the whole point of
+#      moving off Emergent was to eliminate silent gaps.
+#      Cost impact: ~$3-5/mo for a persistent shared-cpu-1x machine.
+#      That is objectively cheaper than one hour of the incident
+#      response you'd owe subscribers after a missed alert.
+#
+#   3. **auto_start_machines = true.** If Fly.io ever needs to move the
+#      machine (host maintenance) the replacement starts automatically
+#      instead of waiting for a request to wake it. Different from
+#      #2: #2 says "never stop"; #3 says "if you do have to
+#      restart, do it eagerly, not lazily."
+#
+#   4. **Single machine (not a cluster).**
+#      For MVP we accept single-machine SPOF in exchange for zero
+#      cross-machine consistency headaches (multiple EMSC pollers
+#      would fire duplicate APNs). Once we're ready for HA, the plan
+#      is to move the poller into its own Fly.io Machine (worker tier)
+#      and let 2+ HTTP machines serve requests — Mongo is already the
+#      shared source of truth for `emsc_events`, so scaling out the
+#      HTTP layer is safe. Not this sprint.
+#
+#   5. **HTTPS forced, HTTP redirected.** APNs will reject any relay
+#      that isn't https and Apple's App Store review would reject too.
+#
+#   6. **Concurrency limits.** shared-cpu-1x has 256MB RAM; our
+#      background poller + APNs sender + EMSC evaluator is roughly
+#      120MB steady-state. Cap concurrent HTTP handlers so a burst of
+#      dashboard traffic can't OOM the poller.
+
+app = "quakeangel-backend"
+primary_region = "fra"
+
+# The Docker image is built from ./Dockerfile at repo root during
+# `fly deploy`. See Dockerfile design notes for why we chose a
+# non-root, single-stage slim image.
+[build]
+  dockerfile = "backend/Dockerfile"
+
+# Environment variables baked into every machine. SECRETS (MongoDB
+# URL, JWT_SECRET, admin passwords, APNs is DB-backed so no env vars)
+# are set via `fly secrets set` — never in this file. See
+# migration-checklist.md step 4 for the exact `fly secrets set`
+# commands.
+[env]
+  PORT = "8001"
+  # LEGACY_TOKEN_ENABLED stays "true" during migration for API-parity
+  # with the Emergent-hosted backend. Flip to "false" once Google
+  # dashboard auth is live in production and all operator dashboards
+  # have re-authenticated. See PRD §7.
+  LEGACY_TOKEN_ENABLED = "true"
+
+# Single service: the FastAPI HTTP server. WebSockets are not used;
+# APNs is server-initiated HTTP/2 to Apple.
+[http_service]
+  internal_port = 8001
+  force_https = true
+  auto_stop_machines = "off"        # #2 above — never
+  auto_start_machines = true         # #3 above — eagerly restart
+  min_machines_running = 1           # #2 above — always warm
+  processes = ["app"]
+
+  [http_service.concurrency]
+    type = "requests"
+    # #6 above. Fly.io's shared-cpu-1x reliably handles ~50 concurrent
+    # HTTP handlers before latency degrades; hard_limit is where we
+    # start returning 503s.
+    soft_limit = 30
+    hard_limit = 50
+
+  # Fly.io health check. /api/status is a cheap Mongo ping + config
+  # read; it must return 200 within 5s or Fly.io will restart the
+  # machine. Grace period is generous during startup because the EMSC
+  # seed at boot can take 5-10s.
+  [[http_service.checks]]
+    protocol = "http"
+    method = "GET"
+    path = "/api/status"
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "30s"
+    # Retry twice before restarting — transient 500s during a Mongo
+    # reconnect shouldn't kill the machine.
+    tls_skip_verify = false
+
+# Machine sizing. shared-cpu-1x @ 256MB is the smallest paid tier
+# and is sufficient for MVP. Upgrade path: bump to shared-cpu-2x
+# @ 512MB when subscribers cross ~500 active devices.
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
+  cpu_kind = "shared"
+  cpus = 1
+
+# Deployment strategy. rolling because we only have 1 machine —
+# blue-green would require 2 machines and we'd hit the "one poller
+# only" invariant during the overlap window.
+[deploy]
+  strategy = "rolling"
+  # 60s waits for the new machine's health check to go green before
+  # killing the old one. If the new machine fails checks, Fly.io
+  # automatically rolls back — this is what makes broken deploys
+  # safe.
+  wait_timeout = "60s"
+
+# Metrics endpoint — Fly.io scrapes /metrics automatically for its
+# dashboard. Prometheus format not needed at MVP scale but this
+# reserves the path.
+#
+# [metrics]
+#   port = 9091
+#   path = "/metrics"

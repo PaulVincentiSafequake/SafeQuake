@@ -345,7 +345,16 @@ Map always shows full Mediterranean regardless of notification preset. Preset go
 3. ✅ User notification presets (Requirement 1 / Part 3) — landed 2026-08-06. Mobile screen at `/app/frontend/app/settings/notifications.tsx` with 4 peer presets (Off / Significant / Noticeable-default / Everything nearby), OS-Critical-Alerts-revoked banner, and the mandatory safety copy ("Alerts for dangerous earthquakes are always on and cannot be switched off"). Backend: `POST/GET /api/devices/notification-preset` on `user_presence` collection.
 4. ✅ In-app Seismic Map (Part 2) — landed 2026-08-06. Mobile screen at `/app/frontend/app/map.tsx` (with `/app/frontend/src/components/MapCanvas.native.tsx` for the native map). Mediterranean-wide event map from EMSC+USGS via new public `GET /api/seismic-map/events` endpoint. Two-pass dedup (revisions + cross-provider merge). Indicative radius circle: **600 km SOLID** for "Everything nearby" (= real poll radius boundary), 300 km / 200 km **DASHED** for Noticeable / Significant (UX communication only). "Off" hides the circle. Non-early-warning disclaimer chip pinned at top. EMSC attribution in footer. Web fallback is a chronological event list.
 5. ✅ Subscription lapse A+B (entitlement state machine + in-app banner) — landed 2026-08-06. Backend: `/app/backend/entitlements.py` state machine (never_subscribed / active / grace / lapsed) with three admin-gated endpoints (`/api/entitlement`, `/api/entitlement/test-override`, `/api/entitlement/test-override/clear`). Grace period = 7 days. Frontend: `/app/frontend/src/components/EntitlementBanner.tsx` on home. **INVARIANT: `critical_alerts_active=true` in every response, "Critical alerts still work." in every banner body — enforced backend-side, audited client-side (banner refuses to render if backend violates invariant).** Option A locked with Paul: critical alerts always free; premium tier gates convenience features only. Phase C (real Apple StoreKit + ASN2 webhook + purchase UI) still pending.
-6. **Next: Production migration** (post Emergent Support response) — Fly.io/Render for reliability before paying users.
+6. **In-progress: Production migration** (post Emergent Support reply) — 7 migration-prep artifacts landed 2026-08-06:
+   - `/app/backend/Dockerfile` — production FastAPI container tuned for Fly.io
+   - `/app/fly.toml` — Fly.io app config (region: fra, min_machines_running=1, auto_stop_machines=off — poller must never sleep)
+   - `/app/scripts/migrate_mongo.py` — JSONL-based Mongo migration tool, smoke-tested end-to-end (13/13 collections round-trip with all custom indexes)
+   - `/app/memory/migration-checklist.md` — 10-step cutover runbook + rollback plan
+   - `/app/memory/env-inventory.md` — every env var + secret mapped from Emergent to Fly.io
+   - `/app/memory/emergent-support-email.md` — drafted email covering the 5 blocking questions (reliability tier, DB export, integration continuity, App Store implications, GitHub export scope)
+   - `/app/backend/tests/test_emsc_continuity_migration.py` — 6-test regression suite that runs pre/post migration to verify soak continuity is preserved
+   - **Blocked on** Paul sending the support email and receiving reply. Execution is human-driven (Fly.io + Atlas provisioning + DNS cutover), not agent-driven.
+7. Next backlog: User Management dashboard screen, audit CSV+PDF, dual reports, Crockford Base32 rescue codes.
 6. Production migration (post Emergent Support response)
 7. Existing backlog (audit export, dual reports, dashboard category filter, QR)
 
