@@ -260,7 +260,16 @@ failure class from 2026-08-04.
 
 ## Backlog — scoped 2026-08-05, to build after EMSC soak + subscription A+B
 
-### Session idle timeout (P2, before/alongside subscription A+B)
+### Session idle timeout (landed 2026-08-06)
+- 15-minute inactivity timeout on the dashboard, configurable via `CONFIG.IDLE_TIMEOUT_MS`.
+- 60-second warning modal (`CONFIG.IDLE_WARNING_MS`) with countdown + "Stay signed in" button before expiry.
+- Activity events tracked: mousemove, mousedown, keydown, touchstart, scroll, click. Debounced to reset the timer at most once per 5 seconds.
+- **Deliberate UX call:** if the warning modal is showing, silent mouse movements do NOT dismiss it. Requires explicit "Stay signed in" click. Prevents accidental drift extending a session.
+- Expiry routes through `qaAuth.signOut()` — same server-side audit path as manual logout.
+- Per-tab timers (sessionStorage is per-tab; each tab tracks its own activity). Cross-tab sync not solved in v1 — uncommon on dispatcher workstations.
+- Test hooks: `qaAuth.idle.expireNow()`, `qaAuth.idle.reset()`.
+
+### Session idle timeout (P2, before/alongside subscription A+B) — LANDED 2026-08-06, see above
 - **Why:** Paul's concern — an operator who walks away leaving the dashboard tab open lets the next person act under their identity, quietly undermining the entire per-user attribution we just built in Task #9.
 - **Design:** 15 minutes of no activity → session expires → re-sign-in required. Configurable. Activity = mouse/keyboard/click. Calls `qaAuth.signOut()` internally so the same audit trail path fires.
 - **Not per-action friction** — decided against re-prompting on Undo etc. Idle timeout is the right knob for the unattended-dashboard case; per-action friction just trains operators to avoid the action.
