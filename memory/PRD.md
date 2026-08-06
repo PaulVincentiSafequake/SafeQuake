@@ -199,6 +199,102 @@ Rationale: Paul is the operator, not a developer. Assuming there's a developer b
   - `POST /api/admin/emsc/reset-soak-clock` — admin-only, `confirm: true` required, `reason` required (audit trail).
 - **Contract:** any tuning decision on day 14 requires reading `/continuity` first and confirming `coverage_pct` is acceptable. "We polled for 14 days" is dishonest if coverage_pct is 60%.
 
+## Intensity-based alerting — the reframe (scoped 2026-08-06)
+
+**Fundamental correction of what we alert on.** Magnitude describes energy released at the source; it says nothing about what a person in Valletta actually feels. Human experience = intensity (MMI/EMS-98) — a function of magnitude, distance, depth, and local soil conditions. Every mature system (ShakeAlert, JMA) alerts on predicted intensity, not raw magnitude. Magnitude thresholds are systematically miscalibrated — M4.5 at 20km is a far bigger event than M6.0 at 400km, and current rules treat them as comparable.
+
+### Proposed intensity tiers (locked)
+| Tier | Predicted MMI | Meaning | Delivery |
+|---|---|---|---|
+| Informational | III–IV | Felt indoors by some | Silent notification / map only |
+| Standard alert | V | Felt by nearly everyone, small objects fall | Normal notification, prompts check-in |
+| Critical | VI+ | Damage begins | **Siren** (critical-alert entitlement) |
+
+### Deliberate asymmetric bias (locked)
+Ground-motion-to-intensity conversion is uncertain (GMICE equations disagree by >1 MMI unit, worse near-source). **Alert on the optimistic edge of the uncertainty band.** If our estimate spans MMI V–VI, treat it as VI. Missed alert can kill someone; false alarm is irritating. Cost asymmetry is real, code must reflect it. Document explicitly in intensity code so nobody "optimises" it as noise reduction.
+
+### Data sources — use existing before building physics (research done 2026-08-06)
+1. **USGS `properties.mmi`** — ShakeMap-derived, present ~14% weekly M2.5+ events, ~100% significant events. Use directly when present.
+2. **USGS `properties.cdi`** — DYFI community-reported, ~22% weekly. Secondary confirmation.
+3. **EMSC Testimonies API** — `https://www.seismicportal.eu/testimonies-ws/api/search?unids=X&includeTestimonies=true`. Returns raw + corrected EMS-98 intensities per location once ≥~5 respondents. **Ground-truth validation channel, not primary trigger** (~1h latency). Same CC BY 4.0 licence. ~470k reports/year.
+4. **Own GMPE + GMICE** — only when 1–3 give no signal. Published Mediterranean-region attenuation relation, cited in code. Never invent physics.
+
+### Soak-phase enhancement (Part 1a — MUST land before Day 14 tuning)
+- Add `intensity_estimates` to each `emsc_events` doc:
+  ```
+  intensity_estimates: {
+    at_malta_center: {
+      mmi_from_usgs: 4.2 | null,
+      cdi_from_usgs: 3.8 | null,
+      mmi_predicted: 4.8,
+      mmi_predicted_upper_band: 5.7,   // alarming-edge value used for tier decision
+      gmpe_used: "Akkar-Bommer-2010",
+    },
+    from_emsc_testimonies: {
+      max_intensity: null,
+      report_count: 0,
+      last_updated: null,
+    }
+  }
+  ```
+- Add three intensity threshold_sets alongside existing magnitude ones (`intensity_informational`, `intensity_standard`, `intensity_critical`). Magnitude sets continue running in parallel — day-14 comparison against ground-truth is the whole point.
+
+### Felt-report follow-up sweeper (new background task)
+- Every 15 min, sweep `emsc_events` ingested in last 72h that don't yet have final EMS-98 data.
+- Batch-fetch via EMSC testimonies API (`unids=A,B,C&includeTestimonies=true`).
+- Update `intensity_estimates.from_emsc_testimonies` in place (not revision-tracked — this is a running best-known value).
+- **This is the validation signal.** No other small safety app has this.
+
+## Seismic map (Part 2, scoped 2026-08-06)
+
+**Core, not decoration.** Malta's intensity ≥V return period is ~18 years, ≥VI ~40 years. A correctly-tuned critical alert fires roughly twice in a lifetime. Between those events the app appears to do nothing — and people cancel subscriptions to apps that appear to do nothing. **The seismic feed is what keeps Quake Angel installed, trusted, and paid for during decades of quiet.** Which means it's what ensures the safety function still exists when it's finally needed.
+
+### Design (locked)
+- Full Mediterranean map, not just Malta-region.
+- Per event: epicentre pin, magnitude, depth, distance from user, time-ago. Tap for detail.
+- "Show minor tremors" toggle.
+- **Absolute rule: map filter ≠ notification filter.** Map is WIDE (informational); notifications are NARROW (intensity-based). If map breadth ever leaks into notification logic, trust in alerts dies.
+- On real alert firing, show epicentre + distance so users understand what happened.
+- **EMSC attribution required on this screen** — licence condition, committed in writing.
+- **Never imply early warning.** No "incoming", no countdowns, no predictive framing. Physics doesn't allow it; claiming it would be misrepresentation.
+- Plain language, first-time-reader assumption. No "epicentre" without a "where the earthquake started" annotation.
+
+## User-configurable notification sensitivity (Part 3, scoped 2026-08-06)
+
+"My Lightning Tracker" pattern (distance slider drawing approximate radius circle, plain-language statement), with two hard adaptations:
+
+### **RULE (locked — cannot be overridden)**
+**The user controls the QUIET tier only. Never the siren.** A critical-intensity event (MMI VI+) MUST fire the full alert regardless of user preference. Settings screen must state explicitly:
+
+> These settings control informational notifications about nearby tremors. Alerts for dangerous earthquakes are always on and cannot be switched off.
+
+### Presets (not raw distance)
+Earthquake significance = magnitude × distance × depth. A pure distance slider gives false confidence ("60km, so I'm safe from further"). Use predicted intensity as underlying variable:
+
+| Preset | Threshold | Label |
+|---|---|---|
+| Significant only | predicted MMI IV+ | "Only events I'd properly feel" |
+| **Noticeable (default)** | predicted MMI III+ | "Anything I might notice" |
+| Everything nearby | all detected in region | "Every tremor in the region" |
+
+Draw approximate radius circle on the map (labelled approximate — real boundary is intensity-shaped, not circular). Circle is UX communication, not a real filter.
+
+### Map behaves independently
+Map always shows full Mediterranean regardless of notification preset. Preset governs only what interrupts.
+
+### Location handling
+"Last known location" occasional-not-continuous. Feeds GDPR minimum-collection.
+
+## Priority (updated 2026-08-06 evening)
+
+1. ✅ EMSC Phase 1 soak (continues — magnitude data still useful)
+2. **Subscription lapse A+B** — up next
+3. **Intensity soak enhancement (Part 1a)** — MUST land before Day 14 tuning. Immediately after subscription A+B, or paused-into if timing gets tight.
+4. Seismic map (Part 2) — pairs with Part 3
+5. User notification presets (Part 3) — pairs with Part 2, same landing
+6. Production migration (post Emergent Support response)
+7. Existing backlog (audit export, dual reports, dashboard category filter, QR)
+
 ## Task #9 — Per-user Google sign-in (landed 2026-08-05)
 
 Replaces the shared `X-Admin-Token` shared-secret with per-user identities

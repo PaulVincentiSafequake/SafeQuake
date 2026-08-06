@@ -30,7 +30,7 @@
        export will follow the same pattern.
      ═════════════════════════════════════════════════════════════════════ -->
 
-<div id="qa-preview-panel" style="display:none;"></div>
+<div id="qa-preview-panel"></div>
 
 <script>
 (function () {
@@ -52,6 +52,7 @@
   // ── Styles ───────────────────────────────────────────────────────────
   const CSS = `
     #${CONTAINER_ID} {
+      display: none;   /* hidden by default; .show class reveals it */
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       max-width: 900px; margin: 16px auto; padding: 20px;
       background: #fff; border: 1px solid #e5e5e5; border-radius: 12px;
