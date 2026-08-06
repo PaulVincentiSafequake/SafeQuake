@@ -1,0 +1,29 @@
+{
+  "summary": "Notification-sensitivity settings screen (safety-critical). Verified backend endpoints and mobile UI end-to-end. All 13 requested checks PASS: /settings/notifications loads without JS errors; mandatory safety copy 'Alerts for dangerous earthquakes are always on and cannot be switched off' is prominent at top inside the green shield-checkmark panel; all four presets render as tappable peers in the exact order Off → Significant only → Noticeable → Everything nearby; Off is the FIRST peer option and shares identical card styling with the other three (no scary/discouraged styling); default selected on fresh device_id is Noticeable (2px green border + green checkmark-circle icon, other options 1px grey border with empty radio); tapping Off/Significant/Everything each fires POST /api/devices/notification-preset with correct body and the checkmark moves accordingly; GET /api/devices/{did}/notification-preset returns the persisted value on re-fetch (verified via pytest); backend POST with 'garbage' preset returns 400; GET for a never-seen device returns 200 with preset='noticeable' + default_used=true (no 404); back-chevron header returns to home; home link testID='open-notification-settings' navigates to this screen; footer disclaimer 'Turning informational notifications off does not affect emergency alerts…' is visible; red 'Critical Alerts turned OFF' banner does NOT render in current permission state (code path exists behind ios.allowsCriticalAlerts === false). No blocking issues found.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_notification_presets_iteration_26.py",
+    "/app/test_reports/pytest/iteration_26.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "notifications.tsx: option cards use accessibilityRole='radio' + accessibilityState={selected} but React Native Web currently does NOT map that to aria-selected on the DOM node (all radios show aria-selected=null in the snapshot). Visual state (green border + checkmark) is correct so this is a screen-reader accessibility nit, not a functional bug. Consider testID on each option for future automation.",
+    "notifications.tsx line 34 uses '@/src/utils/checkin' getDeviceId — confirmed backing store is AsyncStorage and produces the same qg-<ts>-<rnd> id used across the app; consistent with backend's short_code derivation.",
+    "Preset validation is server-side authoritative (VALID_PRESETS), server lowercases+strips input — POST 'OFF' correctly stored as 'off'."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100% (9/9)", "frontend": "100% (13/13 requested checks)"},
+  "seed_data_creation": "None — tests use ephemeral TEST_np_<timestamp> device_ids. No cleanup needed (push_devices upsert only).",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Backend endpoints POST /api/devices/notification-preset and GET /api/devices/{device_id}/notification-preset are well-covered by /app/backend/tests/test_notification_presets_iteration_26.py (9 tests). Frontend screen /settings/notifications is stable — safety copy, ordering (Off first), default (Noticeable), POST-on-tap, back-nav, and home-link entry all verified via Playwright. iOS-only critical-alerts revoked banner code path is present (lines 144-162 in notifications.tsx) but cannot be exercised in web preview — verified it does NOT render in default permission state. No changes were made to any code."
+}
