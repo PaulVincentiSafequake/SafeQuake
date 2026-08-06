@@ -565,3 +565,22 @@ After EMSC Phase 1 and subscription lapse A+B. Ahead of QR feature and report ex
 - New collection `admin_login_notifications` — log of every notification attempt (fired/skipped-by-ratelimit/failed-to-send) for forensic use.
 
 **Priority:** MUST land before flipping `LEGACY_TOKEN_ENABLED=false`, per the cutover gate above, UNLESS Paul explicitly defers.
+
+
+---
+
+## Known Issues (must-fix before the release they impact)
+
+### KI-2026-08-06-01 — Seismic map circle dashing broken on Android
+- **Severity:** Blocks Android launch (does NOT block iOS launch)
+- **Symptom:** All three indicative-radius circles on the seismic map (`app/map.tsx` via `src/components/MapCanvas.native.tsx`) render as solid lines on Android. On iOS they render correctly: 600 km solid = real poll-radius boundary, 300 km / 200 km dashed = indicative-only.
+- **Impact:** The solid-vs-dashed distinction is the whole honesty framing of the feature. Solid says "this line is real data", dashed says "this line is UX communication only, not a physical boundary". If Android renders all three solid, we're implicitly claiming the 200 km / 300 km circles are as authoritative as the 600 km one — the exact false-precision failure the design was built to avoid.
+- **Root cause:** `react-native-maps` upstream limitation — `lineDashPattern` on `<Circle>` is honored on iOS (MapKit) and silently ignored on Android (Google Maps SDK). Tracked in the react-native-maps repo, unfixed as of 1.20.1.
+- **Fix options (choose one before Android launch):**
+  1. **SVG overlay approach** — render the indicative circles as `react-native-svg` `Circle`s in a transparent overlay above the map, with `strokeDasharray`. Requires converting metres → screen pixels using `getBoundingBox()` / camera state on region change.
+  2. **Segmented Polyline approach** — build the dashed circle as a series of short `<Polyline>` segments in a ring. react-native-maps polylines do respect `lineDashPattern` on Android as of 1.18+, but performance suffers with hundreds of segments per circle.
+  3. **Solid circle with visual differentiation** — keep solid on both platforms, differentiate by stroke width or opacity (600 km = full opacity, 2 px; smaller = 0.5 opacity, 1 px). Weakest option; erodes the honesty framing.
+- **Preferred fix:** Option 1 (SVG overlay). Option 3 accepted only if Option 1 turns out to be slow on old Android devices.
+- **Owner:** Assign at Android-launch planning.
+- **Not for iOS-first release:** iOS renders correctly. This is filed here so it can't get lost.
+
