@@ -26,6 +26,7 @@ import {
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { AppleWatchNote } from "@/src/components/AppleWatchNote";
+import EntitlementBanner from "@/src/components/EntitlementBanner";
 import { colors, radius, spacing } from "@/src/theme";
 import {
   getDisplayName,
@@ -614,6 +615,14 @@ export default function HomeScreen() {
             </Pressable>
           </View>
         ) : null}
+
+        {/* Subscription entitlement banner — shows only when the user
+            is in grace/lapsed state, per /api/entitlement. Sits above
+            the safety-protocol content but never blocks it. Copy
+            invariant enforced backend-side: every variant tells the
+            user critical alerts still work. See
+            /app/frontend/src/components/EntitlementBanner.tsx. */}
+        <EntitlementBanner />
 
         {/* Tips */}
         <View style={styles.section}>

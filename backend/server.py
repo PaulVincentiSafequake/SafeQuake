@@ -38,6 +38,14 @@ from emsc.poller import EMSCPoller
 from emsc.seed import seed_country_configs
 from emsc.testimonies import TestimoniesSweeper
 from notification_presets import VALID_PRESETS, DEFAULT_PRESET
+from entitlements import (
+    VALID_STATES as ENTITLEMENT_VALID_STATES,
+    VALID_REASONS as ENTITLEMENT_VALID_REASONS,
+    GRACE_PERIOD_DAYS,
+    public_entitlement_view,
+    upsert_entitlement,
+    clear_test_override,
+)
 
 # Auth module — per-user Google sign-in (task #9, 2026-08-04).
 # Handles: Google ID token verification, JWT issuance/decoding, request-time
@@ -750,6 +758,138 @@ async def set_notification_preset(body: NotificationPresetBody):
         upsert=True,
     )
     return {"ok": True, "device_id": body.device_id, "preset": preset}
+
+
+# ---------- Subscription entitlement (Phase A of subscription-lapse work) ----
+#
+# Public GET: any device may read its own entitlement state — same trust
+# model as /api/status and /api/devices/{id}/notification-preset. No PII
+# returned. Response shape is defined in entitlements.public_entitlement_view.
+#
+# Admin POST /entitlement/test-override: lets the dashboard flip any
+# device into any state for QA of banner copy on real hardware. This
+# exists BECAUSE we don't have real StoreKit integration yet — Phase C
+# will add App Store Server Notification v2 as the real state driver
+# and this override remains only as an escape hatch (with an audit
+# trail via the entitlement doc's `history` array).
+#
+# What is NOT here (deliberately):
+# - No purchase-flow endpoint. StoreKit purchase happens client-side.
+# - No receipt validation. Deferred to Phase C with Apple's signed ASN2.
+# - No feature-gating logic. The mobile client asks whether to show a
+#   banner, not whether to enable individual features. Feature gating
+#   (when it lands) checks `plan` on this same doc.
+
+class EntitlementTestOverrideBody(BaseModel):
+    device_id: str = Field(..., min_length=3, max_length=200)
+    state: str = Field(..., description="One of: active, grace, lapsed, never_subscribed")
+    expiration_reason: Optional[str] = Field(
+        None, description="One of: voluntary, billing_issue, price_increase_declined, product_not_available",
+    )
+    grace_days_from_now: Optional[int] = Field(
+        None, description="If state='grace', number of days until grace_ends_at (default 7).", ge=0, le=60,
+    )
+
+
+@api_router.get("/entitlement")
+async def get_entitlement(device_id: str):
+    """Current subscription entitlement + banner spec for a device.
+
+    Query param `device_id` (not path param) so the client can hit this
+    with the same identity it uses for /api/notification-preset.
+
+    Always safe to call. Never returns 404 — a never-seen device just
+    gets the `never_subscribed` state with no banner.
+
+    INVARIANT: `critical_alerts_active` is always True. This field is
+    the API's promise to the mobile client that the siren stays on
+    regardless of subscription state.
+    """
+    if not device_id or len(device_id) < 3:
+        raise HTTPException(400, "device_id required")
+    doc = await db.entitlements.find_one({"user_id": device_id}, {"_id": 0})
+    return public_entitlement_view(doc)
+
+
+@api_router.post("/entitlement/test-override")
+async def set_entitlement_test_override(body: EntitlementTestOverrideBody, request: Request):
+    """Admin-only: flip a device's entitlement to any state for QA.
+
+    Persists into `test_state_override` on the entitlement doc, which
+    is what `compute_current_state` consults first. Cleared via
+    /entitlement/test-override/clear.
+
+    Restricted to admin because misuse could show alarming banners to
+    real users. Operators (dispatch role) don't need this.
+    """
+    principal = await resolve_principal(
+        request,
+        request.headers.get("x-admin-token"),
+        ADMIN_TRIGGER_PASSWORD,
+        db,
+    )
+    require_role(principal, "admin")
+
+    if body.state not in ENTITLEMENT_VALID_STATES:
+        raise HTTPException(400, f"state must be one of {sorted(ENTITLEMENT_VALID_STATES)}")
+    if body.expiration_reason is not None and body.expiration_reason not in ENTITLEMENT_VALID_REASONS:
+        raise HTTPException(400, f"expiration_reason must be one of {sorted(ENTITLEMENT_VALID_REASONS)}")
+
+    grace_ends_at = None
+    if body.state == "grace":
+        days = body.grace_days_from_now if body.grace_days_from_now is not None else GRACE_PERIOD_DAYS
+        grace_ends_at = datetime.now(timezone.utc) + timedelta(days=days)
+
+    override = {
+        "state": body.state,
+        "expiration_reason": body.expiration_reason,
+        "grace_ends_at": grace_ends_at,
+        "set_by": (principal.get("email") if principal else "unknown"),
+        "set_at": datetime.now(timezone.utc),
+    }
+
+    # Also write the "real" fields so a subsequent read without override
+    # still lands in a sensible place. The override is what the
+    # mobile client sees; the underlying state matches so history is
+    # readable.
+    doc = await upsert_entitlement(
+        db,
+        user_id=body.device_id,
+        state=body.state,
+        expiration_reason=body.expiration_reason,
+        grace_ends_at=grace_ends_at,
+        source=f"admin_override:{principal.get('email') if principal else 'unknown'}",
+        test_state_override=override,
+    )
+    return {
+        "ok": True,
+        "device_id": body.device_id,
+        "entitlement": public_entitlement_view(doc),
+    }
+
+
+@api_router.post("/entitlement/test-override/clear")
+async def clear_entitlement_test_override(device_id: str, request: Request):
+    """Admin-only: remove any test override for a device. Returns the
+    device to its real (or default) entitlement state.
+    """
+    principal = await resolve_principal(
+        request,
+        request.headers.get("x-admin-token"),
+        ADMIN_TRIGGER_PASSWORD,
+        db,
+    )
+    require_role(principal, "admin")
+    if not device_id or len(device_id) < 3:
+        raise HTTPException(400, "device_id required")
+    await clear_test_override(db, device_id)
+    doc = await db.entitlements.find_one({"user_id": device_id}, {"_id": 0})
+    return {
+        "ok": True,
+        "device_id": device_id,
+        "entitlement": public_entitlement_view(doc),
+    }
+
 
 
 # ---------- Public seismic-map endpoint (mobile in-app map) ----------

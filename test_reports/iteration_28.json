@@ -1,8 +1,17 @@
 {
-  "summary": "Fixed test-file bug in /app/backend/tests/test_seismic_map.py where 5 TestDedup tests errored with 'sync test requested async fixture'. Root cause: pytest-asyncio 1.4.0 strict mode requires (1) async fixtures to use @pytest_asyncio.fixture (not @pytest.fixture) and (2) reliable per-method @pytest.mark.asyncio markers rather than class-level marker. All 21/21 tests now pass. No production code touched. Cleanup verified — 0 TEST_MAP_ rows remaining in emsc_events collection after suite completion.",
+  "summary": "Backend testing of entitlement state machine (Phase A+B) complete. 19/19 pytest tests passed. All state transitions (never_subscribed, active, grace, lapsed with both voluntary + billing_issue reasons), banner copy correctness, admin auth gate, Pydantic validation (state, expiration_reason, grace_days_from_now range), history audit trail, idempotent upsert, and lazy auto-transitions on read (active->grace when current_period_end past; grace->lapsed when grace_ends_at past) all verified. Both SAFETY INVARIANTS hold: (1) critical_alerts_active=true in every response across all 5 states, and (2) the exact phrase 'Critical alerts still work.' is present in every non-null banner.body (grace, lapsed-voluntary, lapsed-billing_issue). Test data seeded with TEST_ENTL_ prefix and cleaned before+after each test via autouse fixture.",
   "backend_issues": {
     "critical": [],
-    "minor": []
+    "minor": [
+      {
+        "endpoint": "POST /api/entitlement/test-override",
+        "issue": "grace_days_from_now=100 returns 422 (Pydantic Field le=60) rather than the 400 mentioned in the request. This is standard FastAPI behavior for Pydantic validation errors and correct — request wording said '400 (Pydantic validation)' but Pydantic actually returns 422. Not a bug; noting for clarity. Test accepts both."
+      },
+      {
+        "endpoint": "POST /api/entitlement/test-override/clear",
+        "issue": "After clear, the underlying persisted state (e.g. 'lapsed') remains because the override upsert also writes the real state fields. This is the documented behavior per entitlements.py comment: 'the underlying state matches so history is readable'. Not a bug — worth confirming with product that dashboard operators understand: clearing the override does NOT reset the device to never_subscribed, it reveals the underlying (last-written) state. For a device that never had a real subscription this returns to never_subscribed correctly (verified in test_clear_on_never_seen_device_yields_default)."
+      }
+    ]
   },
   "frontend_issues": {
     "ui_bugs": [],
@@ -11,24 +20,26 @@
     "react_native_issues": []
   },
   "test_report_links": [
-    "/app/backend/tests/test_seismic_map.py",
-    "/app/test_reports/pytest/seismic_map_results.xml"
+    "/app/backend/tests/test_entitlement_iteration_28.py",
+    "/app/test_reports/pytest/iteration_28.xml"
   ],
   "action_items": [],
   "critical_code_review_comments": [
-    "pytest-asyncio 1.4.0 strict mode: async fixtures MUST use @pytest_asyncio.fixture decorator; @pytest.fixture on an async generator silently degrades to 'sync test requested async fixture' setup errors.",
-    "Class-level @pytest.mark.asyncio marker was replaced with per-method markers for reliability in strict mode."
+    "entitlements.public_entitlement_view correctly hard-codes critical_alerts_active=True at the boundary — good defense-in-depth against invariant regression.",
+    "compute_current_state auto-transitions are pure functions (no DB writes), meaning transitions are computed on every read but NOT persisted back on GET. server.py get_entitlement also does not persist the recomputed state. The task description says 'lazily persists that transition' — the CODE only lazily *computes* it; the doc's stored 'state' field remains stale until the next override/write. Functionally correct for the mobile client (always sees fresh state), but the audit-trail 'history' array will NOT reflect auto-transitions from GETs. If Paul wants auto-transitions in history, a write-on-transition path needs to be added to get_entitlement. Not blocking — flagging for main agent to confirm intent.",
+    "server.py:808 accepts device_id as required query param via FastAPI signature, so missing → 422 (Pydantic), not the 400 the endpoint's manual check would produce. Both are acceptable.",
+    "No index on entitlements.user_id. For scale this should be a unique index; at MVP-scale not a blocker."
   ],
   "updated_files": [
-    "/app/backend/tests/test_seismic_map.py"
+    "/app/backend/tests/test_entitlement_iteration_28.py (new)"
   ],
   "success_rate": {
-    "backend": "100% (21/21 tests passing)",
-    "frontend": "not tested (backend-only request)"
+    "backend": "100%",
+    "frontend": "n/a (backend-only testing per request)"
   },
-  "seed_data_creation": "Ephemeral seeded rows prefixed 'TEST_MAP_' inserted per-test into emsc_events; deleted by mongo fixture teardown. Verified 0 residual rows post-run.",
+  "seed_data_creation": "Tests seed docs directly into entitlements collection with user_id prefixed TEST_ENTL_ (for HISTORY, AUTO_G, AUTO_L cases). Autouse fixture deletes all TEST_ENTL_* docs before and after every test — no residual data.",
   "retest_needed": false,
-  "should_main_agent_self_test": true,
-  "context_for_next_testing_agent": "test_seismic_map.py now runs cleanly at 21/21. The mongo async fixture uses @pytest_asyncio.fixture and each async TestDedup method carries its own @pytest.mark.asyncio marker (class-level marker did not propagate in pytest-asyncio 1.4.0 strict mode). If more async DB-seeding tests are added, follow the same pattern.",
-  "rca_of_issue": "Reproduction: pytest backend/tests/test_seismic_map.py → 5 ERRORs at setup of TestDedup.* with message 'requested an async fixture mongo, with no plugin or hook that handled it'. RCA: (a) The `mongo` fixture was declared with @pytest.fixture but is an async generator; under pytest-asyncio strict mode (v1.4.0), async fixtures must be declared via @pytest_asyncio.fixture, otherwise pytest sees it as a regular (sync) fixture that returns an async generator and refuses to inject it into sync tests. (b) The class-level @pytest.mark.asyncio marker on TestDedup was not being propagated to individual methods in strict mode, so pytest-asyncio treated the methods as sync. Mitigation applied: added `import pytest_asyncio`, changed `@pytest.fixture` → `@pytest_asyncio.fixture` on the mongo fixture, and added explicit `@pytest.mark.asyncio` on each of the 5 TestDedup async methods. Result: 21/21 pass in 1.57s; TEST_MAP_ cleanup verified."
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Reusable pytest at /app/backend/tests/test_entitlement_iteration_28.py — run with `pytest backend/tests/test_entitlement_iteration_28.py -v`. Uses X-Admin-Token=m11vRwfDoxnHvIMLkKzjUwQy (from backend/.env ADMIN_TRIGGER_PASSWORD). Talks to public URL from frontend/.env EXPO_PUBLIC_BACKEND_URL. Direct Mongo access via mongodb://localhost:27017 db=test_database. If ADMIN_TRIGGER_PASSWORD rotates, update ADMIN_TOKEN constant in the test file.",
+  "rca_of_issue": "n/a — no failures to RCA. Feature works as specified. Only observation: auto-transition on read is compute-only, not persisted — noted in critical_code_review_comments for main agent to confirm intent with product."
 }
