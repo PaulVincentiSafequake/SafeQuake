@@ -58,6 +58,36 @@ function isUrgent(status, severity) {
   return status === "trapped" && severity === "red";
 }
 
+// Keeps a marker's permanent map label in sync with the device's CURRENT
+// state. Previously the "SOS" label was only ever attached at marker
+// creation and never removed — so a person who was marked rescued kept a
+// red SOS tag sitting on top of their now-green dot. A responder scanning
+// the map would be sent to someone already found. Always derive the label
+// from present state, never from the state at creation time.
+function syncMarkerLabel(marker, u) {
+  const urgent = isUrgent(u.status, u.severity);
+  const rescued = u.status === "rescued";
+
+  const wanted = urgent ? "SOS" : (rescued ? "✓" : null);
+  const wantedClass = urgent ? "sos-label" : "rescued-label";
+
+  const existing = marker.getTooltip && marker.getTooltip();
+  const existingText = existing ? existing.getContent() : null;
+
+  if (!wanted) {
+    if (existing) marker.unbindTooltip();
+    return;
+  }
+  if (existingText === wanted) return; // already correct
+
+  if (existing) marker.unbindTooltip();
+  marker.bindTooltip(wanted, {
+    permanent: true,
+    direction: "center",
+    className: wantedClass,
+  });
+}
+
 function mobilityLabel(m) {
   if (m === "mobile") return "🟢 can move";
   if (m === "trapped") return "🔴 trapped/pinned";
@@ -110,9 +140,17 @@ function renderMap(users) {
       const m = markers.get(u.deviceId);
       m._qgDevice = u;
       m.setLatLng([u.latitude, u.longitude]);
-      m.setStyle({ color, fillColor: color, weight: urgent ? 4 : 2 });
+      m.setStyle({
+        color,
+        fillColor: color,
+        weight: urgent ? 4 : 2,
+        // Resolved cases are de-emphasised — the job is done, so they
+        // shouldn't compete visually with people still waiting for help.
+        fillOpacity: u.status === "rescued" ? 0.55 : 0.85,
+      });
       m.setRadius(urgent ? 13 : 10);
       m.setPopupContent(popupHtml(u));
+      syncMarkerLabel(m, u);
       // If this popup happens to be open right now, re-wire its button too.
       if (m.isPopupOpen && m.isPopupOpen()) {
         const el = m.getPopup() && m.getPopup().getElement();
@@ -123,7 +161,7 @@ function renderMap(users) {
         radius: urgent ? 13 : 10,
         color,
         fillColor: color,
-        fillOpacity: 0.85,
+        fillOpacity: u.status === "rescued" ? 0.55 : 0.85,
         weight: urgent ? 4 : 2,
       }).addTo(map);
       marker._qgDevice = u;
@@ -132,13 +170,7 @@ function renderMap(users) {
         const el = marker.getPopup() && marker.getPopup().getElement();
         if (el) wireRescueButtons(el, marker._qgDevice);
       });
-      if (urgent) {
-        marker.bindTooltip("SOS", {
-          permanent: true,
-          direction: "center",
-          className: "sos-label",
-        });
-      }
+      syncMarkerLabel(marker, u);
       markers.set(u.deviceId, marker);
     }
   });
@@ -198,7 +230,7 @@ function itemHtml(u) {
     : "";
   return `
     ${bulkCheck}
-    <div class="id">${u.deviceId}${isUrgent(u.status, u.severity) ? '<span class="badge sos">SOS</span>' : ""}</div>
+    <div class="id">${u.deviceId}${isUrgent(u.status, u.severity) ? '<span class="badge sos">SOS</span>' : ""}${u.status === "rescued" ? '<span class="badge rescued-badge">RESCUED</span>' : ""}</div>
     <div class="meta">${statusLabel(u.status, u.severity)}${mob ? " · " + mob : ""} · Battery ${u.batteryPercent ?? "?"}%</div>
     <div class="meta">Updated: ${u.lastUpdated ? new Date(u.lastUpdated).toLocaleTimeString() : "—"}</div>
     ${rescueSlot}
