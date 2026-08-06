@@ -663,6 +663,17 @@ export default function HomeScreen() {
             iOS Settings' notification blanket switch and kills critical
             alerts too. Discrete but reachable in one tap from home. */}
         <Pressable
+          onPress={() => router.push("/map" as any)}
+          style={styles.diagLinkRow}
+          testID="open-seismic-map"
+          accessibilityRole="button"
+          accessibilityLabel="Recent seismic activity map"
+        >
+          <Ionicons name="map-outline" size={14} color={colors.onSurfaceTertiary} />
+          <Text style={styles.diagLinkText}>Recent seismic activity</Text>
+        </Pressable>
+
+        <Pressable
           onPress={() => router.push("/settings/notifications" as any)}
           style={styles.diagLinkRow}
           testID="open-notification-settings"

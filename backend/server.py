@@ -11,7 +11,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 from typing import List, Optional
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 # .env must load BEFORE any module that reads env at import time.
 # We used to have `from auth import ...` above load_dotenv, which meant
@@ -750,6 +750,158 @@ async def set_notification_preset(body: NotificationPresetBody):
         upsert=True,
     )
     return {"ok": True, "device_id": body.device_id, "preset": preset}
+
+
+# ---------- Public seismic-map endpoint (mobile in-app map) ----------
+#
+# The mobile app shows a Mediterranean-wide informational map of recent
+# seismic activity. This is INFORMATIONAL only — the same class of public
+# post-event data EMSC and USGS publish on their own websites.
+#
+# Deliberately unauthenticated:
+# - Same trust model as /api/status: device_id is the identity, no PII returned.
+# - Rate-limiting is upstream (proxy) — this endpoint just serves cached
+#   data already in Mongo, no re-fetch from EMSC/USGS per request.
+#
+# NOT an early-warning feed. The mobile UI states this explicitly. The
+# `observed_at` timestamps are strictly historical.
+
+# Mediterranean bbox — deliberately wide. PRD: "Map always shows full
+# Mediterranean regardless of notification preset." User preset only
+# governs the indicative-radius circle overlay, not the query.
+MED_BBOX_LAT_MIN = 30.0
+MED_BBOX_LAT_MAX = 47.0
+MED_BBOX_LON_MIN = -6.0
+MED_BBOX_LON_MAX = 37.0
+
+# Hard caps so a misbehaving client can't ask for millions of rows.
+MAP_WINDOW_HOURS_MAX = 24 * 30       # 30 days
+MAP_WINDOW_HOURS_DEFAULT = 24 * 7    # 7 days
+MAP_LIMIT_MAX = 500                  # display + cognitive cap; the map isn't a data dump
+
+@api_router.get("/seismic-map/events")
+async def seismic_map_events(
+    window_hours: int = MAP_WINDOW_HOURS_DEFAULT,
+    limit: int = MAP_LIMIT_MAX,
+):
+    """Recent Mediterranean seismic activity for the in-app map.
+
+    Query:
+      - window_hours: how far back to look. Clamped to [1, 720].
+      - limit: max rows returned. Clamped to [1, 500].
+
+    Returns events sorted newest-first, deduplicated across providers
+    (EMSC + USGS often report the same event with slightly different
+    magnitudes — for a map, one dot per real event is what the user
+    expects). Dedup key is (rounded lat, rounded lon, rounded minute).
+
+    Response shape is a flat list — no nested provider grouping — so
+    the mobile client can render markers straight from it.
+    """
+    # Clamp inputs. Silent clamp (not 400) — map is a passive read;
+    # a bad query shouldn't blank the UI.
+    window_hours = max(1, min(int(window_hours or MAP_WINDOW_HOURS_DEFAULT), MAP_WINDOW_HOURS_MAX))
+    limit = max(1, min(int(limit or MAP_LIMIT_MAX), MAP_LIMIT_MAX))
+
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=window_hours)
+
+    query = {
+        "observed_at": {"$gte": cutoff},
+        "latitude":  {"$gte": MED_BBOX_LAT_MIN, "$lte": MED_BBOX_LAT_MAX},
+        "longitude": {"$gte": MED_BBOX_LON_MIN, "$lte": MED_BBOX_LON_MAX},
+    }
+    # Fetch a bit more than `limit` so post-dedup we can still meet it.
+    cursor = db.emsc_events.find(
+        query,
+        {
+            "_id": 0,
+            "provider": 1,
+            "external_id": 1,
+            "revision": 1,
+            "observed_at": 1,
+            "magnitude": 1,
+            "magnitude_type": 1,
+            "latitude": 1,
+            "longitude": 1,
+            "depth_km": 1,
+            "region": 1,
+        },
+    ).sort("observed_at", -1).limit(limit * 2)
+    rows = await cursor.to_list(limit * 2)
+
+    # Cross-provider dedup — same event reported by EMSC & USGS shows as
+    # two rows with matching origin time (to the minute) and location
+    # (to ~0.05°, i.e. ~5 km). Keep whichever has the larger magnitude
+    # (USGS sometimes revises upward) but expose both provider IDs so
+    # the client can link to either bulletin.
+    # Two-pass dedup:
+    #   Pass 1 (same provider, same external_id = a REVISION):
+    #     keep only the highest revision number. Guarantees no doubles
+    #     from provider-side re-analysis (which shifts lat/lon slightly
+    #     and can straddle bucket boundaries).
+    #   Pass 2 (different providers, same real event):
+    #     bucket by (rounded lat, rounded lon, rounded minute) and merge.
+    latest_by_key: dict = {}
+    for r in rows:
+        k = (r.get("provider"), r.get("external_id"))
+        prev = latest_by_key.get(k)
+        if prev is None or (r.get("revision") or 0) > (prev.get("revision") or 0):
+            latest_by_key[k] = r
+    deduped_rows = list(latest_by_key.values())
+
+    def _dedup_key(r: dict) -> tuple:
+        obs = r.get("observed_at")
+        # Minute-precision bucket:
+        minute_bucket = obs.replace(second=0, microsecond=0) if isinstance(obs, datetime) else obs
+        return (
+            round(float(r.get("latitude", 0.0)),  1),   # ~11 km bucket
+            round(float(r.get("longitude", 0.0)), 1),
+            minute_bucket,
+        )
+
+    merged: dict = {}
+    for r in deduped_rows:
+        k = _dedup_key(r)
+        prev = merged.get(k)
+        if prev is None:
+            merged[k] = {**r, "providers": [r["provider"]]}
+            continue
+        # Same real event — merge.
+        if r["provider"] not in prev["providers"]:
+            prev["providers"].append(r["provider"])
+        if float(r.get("magnitude") or 0) > float(prev.get("magnitude") or 0):
+            # Prefer the higher-magnitude report (typically the revised one).
+            for f in ("magnitude", "magnitude_type", "depth_km", "region", "external_id", "provider"):
+                if r.get(f) is not None:
+                    prev[f] = r.get(f)
+
+    events = list(merged.values())
+    # Re-sort by observed_at desc (dedup may have shuffled order).
+    events.sort(key=lambda r: r.get("observed_at") or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+    events = events[:limit]
+
+    # Serialize datetimes.
+    for e in events:
+        obs = e.get("observed_at")
+        if isinstance(obs, datetime):
+            e["observed_at"] = obs.isoformat()
+
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "window_hours": window_hours,
+        "bbox": {
+            "lat_min": MED_BBOX_LAT_MIN, "lat_max": MED_BBOX_LAT_MAX,
+            "lon_min": MED_BBOX_LON_MIN, "lon_max": MED_BBOX_LON_MAX,
+        },
+        "count": len(events),
+        "events": events,
+        # Attribution required in the mobile UI — but also sent here so
+        # any future third-party consumer (dashboard, alt clients) can't
+        # accidentally omit it.
+        "attribution": "Data: EMSC (emsc-csem.org) & USGS (earthquake.usgs.gov)",
+    }
+
+
 
 
 @api_router.post("/register-push", status_code=201)
