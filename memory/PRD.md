@@ -151,6 +151,26 @@ before any live firing.
 - Firing pushes based on `would_have_fired` — gated by manual flip of
   `country_configs.shadow_mode: false` after soak analysis
 
+### Preview mode (landed 2026-08-06 — P2.5, between Phase 1 and Phase 2)
+- Sends REAL non-critical notifications to an allowlisted device (Paul's phone) while `shadow_mode` stays true for every other device. The soak is completely undisturbed.
+- **Why now, not at Phase 2 launch:** shadow mode validates detection but not DELIVERY. Zero evidence today that "EMSC reports an event → notification appears on real iPhone lock screen" works end to end. Finding that out on go-live day is the worst possible timing. Also turns threshold-tuning from guesswork into lived experience.
+- **Non-negotiable constraints (locked):**
+  1. NEVER the Critical Alerts path. Regular `interruption-level: "active"` only. Misusing the critical entitlement risks Apple revoking it.
+  2. Notification body always prefixed `PREVIEW · ` and suffixed `. Test notification, no action needed.` — prevents alert fatigue on the channel we need Paul to trust.
+  3. Audit-tagged in `emsc_preview_notifications` collection — never conflated with real `push_events` triggers.
+  4. Rate-limited (default 10 min/device) — a swarm sequence can't produce 50 notifications in an hour.
+  5. `POST /api/admin/emsc/preview/kill` = one-request panic stop, disables preview on ALL countries.
+  6. Cross-device isolation via explicit allowlist — no device receives anything without being in `preview_mode.device_ids`.
+- **Config:** `country_config.preview_mode = {enabled, device_ids, trigger_tier, rate_limit_minutes}`. `trigger_tier` accepts `all_ingested` (fire for every stored event) or a threshold_set name (`quiet_tier`, `critical_tier`, `neo_original`).
+- **Admin endpoints:**
+  - `GET/POST /api/admin/emsc/preview/config?country_code=MT`
+  - `POST /api/admin/emsc/preview/add-device` — convenience to append a single device_id
+  - `POST /api/admin/emsc/preview/kill` — panic stop
+  - `GET /api/admin/emsc/preview/candidates` — list recent iOS device_ids to pick from
+  - `GET /api/admin/emsc/preview/recent` — audit trail including rate-limited skips (honest volume signal)
+- **APNs path:** `apns.send_preview_alerts()` — `apns-priority: 5` (power-efficient), `sound: default`, `interruption-level: active`, payload includes `preview: true` top-level for mobile app styling if desired.
+- **iOS-only for v1.** Android via Emergent push relay is a future addition — Paul's device is iOS so this doesn't block v1.
+
 ### Continuity tracking (landed 2026-08-06 after 18h gap incident)
 - **What went wrong:** initial Phase 1 landing had no persistent continuity check. Credit exhaustion suspended the pod for ~18h; on resume the poller restarted but the `poller_started_at` field got overwritten with the current-process start time. `total_polls` counter also reset (Mongo persistence quirk under pod suspension). No way to distinguish "quiet period" from "was dead" — would have contaminated threshold-tuning on day 14.
 - **What was added:**

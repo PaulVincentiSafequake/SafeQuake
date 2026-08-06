@@ -34,6 +34,7 @@ from typing import List, Optional
 import httpx
 
 from .evaluator import ThresholdSet, evaluate_event_against_country
+from .preview import dispatch_preview_if_needed
 from .providers import EMSCProvider, Provider, RawEvent, USGSProvider
 
 
@@ -54,8 +55,14 @@ class EMSCPoller:
     startup and its lifecycle is tied to the FastAPI app.
     """
 
-    def __init__(self, db):
+    def __init__(self, db, apns_send_preview=None):
+        """`apns_send_preview` is an optional callable matching the
+        signature of apns.send_preview_alerts. Passed in from server.py
+        so the poller can dispatch preview notifications without directly
+        importing the apns module (keeps the emsc/ subpackage
+        transport-agnostic and testable in isolation)."""
         self.db = db
+        self.apns_send_preview = apns_send_preview
         self.client = httpx.AsyncClient(
             headers={"User-Agent": "QuakeAngel-Phase1-Shadow/1.0 (contact: pmvincenti@gmail.com)"},
             timeout=20.0,
@@ -292,6 +299,29 @@ class EMSCPoller:
             "evaluations": _evaluate_all_countries(ev, configs),
         }
         await self.db.emsc_events.insert_one(doc)
+
+        # ── Preview dispatch (P2.5 landing) ──────────────────────────
+        # Preview mode is completely separate from shadow_mode: it can
+        # be enabled per country_config to send NON-CRITICAL previews to
+        # an allowlisted device, without disturbing the shadow-mode
+        # guarantee for every other device. Dispatch runs synchronously
+        # (awaited) but is wrapped in try/except so a preview-path bug
+        # cannot break the core soak logging.
+        if self.apns_send_preview is not None:
+            for cfg in configs:
+                try:
+                    await dispatch_preview_if_needed(
+                        db=self.db,
+                        apns_send_preview=self.apns_send_preview,
+                        emsc_event=doc,
+                        country_config=cfg,
+                    )
+                except Exception as e:
+                    log.warning(
+                        "Preview dispatch failed for %s/%s (country=%s): %s",
+                        ev.provider, ev.external_id,
+                        cfg.get("country_code"), e,
+                    )
         return True
 
     # ── Health tracking ──────────────────────────────────────────────────

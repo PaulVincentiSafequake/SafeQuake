@@ -26,6 +26,7 @@ from apns import (
     aclose as apns_aclose,
     apns_config_status,
     send_critical_alerts,
+    send_preview_alerts,
 )
 
 # EMSC/USGS shadow-mode monitoring (Phase 1, 2026-08).
@@ -134,7 +135,10 @@ api_router = APIRouter(prefix="/api")
 # EMSC/USGS poller — instantiated at import time, started in the
 # `startup` handler. Held as a module global so admin endpoints
 # further down can read `.started_at` etc.
-emsc_poller = EMSCPoller(db)
+# Preview APNs sender is injected here (rather than imported inside
+# emsc/) so the poller subpackage stays transport-agnostic and testable
+# in isolation.
+emsc_poller = EMSCPoller(db, apns_send_preview=send_preview_alerts)
 
 # ---------- Legacy status-check demo endpoints ----------
 class StatusCheck(BaseModel):
@@ -2464,6 +2468,22 @@ class ResetSoakBody(BaseModel):
     confirm: bool = Field(..., description="Must be true to proceed — safety rail.")
 
 
+class PreviewConfigBody(BaseModel):
+    """Payload for POST /api/admin/emsc/preview/config.
+
+    Every field is optional — omitted fields keep their existing value.
+    This lets an admin toggle `enabled: true` without needing to re-send
+    device_ids etc."""
+    enabled: Optional[bool] = None
+    device_ids: Optional[List[str]] = None
+    trigger_tier: Optional[str] = None    # "all_ingested" | threshold_set name
+    rate_limit_minutes: Optional[int] = Field(default=None, ge=1, le=1440)
+
+
+class PreviewAddDeviceBody(BaseModel):
+    device_id: str = Field(..., min_length=3, max_length=200)
+
+
 @api_router.post("/admin/emsc/reset-soak-clock")
 async def emsc_reset_soak_clock(body: ResetSoakBody, request: Request):
     """Reset the authoritative soak_started_at to now.
@@ -2513,6 +2533,209 @@ async def emsc_reset_soak_clock(body: ResetSoakBody, request: Request):
         "previous_soak_started_at": _iso(prev_started),
         "reset_by": principal.get("email"),
         "reason": body.reason,
+    }
+
+
+# ── EMSC Preview mode (P2.5) ────────────────────────────────────────────
+# Sends REAL (non-critical) notifications to an allowlisted device for
+# EMSC/USGS events. See emsc/preview.py for the design write-up and the
+# non-negotiable constraints. All endpoints require admin role.
+
+VALID_PREVIEW_TIERS = {"all_ingested", "quiet_tier", "critical_tier", "neo_original"}
+
+
+@api_router.get("/admin/emsc/preview/config")
+async def emsc_preview_get_config(request: Request, country_code: str = Query("MT")):
+    """Return the current preview_mode sub-document for a country."""
+    principal = await resolve_principal(
+        request, request.headers.get("x-admin-token"),
+        ADMIN_TRIGGER_PASSWORD, db,
+    )
+    require_role(principal, "admin", "operator")
+    doc = await db.country_configs.find_one(
+        {"country_code": country_code.upper()},
+        {"_id": 0, "country_code": 1, "country_name": 1, "preview_mode": 1},
+    )
+    if not doc:
+        raise HTTPException(404, f"No country_config for {country_code}")
+    return doc
+
+
+@api_router.post("/admin/emsc/preview/config")
+async def emsc_preview_set_config(
+    body: PreviewConfigBody, request: Request, country_code: str = Query("MT"),
+):
+    """Update the preview_mode config for a country. Admin-only. Any
+    field omitted from the payload keeps its current value (partial update)."""
+    principal = await resolve_principal(
+        request, request.headers.get("x-admin-token"),
+        ADMIN_TRIGGER_PASSWORD, db,
+    )
+    require_role(principal, "admin")
+
+    updates: dict = {}
+    if body.enabled is not None:
+        updates["preview_mode.enabled"] = body.enabled
+    if body.device_ids is not None:
+        # Dedupe + strip whitespace defensively.
+        cleaned = list({(d or "").strip() for d in body.device_ids if (d or "").strip()})
+        updates["preview_mode.device_ids"] = cleaned
+    if body.trigger_tier is not None:
+        if body.trigger_tier not in VALID_PREVIEW_TIERS:
+            raise HTTPException(
+                400,
+                f"trigger_tier must be one of {sorted(VALID_PREVIEW_TIERS)} "
+                f"(got '{body.trigger_tier}')",
+            )
+        updates["preview_mode.trigger_tier"] = body.trigger_tier
+    if body.rate_limit_minutes is not None:
+        updates["preview_mode.rate_limit_minutes"] = body.rate_limit_minutes
+
+    if not updates:
+        raise HTTPException(400, "No fields to update — provide at least one.")
+
+    updates["preview_mode.updated_at"] = datetime.now(timezone.utc)
+    updates["preview_mode.updated_by"] = principal.get("email", "unknown")
+
+    res = await db.country_configs.update_one(
+        {"country_code": country_code.upper()},
+        {"$set": updates},
+    )
+    if res.matched_count == 0:
+        raise HTTPException(404, f"No country_config for {country_code}")
+
+    doc = await db.country_configs.find_one(
+        {"country_code": country_code.upper()},
+        {"_id": 0, "preview_mode": 1},
+    )
+    return {"ok": True, "preview_mode": doc.get("preview_mode")}
+
+
+@api_router.post("/admin/emsc/preview/add-device")
+async def emsc_preview_add_device(
+    body: PreviewAddDeviceBody, request: Request, country_code: str = Query("MT"),
+):
+    """Convenience endpoint — appends a single device_id to the allowlist
+    without needing to send the whole list. Idempotent (no-ops if already
+    present). Does NOT auto-enable preview mode — that's a separate flip
+    to prevent accidental activation."""
+    principal = await resolve_principal(
+        request, request.headers.get("x-admin-token"),
+        ADMIN_TRIGGER_PASSWORD, db,
+    )
+    require_role(principal, "admin")
+    now = datetime.now(timezone.utc)
+    res = await db.country_configs.update_one(
+        {"country_code": country_code.upper()},
+        {
+            "$addToSet": {"preview_mode.device_ids": body.device_id.strip()},
+            "$set": {
+                "preview_mode.updated_at": now,
+                "preview_mode.updated_by": principal.get("email", "unknown"),
+            },
+        },
+    )
+    if res.matched_count == 0:
+        raise HTTPException(404, f"No country_config for {country_code}")
+    doc = await db.country_configs.find_one(
+        {"country_code": country_code.upper()},
+        {"_id": 0, "preview_mode": 1},
+    )
+    return {"ok": True, "preview_mode": doc.get("preview_mode")}
+
+
+@api_router.post("/admin/emsc/preview/kill")
+async def emsc_preview_kill(request: Request):
+    """PANIC STOP — disable preview_mode on EVERY country_config immediately.
+
+    Designed for the "3am, this is intolerable, kill it now" scenario.
+    Sets `preview_mode.enabled = false` across all country_configs. Does
+    NOT clear device_ids or trigger_tier — those are preserved so a
+    later re-enable is one flip. Admin-only, single POST, no body needed."""
+    principal = await resolve_principal(
+        request, request.headers.get("x-admin-token"),
+        ADMIN_TRIGGER_PASSWORD, db,
+    )
+    require_role(principal, "admin")
+    now = datetime.now(timezone.utc)
+    res = await db.country_configs.update_many(
+        {"preview_mode.enabled": True},
+        {"$set": {
+            "preview_mode.enabled": False,
+            "preview_mode.killed_at": now,
+            "preview_mode.killed_by": principal.get("email", "unknown"),
+        }},
+    )
+    return {
+        "ok": True,
+        "countries_affected": res.modified_count,
+        "killed_by": principal.get("email"),
+        "killed_at": now.isoformat(),
+    }
+
+
+@api_router.get("/admin/emsc/preview/candidates")
+async def emsc_preview_candidates(request: Request, limit: int = Query(20, ge=1, le=100)):
+    """List recent push-registered iOS devices. Useful for finding your
+    own device_id to add to the allowlist without needing to fish it out
+    of the audit log or the phone."""
+    principal = await resolve_principal(
+        request, request.headers.get("x-admin-token"),
+        ADMIN_TRIGGER_PASSWORD, db,
+    )
+    require_role(principal, "admin")
+    rows = await db.push_devices.find(
+        {"platform": {"$in": ["ios", "iOS"]}},
+        {"_id": 0, "user_id": 1, "platform": 1, "device_token": 1,
+         "created_at": 1, "updated_at": 1},
+    ).sort("updated_at", -1).limit(limit).to_list(limit)
+    return {
+        "count": len(rows),
+        "candidates": [
+            {
+                "device_id": r.get("user_id"),
+                "platform": r.get("platform"),
+                "device_token_fingerprint": (
+                    (r.get("device_token") or "")[:8] + "…" +
+                    (r.get("device_token") or "")[-8:]
+                ) if r.get("device_token") else None,
+                "created_at": _iso(r.get("created_at")),
+                "updated_at": _iso(r.get("updated_at")),
+            }
+            for r in rows
+        ],
+    }
+
+
+@api_router.get("/admin/emsc/preview/recent")
+async def emsc_preview_recent(
+    request: Request,
+    limit: int = Query(50, ge=1, le=500),
+    delivered: Optional[bool] = Query(None, description="Filter to delivered=this."),
+    device_id: Optional[str] = Query(None, description="Filter to a single device."),
+):
+    """Recent preview-notification attempts. Includes rate-limited skips
+    so operators can see the honest volume the pipeline WOULD have
+    produced (essential calibration signal)."""
+    principal = await resolve_principal(
+        request, request.headers.get("x-admin-token"),
+        ADMIN_TRIGGER_PASSWORD, db,
+    )
+    require_role(principal, "admin", "operator")
+    query: dict = {}
+    if delivered is not None:
+        query["delivered"] = delivered
+    if device_id:
+        query["device_id"] = device_id
+    rows = await db.emsc_preview_notifications.find(
+        query, {"_id": 0},
+    ).sort("sent_at", -1).limit(limit).to_list(limit)
+    return {
+        "count": len(rows),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "notifications": [
+            {**r, "sent_at": _iso(r.get("sent_at"))} for r in rows
+        ],
     }
 
 

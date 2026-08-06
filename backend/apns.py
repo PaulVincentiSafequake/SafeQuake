@@ -221,6 +221,45 @@ def _build_critical_payload(title: str, body: str, action_url: str) -> dict:
     }
 
 
+def _build_preview_payload(title: str, body: str, action_url: str) -> dict:
+    """APNs payload for a REGULAR alert — deliberately NOT critical.
+
+    Used by the EMSC preview-mode path so an allowlisted device (Paul's
+    phone) sees real EMSC detections as regular iOS banners without
+    triggering the critical-alert siren/DND-override path. Two reasons
+    this MUST be non-critical:
+
+      1. Preview notifications are a diagnostic tool, not a life-safety
+         alert. Using the critical-alerts entitlement for anything
+         non-critical risks Apple revoking that entitlement — product-ending.
+
+      2. The whole point of preview mode is to observe seismic rhythm
+         without alert fatigue. A siren every time Sicily has an M2.7
+         would generate exactly the fatigue we're trying to characterise.
+
+    Delivery semantics:
+      - `interruption-level: "active"` — normal banner + sound, respects
+        the user's silent/DND/Focus preferences (unlike critical alerts).
+      - `sound: "default"` — the operator's ringtone / default alert
+        sound. NOT the critical siren.
+      - `apns-priority: 5` (set on the header in _send_one_regular, below)
+        — power-efficient delivery; APNs may batch/delay if the device
+        is low on power. Correct for non-urgent test notifications.
+
+    The payload also embeds `preview: true` at the top level so the
+    mobile app can render a distinct visual style if it wants to.
+    """
+    return {
+        "aps": {
+            "alert": {"title": title, "body": body},
+            "sound": "default",
+            "interruption-level": "active",
+        },
+        "action_url": action_url,
+        "preview": True,
+    }
+
+
 # ---------- Single-token send with sandbox fallback ----------
 async def _send_one(
     cfg: ApnsConfig,
@@ -229,11 +268,18 @@ async def _send_one(
     payload: dict,
     idempotency_key: str,
     environment: str = "production",
+    apns_priority: str = "10",   # "10" = immediate delivery (critical alerts); "5" = power-efficient (regular pushes)
 ) -> ApnsResult:
     """Send one push and return the diagnostic result. On 400 BadDeviceToken
     against production, transparently retries once against sandbox and
     reports which environment worked (invaluable for token-type mismatch
-    diagnosis)."""
+    diagnosis).
+
+    `apns_priority` defaults to "10" for backward compatibility with the
+    critical-alert path. Preview-mode pushes pass "5" so Apple can batch
+    or slightly delay delivery to conserve device battery — the correct
+    priority for non-urgent diagnostic notifications, and required by
+    Apple's guidelines for non-critical pushes."""
     started = time.monotonic()
     fp = _fingerprint(device_token)
     apns_id = str(uuid.uuid4())
@@ -243,7 +289,7 @@ async def _send_one(
             "authorization": f"bearer {_build_jwt(cfg)}",
             "apns-topic": cfg.bundle_id,
             "apns-push-type": "alert",
-            "apns-priority": "10",  # required for critical alerts
+            "apns-priority": apns_priority,
             "apns-expiration": "0",
             "apns-id": apns_id,
             "apns-collapse-id": idempotency_key[:64],
@@ -270,6 +316,7 @@ async def _send_one(
             fallback = await _send_one(
                 cfg, user_id, device_token, payload, idempotency_key,
                 environment="sandbox",
+                apns_priority=apns_priority,
             )
             return fallback
 
@@ -355,6 +402,71 @@ async def send_critical_alerts(
                 device_token=d.get("device_token") or "",
                 payload=payload,
                 idempotency_key=idempotency_key,
+            )
+
+    results = await asyncio.gather(*(_guarded(d) for d in devices))
+    return {
+        "payload": payload,
+        "events": [r.as_dict() for r in results],
+    }
+
+
+# ---------- Preview mode (non-critical) send ----------
+async def send_preview_alerts(
+    db: AsyncIOMotorDatabase,
+    devices: list[dict],  # each: {user_id, device_token}
+    title: str,
+    body: str,
+    action_url: str,
+    idempotency_key: str,
+) -> dict:
+    """Send a REGULAR (non-critical) alert to every iOS device in `devices`.
+
+    Used exclusively by EMSC preview mode. See _build_preview_payload for
+    the design rationale on why this MUST remain non-critical — using the
+    critical-alerts entitlement for anything non-critical risks Apple
+    revoking it, which would be product-ending.
+
+    Signature intentionally mirrors send_critical_alerts so the two are
+    easily swappable in test code, but the network priority and payload
+    shape differ: apns-priority=5, sound=default, interruption=active.
+    """
+    if not devices:
+        return {"payload": None, "events": []}
+
+    cfg = await load_apns_config(db)
+    if cfg is None:
+        return {
+            "payload": None,
+            "events": [
+                {
+                    "user_id": d.get("user_id") or "",
+                    "token_fingerprint": _fingerprint(d.get("device_token") or ""),
+                    "environment": "n/a",
+                    "status_code": None,
+                    "apns_id": None,
+                    "apns_unique_id": None,
+                    "reason": "APNS_NOT_CONFIGURED",
+                    "delivered": False,
+                    "duration_ms": 0,
+                    "error": "APNs auth key not uploaded.",
+                }
+                for d in devices
+            ],
+        }
+
+    payload = _build_preview_payload(title, body, action_url)
+    sem = asyncio.Semaphore(CONCURRENCY)
+
+    async def _guarded(d: dict) -> ApnsResult:
+        async with sem:
+            return await _send_one(
+                cfg,
+                user_id=d.get("user_id") or "",
+                device_token=d.get("device_token") or "",
+                payload=payload,
+                idempotency_key=idempotency_key,
+                apns_priority="5",   # regular / power-efficient delivery
             )
 
     results = await asyncio.gather(*(_guarded(d) for d in devices))

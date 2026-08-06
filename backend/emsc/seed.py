@@ -37,6 +37,17 @@ MALTA_CONFIG: dict[str, Any] = {
     "poll_max_depth_km": None,
     "shadow_mode": True,
     "enabled": True,
+    "preview_mode": {
+        # Off by default — flipped via /api/admin/emsc/preview/config once
+        # an admin adds their own device_id to the allowlist. When enabled,
+        # allowlisted iOS devices receive REGULAR (non-critical) previews
+        # of any EMSC/USGS event matching `trigger_tier`. See emsc/preview.py
+        # for the design rationale and the non-negotiable constraints.
+        "enabled": False,
+        "device_ids": [],
+        "trigger_tier": "all_ingested",   # "all_ingested" | "quiet_tier" | "critical_tier"
+        "rate_limit_minutes": 10,
+    },
     "threshold_sets": [
         {
             # Frequent low-mag near events. This is what would drive the
@@ -71,7 +82,12 @@ MALTA_CONFIG: dict[str, Any] = {
 
 
 async def seed_country_configs(db) -> None:
-    """Ensure the Malta config exists. Idempotent, never overwrites."""
+    """Ensure the Malta config exists. Idempotent, never overwrites.
+
+    Also backfills the `preview_mode` sub-document if the country_config
+    already exists but predates the preview-mode feature. Uses $setOnInsert
+    semantics — never overwrites an existing preview_mode config (admin
+    edits are preserved across redeploys)."""
     try:
         await db.country_configs.create_index("country_code", unique=True)
     except Exception as e:
@@ -79,6 +95,15 @@ async def seed_country_configs(db) -> None:
 
     existing = await db.country_configs.find_one({"country_code": MALTA_CONFIG["country_code"]})
     if existing:
+        # Backfill preview_mode if the doc predates that field. NEVER
+        # overwrite existing preview_mode — admin might have configured it.
+        if "preview_mode" not in existing:
+            await db.country_configs.update_one(
+                {"country_code": MALTA_CONFIG["country_code"]},
+                {"$set": {"preview_mode": MALTA_CONFIG["preview_mode"]}},
+            )
+            log.info("Backfilled preview_mode default into existing %s config",
+                     MALTA_CONFIG["country_code"])
         return
 
     doc = dict(MALTA_CONFIG)
