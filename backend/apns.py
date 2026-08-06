@@ -197,8 +197,32 @@ def _fingerprint(token: str) -> str:
     return f"{token[:8]}…{token[-8:]}"
 
 
-def _build_critical_payload(title: str, body: str, action_url: str) -> dict:
+def _build_critical_payload(
+    title: str,
+    body: str,
+    action_url: str,
+    magnitude: Optional[float] = None,
+    distance_km: Optional[float] = None,
+    intensity: Optional[str] = None,
+    depth_km: Optional[float] = None,
+    region: Optional[str] = None,
+    unid: Optional[str] = None,
+    provider: Optional[str] = None,
+) -> dict:
     """APNs payload for a true iOS Critical Alert.
+
+    Payload MUST include `kind: "critical_alert"` so the mobile-app tap
+    handler can distinguish real alerts from previews and route
+    appropriately. See _build_preview_payload for the corresponding
+    preview-mode payload. The fail-safe on the mobile side treats a
+    missing `kind` as INFORMATIONAL (not critical), so real critical
+    alerts MUST always carry this field.
+
+    Event-specific fields (magnitude, distance_km, intensity, depth_km,
+    region, unid, provider) are embedded at the top level so the /alert
+    screen can render the actual event data rather than showing stale
+    or hardcoded defaults. Fields left as None simply don't appear in
+    the payload — the mobile app renders "—" when a field is absent.
 
     IMPORTANT: `sound.name` must reference a file actually bundled inside the
     iOS app's `Library/Sounds/` directory — one of `.caf`, `.aiff`, or `.wav`,
@@ -210,54 +234,88 @@ def _build_critical_payload(title: str, body: str, action_url: str) -> dict:
     into `Library/Sounds/` at build time, so `name: "siren.caf"` resolves
     on device and iOS honours the critical-alert semantics.
     """
-    return {
+    payload: dict = {
         "aps": {
             "alert": {"title": title, "body": body},
             "sound": {"critical": 1, "name": "siren.caf", "volume": 1.0},
             "interruption-level": "critical",
             "relevance-score": 1,
         },
+        # kind is REQUIRED — the mobile tap handler routes by this field.
+        # Missing kind → informational fallback (never siren).
+        "kind": "critical_alert",
         "action_url": action_url,
     }
+    # Event-specific fields — only include when non-None so the mobile
+    # renderer can distinguish "unknown" (missing key) from "known-and-zero".
+    if magnitude is not None:   payload["magnitude"] = magnitude
+    if distance_km is not None: payload["distance_km"] = distance_km
+    if intensity is not None:   payload["intensity"] = intensity
+    if depth_km is not None:    payload["depth_km"] = depth_km
+    if region is not None:      payload["region"] = region
+    if unid is not None:        payload["unid"] = unid
+    if provider is not None:    payload["provider"] = provider
+    return payload
 
 
-def _build_preview_payload(title: str, body: str, action_url: str) -> dict:
+def _build_preview_payload(
+    title: str,
+    body: str,
+    action_url: str,
+    magnitude: Optional[float] = None,
+    distance_km: Optional[float] = None,
+    depth_km: Optional[float] = None,
+    latitude: Optional[float] = None,
+    longitude: Optional[float] = None,
+    region: Optional[str] = None,
+    unid: Optional[str] = None,
+    provider: Optional[str] = None,
+    observed_at: Optional[str] = None,   # ISO-8601 string
+) -> dict:
     """APNs payload for a REGULAR alert — deliberately NOT critical.
 
-    Used by the EMSC preview-mode path so an allowlisted device (Paul's
-    phone) sees real EMSC detections as regular iOS banners without
-    triggering the critical-alert siren/DND-override path. Two reasons
-    this MUST be non-critical:
+    Includes `kind: "emsc_preview"` so the mobile tap handler routes
+    to the informational detail screen, NEVER to /alert with the siren.
+    This bug (BUG-2026-08-06-preview-tap-siren) is exactly what the
+    non-critical send path was supposed to prevent — but the send-side
+    constraint doesn't cover the tap-handler journey. Fixed here at the
+    payload level so mobile has an unambiguous signal.
 
-      1. Preview notifications are a diagnostic tool, not a life-safety
-         alert. Using the critical-alerts entitlement for anything
-         non-critical risks Apple revoking that entitlement — product-ending.
-
-      2. The whole point of preview mode is to observe seismic rhythm
-         without alert fatigue. A siren every time Sicily has an M2.7
-         would generate exactly the fatigue we're trying to characterise.
+    Used exclusively by EMSC preview mode. See emsc/preview.py for the
+    non-negotiable constraints on this path.
 
     Delivery semantics:
       - `interruption-level: "active"` — normal banner + sound, respects
         the user's silent/DND/Focus preferences (unlike critical alerts).
       - `sound: "default"` — the operator's ringtone / default alert
         sound. NOT the critical siren.
-      - `apns-priority: 5` (set on the header in _send_one_regular, below)
-        — power-efficient delivery; APNs may batch/delay if the device
-        is low on power. Correct for non-urgent test notifications.
+      - `apns-priority: 5` (set on the header) — power-efficient delivery.
 
-    The payload also embeds `preview: true` at the top level so the
-    mobile app can render a distinct visual style if it wants to.
+    Event details are embedded at the top level so the /quake/[unid]
+    detail screen can render specifics without a second network round-trip.
     """
-    return {
+    payload: dict = {
         "aps": {
             "alert": {"title": title, "body": body},
             "sound": "default",
             "interruption-level": "active",
         },
+        # kind is REQUIRED — mobile tap handler distinguishes preview
+        # from real alert. Missing kind → informational fallback.
+        "kind": "emsc_preview",
         "action_url": action_url,
         "preview": True,
     }
+    if magnitude is not None:   payload["magnitude"] = magnitude
+    if distance_km is not None: payload["distance_km"] = distance_km
+    if depth_km is not None:    payload["depth_km"] = depth_km
+    if latitude is not None:    payload["latitude"] = latitude
+    if longitude is not None:   payload["longitude"] = longitude
+    if region is not None:      payload["region"] = region
+    if unid is not None:        payload["unid"] = unid
+    if provider is not None:    payload["provider"] = provider
+    if observed_at is not None: payload["observed_at"] = observed_at
+    return payload
 
 
 # ---------- Single-token send with sandbox fallback ----------
@@ -356,6 +414,17 @@ async def send_critical_alerts(
     body: str,
     action_url: str,
     idempotency_key: str,
+    # Event-specific fields — forwarded to the payload so the /alert
+    # screen renders REAL values instead of hardcoded defaults. Any
+    # field left as None simply doesn't appear in the payload; the
+    # mobile app renders "—" for missing fields (never a stale value).
+    magnitude: Optional[float] = None,
+    distance_km: Optional[float] = None,
+    intensity: Optional[str] = None,
+    depth_km: Optional[float] = None,
+    region: Optional[str] = None,
+    unid: Optional[str] = None,
+    provider: Optional[str] = None,
 ) -> dict:
     """Send a critical-alert push to every iOS device in `devices`.
 
@@ -391,7 +460,16 @@ async def send_critical_alerts(
             ],
         }
 
-    payload = _build_critical_payload(title, body, action_url)
+    payload = _build_critical_payload(
+        title, body, action_url,
+        magnitude=magnitude,
+        distance_km=distance_km,
+        intensity=intensity,
+        depth_km=depth_km,
+        region=region,
+        unid=unid,
+        provider=provider,
+    )
     sem = asyncio.Semaphore(CONCURRENCY)
 
     async def _guarded(d: dict) -> ApnsResult:
@@ -419,6 +497,17 @@ async def send_preview_alerts(
     body: str,
     action_url: str,
     idempotency_key: str,
+    # Event-specific fields forwarded to payload so /quake/[unid] detail
+    # screen can render the actual event data.
+    magnitude: Optional[float] = None,
+    distance_km: Optional[float] = None,
+    depth_km: Optional[float] = None,
+    latitude: Optional[float] = None,
+    longitude: Optional[float] = None,
+    region: Optional[str] = None,
+    unid: Optional[str] = None,
+    provider: Optional[str] = None,
+    observed_at: Optional[str] = None,
 ) -> dict:
     """Send a REGULAR (non-critical) alert to every iOS device in `devices`.
 
@@ -455,7 +544,18 @@ async def send_preview_alerts(
             ],
         }
 
-    payload = _build_preview_payload(title, body, action_url)
+    payload = _build_preview_payload(
+        title, body, action_url,
+        magnitude=magnitude,
+        distance_km=distance_km,
+        depth_km=depth_km,
+        latitude=latitude,
+        longitude=longitude,
+        region=region,
+        unid=unid,
+        provider=provider,
+        observed_at=observed_at,
+    )
     sem = asyncio.Semaphore(CONCURRENCY)
 
     async def _guarded(d: dict) -> ApnsResult:

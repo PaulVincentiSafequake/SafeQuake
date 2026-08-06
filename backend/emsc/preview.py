@@ -261,15 +261,33 @@ async def dispatch_preview_if_needed(
         return {"attempted": 0, "skipped_rate_limited": len(skipped), "reason": "all_rate_limited"}
 
     # Fire the pushes. NON-CRITICAL path — see apns._build_preview_payload.
+    # Payload embeds `kind: "emsc_preview"` and full event details so the
+    # mobile-app tap handler routes to /quake/[unid] (informational) and
+    # NEVER to /alert (siren). This is the fix for BUG-2026-08-06-preview-tap-siren.
     idem = f"emsc-preview-{uuid.uuid4()}"
+    unid = emsc_event.get("external_id")
+    observed_at = emsc_event.get("observed_at")
+    observed_at_iso = observed_at.isoformat() if hasattr(observed_at, "isoformat") else str(observed_at) if observed_at else None
     try:
         result = await apns_send_preview(
             db=db,
             devices=eligible,
             title=title,
             body=body,
-            action_url="/",
+            # action_url points at the preview detail screen — even if
+            # kind is stripped by an intermediary, action_url routes
+            # away from /alert as a second line of defence.
+            action_url=f"/quake/{unid}" if unid else "/",
             idempotency_key=idem,
+            magnitude=emsc_event.get("magnitude"),
+            distance_km=distance_km,
+            depth_km=emsc_event.get("depth_km"),
+            latitude=emsc_event.get("latitude"),
+            longitude=emsc_event.get("longitude"),
+            region=emsc_event.get("region"),
+            unid=unid,
+            provider=emsc_event.get("provider"),
+            observed_at=observed_at_iso,
         )
     except Exception as e:
         log.warning("Preview APNs send raised: %s", e)

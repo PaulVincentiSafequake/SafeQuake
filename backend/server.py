@@ -1177,6 +1177,13 @@ async def trigger_alert(
             body=message,
             action_url="/alert",
             idempotency_key=idem,
+            # Forward the actual event details so /alert renders REAL
+            # values on the mobile screen, not the hardcoded placeholders
+            # 6.4 / 12 / VII. Fields left as None (from body defaults)
+            # render as "—" on the mobile side.
+            magnitude=body.magnitude,
+            distance_km=body.distance_km,
+            intensity=body.intensity,
         )
         apns_events = apns_result.get("events", []) or []
         apns_payload = apns_result.get("payload")

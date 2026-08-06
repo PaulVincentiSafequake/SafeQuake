@@ -1,4 +1,4 @@
-import { useRouter } from "expo-router";
+import { useRouter, useLocalSearchParams } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { Ionicons } from "@expo/vector-icons";
 import { LinearGradient } from "expo-linear-gradient";
@@ -45,6 +45,36 @@ type OutcomeKind = "safe" | "trapped";
 
 export default function AlertScreen() {
   const router = useRouter();
+  // Event details from the notification payload (via router params).
+  // BUG-2026-08-06-alert-hardcoded: previously the alert screen showed
+  // literal "6.4", "12km", "VII" regardless of the triggering event.
+  // These are now sourced from the notification's `data` fields at tap
+  // time. Missing fields render as "—", NEVER as stale values.
+  const params = useLocalSearchParams<{
+    magnitude?: string;
+    distance_km?: string;
+    intensity?: string;
+    depth_km?: string;
+    region?: string;
+    unid?: string;
+    siren?: string;
+    reminder?: string;
+  }>();
+  const eventMagnitude = params.magnitude ?? null;
+  const eventDistanceKm = params.distance_km ?? null;
+  const eventIntensity = params.intensity ?? null;
+  // Siren defaults OFF when the param is missing — deliberate fail-safe.
+  // Only the notification-tap handler (for kind=critical_alert) sets
+  // `siren=1`. Direct /alert navigation (e.g., from Home while debugging)
+  // therefore never triggers the siren unless explicitly requested.
+  const shouldPlaySiren = params.siren === "1";
+  // `reminder=1` is set by the tap handler when the user tapped a
+  // check-in reminder notification. Currently unused in the render path
+  // (reminders re-open the same check-in UI as fresh alerts) but the
+  // param is preserved so future UI can hint "you're following up on
+  // an earlier alert" without changing the tap-routing contract.
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const isReminderContext = params.reminder === "1";
   const insets = useSafeAreaInsets();
   const [status, setStatus] = useState<Status>("idle");
   const [outcome, setOutcome] = useState<OutcomeKind>("safe");
@@ -74,7 +104,17 @@ export default function AlertScreen() {
   // Latching guard: once the user silences the siren (I'm Safe / Dismiss /
   // unmount), this flips permanently to false so no subsequent re-render or
   // player-status blip can restart playback.
-  const shouldPlayRef = useRef(true);
+  // Siren-should-play guard.
+  //
+  // Initial value: derived from `params.siren === "1"`. Only the
+  // notification-tap handler for `kind: "critical_alert"` sets siren=1.
+  // Every other path (reminders, preview taps, direct navigation, dev
+  // browsing) reaches /alert with siren!=1 and the siren stays silent.
+  //
+  // BUG-2026-08-06-preview-tap-siren regression guard: if a future edit
+  // ever removes this initial gate and defaults to `true`, a preview
+  // notification tap could re-detonate the siren. Keep the default off.
+  const shouldPlayRef = useRef(shouldPlaySiren);
 
   useEffect(() => {
     if (!sirenStatus.isLoaded) return;
@@ -551,17 +591,21 @@ export default function AlertScreen() {
           <View style={styles.metricsRow}>
             <View style={styles.metric}>
               <Text style={styles.metricLabel}>MAGNITUDE</Text>
-              <Text style={styles.metricValue}>6.4</Text>
+              <Text style={styles.metricValue}>{eventMagnitude ?? "—"}</Text>
             </View>
             <View style={styles.metricDivider} />
             <View style={styles.metric}>
               <Text style={styles.metricLabel}>DISTANCE</Text>
-              <Text style={styles.metricValue}>12<Text style={styles.metricUnit}>km</Text></Text>
+              <Text style={styles.metricValue}>
+                {eventDistanceKm != null ? (
+                  <>{eventDistanceKm}<Text style={styles.metricUnit}>km</Text></>
+                ) : "—"}
+              </Text>
             </View>
             <View style={styles.metricDivider} />
             <View style={styles.metric}>
               <Text style={styles.metricLabel}>INTENSITY</Text>
-              <Text style={styles.metricValue}>VII</Text>
+              <Text style={styles.metricValue}>{eventIntensity ?? "—"}</Text>
             </View>
           </View>
         </View>

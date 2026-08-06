@@ -199,6 +199,41 @@ Rationale: Paul is the operator, not a developer. Assuming there's a developer b
   - `POST /api/admin/emsc/reset-soak-clock` — admin-only, `confirm: true` required, `reason` required (audit trail).
 - **Contract:** any tuning decision on day 14 requires reading `/continuity` first and confirming `coverage_pct` is acceptable. "We polled for 14 days" is dishonest if coverage_pct is 60%.
 
+## Bug fixes 2026-08-06 — preview-tap siren + hardcoded alert values
+
+### BUG-2026-08-06-preview-tap-siren (safety-critical)
+
+**Symptom:** Tapping a preview notification (M2.7 event ~1,300km away, correctly delivered as quiet non-critical) opened the full EARTHQUAKE DETECTED screen with siren + "Drop. Cover. Hold on." — the exact alert-fatigue failure preview constraints existed to prevent.
+
+**Root cause:** `_layout.tsx` tap handler defaulted to `/alert` for any notification without an explicit `action_url`. Preview payload set `action_url: "/"` but that wasn't strong enough as a signal — the whole architecture depended on the sender writing the right URL rather than the receiver knowing the intent.
+
+**Fix:**
+1. **Payload contract:** every APNs payload MUST carry a `kind` field (`critical_alert`, `emsc_preview`, or `quakeguard-reminder`). Fail-safe on the mobile side treats a missing/unknown kind as INFORMATIONAL, never critical.
+2. **Backend:** `_build_critical_payload` and `_build_preview_payload` in `apns.py` both now embed `kind` at payload root. Extended signatures forward event details (magnitude, distance_km, intensity, depth_km, region, unid, provider).
+3. **Frontend tap handler (`_layout.tsx`):** routes by `kind`:
+   - `critical_alert` → `/alert?siren=1&...event details`
+   - `quakeguard-reminder` → `/alert?siren=0&reminder=1` (check-in flow, no siren)
+   - `emsc_preview` / unknown → `/quake/[unid]` (informational)
+   - `/alert` from any non-critical kind is BLOCKED, prevents future regressions.
+4. **`/alert` siren gate:** `shouldPlayRef` now initialised from `params.siren === "1"` (default false). Only the tap handler for `kind: "critical_alert"` sets `siren=1`. Direct navigation, dev browsing, or a malformed payload can never fire the siren.
+5. **New screen `/quake/[unid]`:** calm informational detail — magnitude, distance, depth, coordinates, region, time-ago, EMSC attribution ("Data © EMSC"). Deliberately NO siren, NO "Drop. Cover. Hold on.", NO check-in prompt. `PREVIEW` badge when the tap was on a preview. "This is a record of what has already happened. Earthquake detection is not early warning." footer.
+
+**Fail-safe philosophy (locked):** a missed siren on tap is recoverable (the notification itself carried siren + haptics if it was truly critical); a spurious siren on tap destroys trust permanently. Every ambiguous path routes to informational.
+
+### BUG-2026-08-06-alert-hardcoded
+
+**Symptom:** `/alert` screen displayed `MAGNITUDE 6.4 · DISTANCE 12km · INTENSITY VII` regardless of the actual triggering event — literal hardcoded strings, no connection to payload.
+
+**Root cause:** placeholder mockup values shipped as literal JSX text and never replaced with dynamic data.
+
+**Fix:**
+1. `alert.tsx` reads via `useLocalSearchParams` — `magnitude`, `distance_km`, `intensity`, `depth_km`, `region`, `unid` all sourced from URL params set by the tap handler.
+2. Missing fields render as literal `"—"`. Never a default. Never a stale value from a previous event.
+3. Backend `send_critical_alerts` extended to accept event fields; `server.py:trigger_alert` forwards `body.magnitude`, `body.distance_km`, `body.intensity` into the payload.
+4. Tap handler encodes fields as URL params before pushing to `/alert`.
+
+**Contract:** during a real earthquake, showing wrong magnitude/distance would be worse than showing nothing — someone could conclude a distant event was on top of them, or the reverse. `"—"` communicates "we don't have this data" honestly, unlike a hardcoded default.
+
 ## Intensity-based alerting — the reframe (scoped 2026-08-06)
 
 **Fundamental correction of what we alert on.** Magnitude describes energy released at the source; it says nothing about what a person in Valletta actually feels. Human experience = intensity (MMI/EMS-98) — a function of magnitude, distance, depth, and local soil conditions. Every mature system (ShakeAlert, JMA) alerts on predicted intensity, not raw magnitude. Magnitude thresholds are systematically miscalibrated — M4.5 at 20km is a far bigger event than M6.0 at 400km, and current rules treat them as comparable.
