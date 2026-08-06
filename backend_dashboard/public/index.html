@@ -464,8 +464,11 @@
      Quake Angel dashboard auth guard — per-user Google sign-in.
      Must load BEFORE any script that calls qaApi() or qaAuth.jwt().
      Exposes: qaAuth.jwt() / .user() / .signIn() / .signOut() / .onChange(cb)
+              qaAuth.idle.expireNow() / .reset()  (test hooks)
               qaApi(path, options) -> raw Response, attaches Bearer JWT,
               clears local session on 401 before returning.
+     Also: automatic idle-timeout sign-out (15 min default, 60s warning
+     modal). Set CONFIG.IDLE_TIMEOUT_MS = 0 to disable.
      ═════════════════════════════════════════════════════════════════════ -->
 
 <div id="qa-auth-container"></div>
@@ -483,6 +486,14 @@
     REQUIRE_ROLES: ["admin", "operator"],
     STORAGE_KEY: "qa_jwt",
     STORAGE_USER_KEY: "qa_user",
+    // Idle timeout — signs the operator out after N ms of no activity.
+    // 15 min matches the "currently signed in" definition used elsewhere.
+    // Warning modal appears N ms before expiry with a "Stay signed in" CTA.
+    // Set IDLE_TIMEOUT_MS to 0 to disable entirely (not recommended on
+    // shared workstations — this is what closes the "walked-away-from-desk"
+    // gap in the per-user attribution model).
+    IDLE_TIMEOUT_MS: 15 * 60 * 1000,
+    IDLE_WARNING_MS: 60 * 1000,
   };
 
   // ── State ─────────────────────────────────────────────────────────────
@@ -547,6 +558,36 @@
     .qa-chip button:hover { text-decoration: underline; }
     .qa-error { margin-top: 8px; padding: 8px 12px; background: #fee; border: 1px solid #fbb; color: #a11; border-radius: 6px; font-size: 13px; }
     .qa-role-denied { padding: 16px; background: #fee; border: 1px solid #fbb; border-radius: 8px; color: #700; font-size: 14px; }
+    /* ── Idle timeout warning modal ─────────────────────────────────── */
+    .qa-idle-backdrop {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.72);
+      z-index: 99999; display: none; align-items: center; justify-content: center;
+      padding: 24px;
+    }
+    .qa-idle-backdrop.show { display: flex; }
+    .qa-idle-modal {
+      background: #fff; border-radius: 16px; padding: 32px;
+      max-width: 440px; width: 100%; text-align: center;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.4);
+      border-top: 8px solid #EA9500;
+    }
+    .qa-idle-modal .qa-idle-icon { font-size: 48px; margin-bottom: 12px; }
+    .qa-idle-modal .qa-idle-title {
+      font-size: 22px; font-weight: 900; color: #222; margin-bottom: 8px;
+    }
+    .qa-idle-modal .qa-idle-body {
+      font-size: 15px; color: #444; line-height: 1.5; margin-bottom: 20px;
+    }
+    .qa-idle-modal .qa-idle-countdown {
+      font-size: 32px; font-weight: 900; color: #EA9500;
+      font-variant-numeric: tabular-nums; margin-bottom: 20px;
+    }
+    .qa-idle-modal .qa-idle-btn {
+      width: 100%; padding: 14px 20px; border-radius: 10px;
+      font-size: 14px; font-weight: 800; letter-spacing: 1px; text-transform: uppercase;
+      cursor: pointer; border: 0; background: #1F8A3A; color: #fff;
+    }
+    .qa-idle-modal .qa-idle-btn:hover { opacity: 0.9; }
   `;
   const styleEl = document.createElement("style");
   styleEl.textContent = CSS;
@@ -653,6 +694,12 @@
       setStored(null, null);
     },
     onChange: (cb) => { listeners.add(cb); return () => listeners.delete(cb); },
+    // Idle timeout hooks — mostly for testing / manual triggering. In
+    // normal use the idle timer runs automatically once signed in.
+    idle: {
+      expireNow: () => (window.__qaIdleTimeout && window.__qaIdleTimeout.expire()),
+      reset: () => (window.__qaIdleTimeout && window.__qaIdleTimeout.restart()),
+    },
   };
 
   // ── Global fetch wrapper ──────────────────────────────────────────────
@@ -671,8 +718,158 @@
     return r;
   };
 
+  // ── Idle timeout ──────────────────────────────────────────────────────
+  // Signs the operator out after CONFIG.IDLE_TIMEOUT_MS of no activity.
+  // Warning modal appears CONFIG.IDLE_WARNING_MS before expiry with a
+  // countdown and a "Stay signed in" button.
+  //
+  // Why this exists: per-user Google sign-in gives us named attribution in
+  // the audit trail, but that attribution is only meaningful if the named
+  // person is actually the one at the keyboard. An operator who walks away
+  // from an unlocked dashboard tab lets the next person to touch the
+  // keyboard act under their identity — silently undermining the entire
+  // audit trail. Idle timeout closes that gap.
+  //
+  // Not solving cross-tab sync in v1 — sessionStorage is per-tab anyway
+  // (each tab has its own JWT), and multiple tabs on one dispatcher
+  // workstation is uncommon. Per-tab idle timers is honest.
+  const IdleTimeout = (function () {
+    let expiryTimer = null;
+    let warningTimer = null;
+    let countdownInterval = null;
+    let lastActivity = Date.now();
+    let installed = false;
+    let backdropEl = null;
+    let countdownEl = null;
+    // Debounce: mousemove alone can fire dozens of times per second. Reset
+    // the timer at most every 5s to avoid CPU noise while keeping the
+    // "recent activity extends the session" guarantee accurate to within
+    // 5 seconds — well inside the 15-minute budget.
+    const ACTIVITY_DEBOUNCE_MS = 5000;
+    const ACTIVITY_EVENTS = [
+      "mousemove", "mousedown", "keydown",
+      "touchstart", "scroll", "click",
+    ];
+    function ensureModal() {
+      if (backdropEl) return;
+      backdropEl = document.createElement("div");
+      backdropEl.className = "qa-idle-backdrop";
+      backdropEl.setAttribute("role", "alertdialog");
+      backdropEl.setAttribute("aria-modal", "true");
+      backdropEl.innerHTML =
+        '<div class="qa-idle-modal">' +
+          '<div class="qa-idle-icon" aria-hidden="true">⏱️</div>' +
+          '<div class="qa-idle-title">Still there?</div>' +
+          '<div class="qa-idle-body">You\'ll be signed out for inactivity to protect the audit trail. Move your mouse or press any key to stay signed in.</div>' +
+          '<div class="qa-idle-countdown" aria-live="polite">60</div>' +
+          '<button type="button" class="qa-idle-btn">Stay signed in</button>' +
+        '</div>';
+      document.body.appendChild(backdropEl);
+      countdownEl = backdropEl.querySelector(".qa-idle-countdown");
+      backdropEl.querySelector(".qa-idle-btn").addEventListener("click", extendSession);
+    }
+    function showWarning() {
+      ensureModal();
+      backdropEl.classList.add("show");
+      let secondsLeft = Math.ceil(CONFIG.IDLE_WARNING_MS / 1000);
+      countdownEl.textContent = String(secondsLeft);
+      if (countdownInterval) clearInterval(countdownInterval);
+      countdownInterval = setInterval(() => {
+        secondsLeft -= 1;
+        if (secondsLeft <= 0) {
+          countdownEl.textContent = "0";
+          clearInterval(countdownInterval);
+          countdownInterval = null;
+          return;
+        }
+        countdownEl.textContent = String(secondsLeft);
+      }, 1000);
+    }
+    function hideWarning() {
+      if (backdropEl) backdropEl.classList.remove("show");
+      if (countdownInterval) {
+        clearInterval(countdownInterval);
+        countdownInterval = null;
+      }
+    }
+    function extendSession() {
+      // Explicit user gesture — reset the whole clock.
+      hideWarning();
+      lastActivity = Date.now();
+      restart();
+    }
+    async function expire() {
+      hideWarning();
+      stop();
+      // Same path as manual sign-out — server-side audit line + client clear.
+      try { await window.qaAuth.signOut(); } catch (_) {}
+    }
+    function scheduleExpiry() {
+      if (expiryTimer) clearTimeout(expiryTimer);
+      if (warningTimer) clearTimeout(warningTimer);
+      const timeout = CONFIG.IDLE_TIMEOUT_MS;
+      const warnAt = timeout - CONFIG.IDLE_WARNING_MS;
+      if (warnAt > 0) {
+        warningTimer = setTimeout(showWarning, warnAt);
+      } else {
+        showWarning();
+      }
+      expiryTimer = setTimeout(expire, timeout);
+    }
+    function restart() {
+      scheduleExpiry();
+    }
+    function onActivity() {
+      const now = Date.now();
+      if (now - lastActivity < ACTIVITY_DEBOUNCE_MS) return;
+      lastActivity = now;
+      if (!getStoredJwt()) return;
+      // If the warning modal is showing, DON'T silently reset — require the
+      // explicit "Stay signed in" click. A stray mouse twitch shouldn't get
+      // to answer "did you mean to still be signed in?" on the user's
+      // behalf. Deliberate UX call.
+      if (backdropEl && backdropEl.classList.contains("show")) return;
+      scheduleExpiry();
+    }
+    function install() {
+      if (installed) return;
+      if (!CONFIG.IDLE_TIMEOUT_MS || CONFIG.IDLE_TIMEOUT_MS <= 0) return;
+      ACTIVITY_EVENTS.forEach(evt => {
+        window.addEventListener(evt, onActivity, {passive: true, capture: true});
+      });
+      installed = true;
+    }
+    function start() {
+      install();
+      if (!getStoredJwt()) return;
+      lastActivity = Date.now();
+      scheduleExpiry();
+    }
+    function stop() {
+      if (expiryTimer) { clearTimeout(expiryTimer); expiryTimer = null; }
+      if (warningTimer) { clearTimeout(warningTimer); warningTimer = null; }
+      if (countdownInterval) { clearInterval(countdownInterval); countdownInterval = null; }
+      hideWarning();
+    }
+    return { start, stop, restart, expire, _debug: {
+      getLastActivity: () => lastActivity,
+      isWarningShowing: () => backdropEl && backdropEl.classList.contains("show"),
+    }};
+  })();
+
+  // Wire idle timeout to auth state changes: start on sign-in, stop on
+  // sign-out. onChange fires on every setStored() call, so we just check
+  // "signed in?" each time and start/stop accordingly.
+  window.__qaIdleTimeout = IdleTimeout;
+  listeners.add((user) => {
+    if (user) IdleTimeout.start();
+    else IdleTimeout.stop();
+  });
+
   // ── Boot ──────────────────────────────────────────────────────────────
   renderChip();
+  // Start the idle timer immediately if we booted with a cached JWT.
+  IdleTimeout.start();
   (async () => {
     if (!getStoredJwt()) return;
     try {
