@@ -200,8 +200,15 @@ failure class from 2026-08-04.
 
 ### Test users / bootstrap
 - `pmvincenti@gmail.com` seeded as first admin on backend startup.
-- Additional operators added via `POST /api/admin/users` + Google Cloud
-  Console test-user allowlist (consent screen is in Testing status).
+- **Karen (operator, 2026-08-05):** added as `operator` role, NOT admin. Deliberate — keeps a single admin (Paul) and provides a real test of the two-tier permission model. Karen can mark rescued/reverted, cannot manage users or reach admin-only endpoints. Promotion to admin is a one-line change if the role turns out to be too restrictive in practice.
+- **Bootstrap admin (pmvincenti@gmail.com) NEVER expires** when auto-expiry lands. Rationale (locked 2026-08-05): if every account lapses simultaneously, nobody can sign in to renew them — self-locking failure mode. The one non-expiring account exists specifically to un-brick that scenario.
+- **Paired safeguard (planned):** email-on-sign-in notification to the bootstrap admin's email, so a quiet compromise of the non-expiring account cannot happen unnoticed. See the "Admin sign-in notification" backlog item below.
+- Additional operators added via `POST /api/admin/users` + Google Cloud Console test-user allowlist (consent screen is in Testing status).
+
+### Legacy token cutover plan (2026-08-05 → pending)
+- Legacy `X-Admin-Token` shared-secret path remains enabled (`LEGACY_TOKEN_ENABLED=true`) as safety net during rollout.
+- Cutover gate: (1) Karen signs in successfully on separate device/browser, (2) Karen appears by name in audit log, (3) Karen confirmed blocked from admin-only endpoints, (4) admin-sign-in email safeguard shipped OR explicitly deferred by Paul.
+- On cutover: flip `LEGACY_TOKEN_ENABLED=false` in backend `.env` → redeploy. Shared password permanently retired.
 
 ## Subscription lapse handling (planned — landing after EMSC Phase 1)
 
@@ -335,3 +342,20 @@ this completes the realistic threat model:
 
 ### Priority
 After EMSC Phase 1 and subscription lapse A+B. Ahead of QR feature and report exports — every added operator makes this matter more.
+
+## Admin sign-in notification (paired with never-expires bootstrap admin)
+
+**Requested 2026-08-05 by Paul.** The non-expiring bootstrap admin account is a legitimate un-brick safeguard but also the single most valuable target — if compromised, an attacker has permanent access. This feature closes the "quiet use" gap: every sign-in as an admin fires a notification email to the admin's own address, so any use they didn't perform themselves is visible within minutes.
+
+**Design (locked):**
+- Trigger point: successful `/api/auth/google` for a user with `role == "admin"`.
+- Delivery: email via Emergent-managed Resend.
+- Contents: signing-in user email, timestamp UTC + Malta local, IP address (from `request.client.host` / `X-Forwarded-For`), User-Agent string, source Google account sub prefix (last 4).
+- Fire-and-forget: email delivery must never block the sign-in response. Failures logged, not surfaced to the user.
+- Rate limit: **max one email per 15 minutes per admin** — prevents accidental email storm during a testing session or a legitimately-frequent-usage day. Additional sign-ins within the window still produce audit-log entries; email is a supplementary channel not the primary one.
+- Recipients: initially just the signing-in admin's own email. When a second admin exists, discuss whether all admins get notified of each other's sign-ins (mutual watch) or only self-notification stays.
+
+**Storage:**
+- New collection `admin_login_notifications` — log of every notification attempt (fired/skipped-by-ratelimit/failed-to-send) for forensic use.
+
+**Priority:** MUST land before flipping `LEGACY_TOKEN_ENABLED=false`, per the cutover gate above, UNLESS Paul explicitly defers.
