@@ -341,10 +341,10 @@ Map always shows full Mediterranean regardless of notification preset. Preset go
 ## Priority (updated 2026-08-06 evening)
 
 1. ✅ EMSC Phase 1 soak (continues — magnitude data still useful)
-2. **Subscription lapse A+B** — up next
-3. **Intensity soak enhancement (Part 1a)** — MUST land before Day 14 tuning. Immediately after subscription A+B, or paused-into if timing gets tight.
-4. Seismic map (Part 2) — pairs with Part 3
-5. User notification presets (Part 3) — pairs with Part 2, same landing
+2. ✅ Intensity soak enhancement (Part 1a) — GMPE + testimonies landed 2026-08-06
+3. ✅ User notification presets (Requirement 1 / Part 3) — landed 2026-08-06. Mobile screen at `/app/frontend/app/settings/notifications.tsx` with 4 peer presets (Off / Significant / Noticeable-default / Everything nearby), OS-Critical-Alerts-revoked banner, and the mandatory safety copy ("Alerts for dangerous earthquakes are always on and cannot be switched off"). Backend: `POST/GET /api/devices/notification-preset` on `user_presence` collection.
+4. **Seismic map (Part 2)** — up next. Pairs with the preset from Requirement 1 (indicative approximate-radius circle tied to user's chosen tier).
+5. Subscription lapse A+B (entitlement state machine)
 6. Production migration (post Emergent Support response)
 7. Existing backlog (audit export, dual reports, dashboard category filter, QR)
 
