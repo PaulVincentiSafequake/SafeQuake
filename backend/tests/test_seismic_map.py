@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import os
 import pytest
+import pytest_asyncio
 import requests
 from datetime import datetime, timedelta, timezone
 
@@ -47,7 +48,7 @@ def api():
     return s
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def mongo():
     client = AsyncIOMotorClient(MONGO_URL)
     db = client[DB_NAME]
@@ -182,8 +183,8 @@ class TestLiveDataInvariants:
 
 
 # ── Dedup tests (require Mongo seeding) ──────────────────────────────────
-@pytest.mark.asyncio
 class TestDedup:
+    @pytest.mark.asyncio
     async def test_same_provider_revisions_keep_highest(self, mongo, api):
         # Seed 2 revisions of the same EMSC event within the last hour.
         base_time = datetime.now(timezone.utc) - timedelta(minutes=30)
@@ -198,6 +199,7 @@ class TestDedup:
         assert len(matches) == 1, f"expected 1 row after revision dedup, got {len(matches)}"
         assert matches[0]["magnitude"] == 4.5, "should keep the highest-revision row (mag 4.5)"
 
+    @pytest.mark.asyncio
     async def test_cross_provider_dedup_merges(self, mongo, api):
         # Seed EMSC + USGS at essentially same lat/lon and same minute.
         base_time = (datetime.now(timezone.utc) - timedelta(minutes=15)).replace(
@@ -226,6 +228,7 @@ class TestDedup:
         assert "EMSC" in providers, f"providers missing EMSC: {providers}"
         assert "USGS" in providers, f"providers missing USGS: {providers}"
 
+    @pytest.mark.asyncio
     async def test_seeded_event_within_bbox(self, mongo, api):
         # Sanity: seed an event well inside the bbox, confirm it appears.
         base_time = datetime.now(timezone.utc) - timedelta(minutes=5)
@@ -236,6 +239,7 @@ class TestDedup:
         body = api.get(ENDPOINT, params={"window_hours": 1}).json()
         assert any(e.get("external_id") == eid for e in body["events"])
 
+    @pytest.mark.asyncio
     async def test_seeded_event_outside_bbox_excluded(self, mongo, api):
         # Seed an event OUTSIDE the Mediterranean bbox — must not appear.
         base_time = datetime.now(timezone.utc) - timedelta(minutes=5)
@@ -246,6 +250,7 @@ class TestDedup:
         body = api.get(ENDPOINT, params={"window_hours": 1}).json()
         assert not any(e.get("external_id") == eid for e in body["events"])
 
+    @pytest.mark.asyncio
     async def test_seeded_event_outside_window_excluded(self, mongo, api):
         # Seed an event 200h ago; querying with window_hours=1 must exclude it.
         base_time = datetime.now(timezone.utc) - timedelta(hours=200)

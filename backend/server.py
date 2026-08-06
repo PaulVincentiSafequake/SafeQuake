@@ -800,8 +800,15 @@ async def seismic_map_events(
     """
     # Clamp inputs. Silent clamp (not 400) — map is a passive read;
     # a bad query shouldn't blank the UI.
-    window_hours = max(1, min(int(window_hours or MAP_WINDOW_HOURS_DEFAULT), MAP_WINDOW_HOURS_MAX))
-    limit = max(1, min(int(limit or MAP_LIMIT_MAX), MAP_LIMIT_MAX))
+    # Explicit `is None` check instead of `x or DEFAULT` because 0 is a
+    # valid (if silly) integer input we want to clamp to the minimum,
+    # not silently swap for the default. Same reasoning for limit.
+    if window_hours is None:
+        window_hours = MAP_WINDOW_HOURS_DEFAULT
+    window_hours = max(1, min(int(window_hours), MAP_WINDOW_HOURS_MAX))
+    if limit is None:
+        limit = MAP_LIMIT_MAX
+    limit = max(1, min(int(limit), MAP_LIMIT_MAX))
 
     cutoff = datetime.now(timezone.utc) - timedelta(hours=window_hours)
 

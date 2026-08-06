@@ -1,0 +1,34 @@
+{
+  "summary": "Fixed test-file bug in /app/backend/tests/test_seismic_map.py where 5 TestDedup tests errored with 'sync test requested async fixture'. Root cause: pytest-asyncio 1.4.0 strict mode requires (1) async fixtures to use @pytest_asyncio.fixture (not @pytest.fixture) and (2) reliable per-method @pytest.mark.asyncio markers rather than class-level marker. All 21/21 tests now pass. No production code touched. Cleanup verified — 0 TEST_MAP_ rows remaining in emsc_events collection after suite completion.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_seismic_map.py",
+    "/app/test_reports/pytest/seismic_map_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "pytest-asyncio 1.4.0 strict mode: async fixtures MUST use @pytest_asyncio.fixture decorator; @pytest.fixture on an async generator silently degrades to 'sync test requested async fixture' setup errors.",
+    "Class-level @pytest.mark.asyncio marker was replaced with per-method markers for reliability in strict mode."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_seismic_map.py"
+  ],
+  "success_rate": {
+    "backend": "100% (21/21 tests passing)",
+    "frontend": "not tested (backend-only request)"
+  },
+  "seed_data_creation": "Ephemeral seeded rows prefixed 'TEST_MAP_' inserted per-test into emsc_events; deleted by mongo fixture teardown. Verified 0 residual rows post-run.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "test_seismic_map.py now runs cleanly at 21/21. The mongo async fixture uses @pytest_asyncio.fixture and each async TestDedup method carries its own @pytest.mark.asyncio marker (class-level marker did not propagate in pytest-asyncio 1.4.0 strict mode). If more async DB-seeding tests are added, follow the same pattern.",
+  "rca_of_issue": "Reproduction: pytest backend/tests/test_seismic_map.py → 5 ERRORs at setup of TestDedup.* with message 'requested an async fixture mongo, with no plugin or hook that handled it'. RCA: (a) The `mongo` fixture was declared with @pytest.fixture but is an async generator; under pytest-asyncio strict mode (v1.4.0), async fixtures must be declared via @pytest_asyncio.fixture, otherwise pytest sees it as a regular (sync) fixture that returns an async generator and refuses to inject it into sync tests. (b) The class-level @pytest.mark.asyncio marker on TestDedup was not being propagated to individual methods in strict mode, so pytest-asyncio treated the methods as sync. Mitigation applied: added `import pytest_asyncio`, changed `@pytest.fixture` → `@pytest_asyncio.fixture` on the mongo fixture, and added explicit `@pytest.mark.asyncio` on each of the 5 TestDedup async methods. Result: 21/21 pass in 1.57s; TEST_MAP_ cleanup verified."
+}
