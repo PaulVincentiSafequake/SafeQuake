@@ -34,6 +34,7 @@ from typing import List, Optional
 import httpx
 
 from .evaluator import ThresholdSet, evaluate_event_against_country
+from .intensity import compute_intensity_estimates, effective_mmi_for_tier_decision
 from .preview import dispatch_preview_if_needed
 from .providers import EMSCProvider, Provider, RawEvent, USGSProvider
 
@@ -281,6 +282,9 @@ class EMSCPoller:
             return False
 
         revision = (latest.get("revision") + 1) if latest else 0
+        # Evaluations + intensity computed together for efficiency
+        # (both need per-country distance; compute once, reuse).
+        evaluations, intensity_estimates = _evaluate_all_countries(ev, configs)
         doc = {
             "provider": ev.provider,
             "external_id": ev.external_id,
@@ -296,7 +300,8 @@ class EMSCPoller:
             "shadow_mode": True,           # Phase 1 invariant
             "fired": False,                # Phase 1 invariant
             "raw": ev.raw,
-            "evaluations": _evaluate_all_countries(ev, configs),
+            "evaluations": evaluations,
+            "intensity_estimates": intensity_estimates,
         }
         await self.db.emsc_events.insert_one(doc)
 
@@ -388,18 +393,36 @@ def _same_content(stored: dict, ev: RawEvent) -> bool:
     )
 
 
-def _evaluate_all_countries(ev: RawEvent, configs: List[dict]) -> List[dict]:
+def _evaluate_all_countries(ev: RawEvent, configs: List[dict]) -> tuple[List[dict], dict]:
     """For every country_config, run the event through every threshold_set
-    and return one flat list of evaluation dicts. Embedded into the
-    emsc_events document alongside the raw event.
+    and return one flat list of evaluation dicts, PLUS the country-scoped
+    intensity_estimates block for embedding into the event doc.
+
+    Returns (evaluations_list, intensity_estimates_dict).
+
+    Part 1a addition (2026-08-06): each event also picks up
+    `intensity_estimates.at_<country_code>_center` computed via
+    emsc/intensity.py, and three additional intensity-based
+    threshold_sets are evaluated alongside the existing magnitude ones.
+    Magnitude sets keep running in parallel — the Day-14 comparison
+    against EMSC testimony ground-truth is the whole point.
     """
-    out: List[dict] = []
+    out_evaluations: List[dict] = []
+    out_intensity: dict = {}
+
     for cfg in configs:
         center = cfg.get("center") or {}
         c_lat = center.get("lat")
         c_lon = center.get("lon")
         if c_lat is None or c_lon is None:
             continue
+
+        # Distance (used both by magnitude threshold_sets and by the
+        # intensity computation below).
+        from .evaluator import haversine_km
+        distance_km = haversine_km(ev.latitude, ev.longitude, c_lat, c_lon)
+
+        # Magnitude-based threshold_sets (unchanged from Phase 1).
         threshold_sets = [
             ThresholdSet(
                 name=ts.get("name", "unnamed"),
@@ -410,27 +433,90 @@ def _evaluate_all_countries(ev: RawEvent, configs: List[dict]) -> List[dict]:
             )
             for ts in (cfg.get("threshold_sets") or [])
         ]
-        if not threshold_sets:
-            continue
-        evals = evaluate_event_against_country(
-            magnitude=ev.magnitude,
-            latitude=ev.latitude,
-            longitude=ev.longitude,
-            depth_km=ev.depth_km,
+        if threshold_sets:
+            evals = evaluate_event_against_country(
+                magnitude=ev.magnitude,
+                latitude=ev.latitude,
+                longitude=ev.longitude,
+                depth_km=ev.depth_km,
+                country_center_lat=c_lat,
+                country_center_lon=c_lon,
+                country_code=cfg.get("country_code", "??"),
+                threshold_sets=threshold_sets,
+            )
+            for e in evals:
+                out_evaluations.append({
+                    "country_code": e.country_code,
+                    "threshold_set": e.threshold_set,
+                    "distance_km": e.distance_km,
+                    "severity_score": e.severity_score,
+                    "matched": e.matched,
+                    "would_have_fired": e.would_have_fired,
+                    "reason": e.reason,
+                    "thresholds_snapshot": e.thresholds_snapshot,
+                })
+
+        # Intensity computation (Part 1a).
+        intensity = compute_intensity_estimates(
+            event_magnitude=ev.magnitude,
+            event_lat=ev.latitude,
+            event_lon=ev.longitude,
+            event_depth_km=ev.depth_km,
             country_center_lat=c_lat,
             country_center_lon=c_lon,
-            country_code=cfg.get("country_code", "??"),
-            threshold_sets=threshold_sets,
+            distance_km=distance_km,
+            raw_provider_payload=ev.raw,
         )
-        for e in evals:
-            out.append({
-                "country_code": e.country_code,
-                "threshold_set": e.threshold_set,
-                "distance_km": e.distance_km,
-                "severity_score": e.severity_score,
-                "matched": e.matched,
-                "would_have_fired": e.would_have_fired,
-                "reason": e.reason,
-                "thresholds_snapshot": e.thresholds_snapshot,
+        # Placeholder for the testimonies sweeper — populated later.
+        intensity["from_emsc_testimonies_placeholder"] = None
+        cc = cfg.get("country_code", "??")
+        out_intensity[f"at_{cc}_center"] = intensity
+        out_intensity["from_emsc_testimonies"] = {
+            "max_intensity": None, "report_count": 0, "last_updated": None,
+        }
+
+        # Intensity-based threshold_sets (Part 1a). Fixed thresholds
+        # derived from the tier definitions locked 2026-08-06:
+        #   informational  MMI III+ (III–IV band)
+        #   standard       MMI V+
+        #   critical       MMI VI+   (siren tier)
+        effective_mmi = effective_mmi_for_tier_decision(intensity)
+        for tier_name, threshold in [
+            ("intensity_informational", 3.0),
+            ("intensity_standard",      5.0),
+            ("intensity_critical",      6.0),
+        ]:
+            matched = effective_mmi is not None and effective_mmi >= threshold
+            reason = None
+            if effective_mmi is None:
+                reason = "no_intensity_signal_available"
+            elif not matched:
+                reason = f"effective_mmi {effective_mmi:.2f} < {threshold}"
+            out_evaluations.append({
+                "country_code": cc,
+                "threshold_set": tier_name,
+                "distance_km": round(distance_km, 2),
+                "effective_mmi": effective_mmi,
+                "mmi_source": _mmi_source(intensity),
+                "matched": bool(matched),
+                "would_have_fired": bool(matched),
+                "reason": reason,
+                "thresholds_snapshot": {
+                    "min_effective_mmi": threshold,
+                    "gmpe_used": intensity.get("gmpe_used"),
+                },
             })
-    return out
+
+    return out_evaluations, out_intensity
+
+
+def _mmi_source(intensity: dict) -> str:
+    """Which of the three intensity sources was used for the tier decision.
+    Recorded on every intensity evaluation so Day-14 analysis can separate
+    "USGS-derived accuracy" from "GMPE-derived accuracy" — different
+    questions, must not be blended."""
+    if intensity.get("mmi_from_usgs") is not None:
+        return "usgs_mmi"
+    if intensity.get("cdi_from_usgs") is not None:
+        return "usgs_cdi"
+    return "gmpe_predicted_upper_band"

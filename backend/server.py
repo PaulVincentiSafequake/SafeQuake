@@ -36,6 +36,7 @@ from apns import (
 # to emsc_events for a 1-2 week soak.
 from emsc.poller import EMSCPoller
 from emsc.seed import seed_country_configs
+from emsc.testimonies import TestimoniesSweeper
 
 # Auth module — per-user Google sign-in (task #9, 2026-08-04).
 # Handles: Google ID token verification, JWT issuance/decoding, request-time
@@ -139,6 +140,14 @@ api_router = APIRouter(prefix="/api")
 # emsc/) so the poller subpackage stays transport-agnostic and testable
 # in isolation.
 emsc_poller = EMSCPoller(db, apns_send_preview=send_preview_alerts)
+
+# EMSC testimonies sweeper — Part 1a validation channel. Every 15 min,
+# fetches EMS-98 felt-report intensities for recent events and updates
+# `intensity_estimates.from_emsc_testimonies` in place. Separate task
+# from the poller because of the different cadence (15min vs 60sec)
+# and the different failure semantics — testimonies data being late
+# by hours is fine; missing a poll is not.
+emsc_testimonies = TestimoniesSweeper(db)
 
 # ---------- Legacy status-check demo endpoints ----------
 class StatusCheck(BaseModel):
@@ -2548,7 +2557,12 @@ async def emsc_reset_soak_clock(body: ResetSoakBody, request: Request):
 # EMSC/USGS events. See emsc/preview.py for the design write-up and the
 # non-negotiable constraints. All endpoints require admin role.
 
-VALID_PREVIEW_TIERS = {"all_ingested", "quiet_tier", "critical_tier", "neo_original"}
+VALID_PREVIEW_TIERS = {
+    "all_ingested", "quiet_tier", "critical_tier", "neo_original",
+    # Part 1a intensity tiers (2026-08-06). Once soak data confirms
+    # these calibrate correctly, they become the production alert tiers.
+    "intensity_informational", "intensity_standard", "intensity_critical",
+}
 
 
 @api_router.get("/admin/emsc/preview/config")
@@ -2869,6 +2883,10 @@ async def start_emsc_poller():
         await emsc_poller.start()
     except Exception as e:
         logger.warning("EMSC poller start failed: %s", e)
+    try:
+        await emsc_testimonies.start()
+    except Exception as e:
+        logger.warning("EMSC testimonies sweeper start failed: %s", e)
 
 
 @app.on_event("shutdown")
@@ -2877,6 +2895,10 @@ async def shutdown_db_client():
         await emsc_poller.stop()
     except Exception as e:
         logger.warning("EMSC poller stop failed: %s", e)
+    try:
+        await emsc_testimonies.stop()
+    except Exception as e:
+        logger.warning("EMSC testimonies sweeper stop failed: %s", e)
     client.close()
     await _push_client.aclose()
     await apns_aclose()

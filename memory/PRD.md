@@ -199,7 +199,25 @@ Rationale: Paul is the operator, not a developer. Assuming there's a developer b
   - `POST /api/admin/emsc/reset-soak-clock` — admin-only, `confirm: true` required, `reason` required (audit trail).
 - **Contract:** any tuning decision on day 14 requires reading `/continuity` first and confirming `coverage_pct` is acceptable. "We polled for 14 days" is dishonest if coverage_pct is 60%.
 
-## Bug fixes 2026-08-06 — preview-tap siren + hardcoded alert values
+## Bug fixes 2026-08-06 — preview-tap siren + hardcoded alert values + worldwide-preview
+
+### BUG-2026-08-06-preview-worldwide (feature-sinking)
+
+**Symptom:** A preview notification landed on Paul's phone for an event **10,834 km WSW of Malta** (M3.2, Pacific). Malta config specifies `poll_radius_km: 600` and the dashboard tier dropdown labels `all_ingested` as "All ingested events (M2.5+, ≤600km)". Neither was being honoured.
+
+**Root cause:** `should_send_preview()` had a short-circuit for `all_ingested` that returned `True` unconditionally, bypassing the evaluator entirely. Since the poller ingests worldwide M2.5+ feeds, `all_ingested` literally meant "every event on Earth". The narrower tiers (`quiet_tier`, `critical_tier`) happened to be safe because their `threshold_sets` enforced `max_distance_km` internally.
+
+**Fix:**
+1. `should_send_preview()` now takes `distance_km` and `poll_radius_km` as arguments. A HARD radius gate applies to EVERY tier including `all_ingested` — an event beyond `poll_radius_km` never fires a preview, regardless of tier.
+2. Radius gate is checked BEFORE the tier logic so no threshold_set can bypass it.
+3. Distance is computed once at dispatch time (from evaluations, falling back to haversine on event coords) and passed to both the gate and the notification body formatter.
+4. Every skipped dispatch now writes an audit row to `emsc_preview_notifications` with the specific `skipped_reason` (`beyond_country_radius (10834km > 600km)`, `tier_did_not_match (quiet_tier)`, etc.) — so Day-14 review can spot false negatives, not just false positives.
+5. Return type changed to `(bool, Optional[str])` — reason string surfaced everywhere for audit clarity.
+
+**Contract locked:** the tier controls sensitivity WITHIN the region. It never controls whether the region applies at all. Every future preview-related tier must pass through the radius gate.
+
+**Also fixed same session — F-M 2010 anelastic attenuation term:**
+Original coding of Faenza-Michelini 2010 IPE omitted the `-0.00189*R_hypo` anelastic-attenuation term. That made the equation systematically over-predict at long distances (M6@400km returning MMI 8.4 instead of ~6.8). Added the term. The formula still runs somewhat hot at close range (M6.5@20km returns 10.5 vs empirical 7-8) — this is a KNOWN limitation of all short-form IPEs, and it's DELIBERATELY OK given the asymmetric-cost bias. Day-14 comparison against EMSC testimonies will quantify the offset and we can calibrate down (never up).
 
 ### BUG-2026-08-06-preview-tap-siren (safety-critical)
 

@@ -98,25 +98,45 @@ def should_send_preview(
     evaluations: List[dict],
     country_code: str,
     trigger_tier: str,
-) -> bool:
-    """Given the event's evaluations list and a country's configured
-    trigger_tier, return True iff a preview notification should fire.
+    distance_km: Optional[float],
+    poll_radius_km: Optional[float],
+) -> tuple[bool, Optional[str]]:
+    """Given the event's evaluations list, a country's configured
+    trigger_tier, the event's distance from country center, and the
+    country's radius cap, return (should_fire, skip_reason).
+
+    Hard radius gate (fix for BUG-2026-08-06-preview-worldwide):
+    Every tier — INCLUDING all_ingested — MUST honour the country's
+    poll_radius_km. An event 10,834km away must never generate a Malta
+    preview under any setting. The tier controls sensitivity WITHIN the
+    region, never whether the region applies at all.
 
     Rules:
-      - `all_ingested`: fire for any event that got stored (i.e., any event
-        the poll cutoffs let through). We return True unconditionally.
-      - `quiet_tier` / `critical_tier` / any threshold_set name: fire only
-        if the evaluation for THIS country and THAT tier has would_have_fired=True.
-      - Unknown tier name: log warning, return False (safe default).
+      - Beyond `poll_radius_km` → skip regardless of tier.
+      - `all_ingested`: fire for every event inside the radius.
+      - Named threshold_set: fire only if evaluation for THIS country
+        and THAT tier has would_have_fired=True (evaluator already
+        applied its own tighter distance cap inside the radius).
+      - Unknown tier: skip (safe default).
+
+    Returns (True, None) if we should fire, (False, reason_string) if not.
+    reason_string is stored on the skip row in emsc_preview_notifications
+    so operators can audit why previews didn't fire.
     """
+    # Hard radius gate — applies to ALL tiers.
+    if poll_radius_km is not None and distance_km is not None and distance_km > poll_radius_km:
+        return False, f"beyond_country_radius ({distance_km:.0f}km > {poll_radius_km:.0f}km)"
+
     if trigger_tier == "all_ingested":
-        return True
+        return True, None
+
     for e in evaluations or []:
         if (e.get("country_code") == country_code and
             e.get("threshold_set") == trigger_tier and
             e.get("would_have_fired") is True):
-            return True
-    return False
+            return True, None
+
+    return False, f"tier_did_not_match ({trigger_tier})"
 
 
 # ── Rate limiting ────────────────────────────────────────────────────────
@@ -161,12 +181,59 @@ async def dispatch_preview_if_needed(
     trigger_tier = preview_cfg.get("trigger_tier") or "all_ingested"
     country_code = country_config.get("country_code")
 
-    # Evaluate whether the tier's rule matched for THIS event.
-    if not should_send_preview(
+    # Compute distance from event to country center — needed by the
+    # radius gate below, and by the notification body formatter later.
+    # Preferred: read from an evaluation for this country (already
+    # computed by the evaluator). Fallback: recompute from event coords.
+    distance_km: Optional[float] = None
+    for ev in emsc_event.get("evaluations") or []:
+        if ev.get("country_code") == country_code and ev.get("distance_km") is not None:
+            distance_km = ev.get("distance_km")
+            break
+    if distance_km is None:
+        # Recompute — this covers the edge case where an event has no
+        # evaluations at all (e.g., no threshold_sets configured for the
+        # country). We still want the radius gate to work.
+        country_center = country_config.get("center") or {}
+        c_lat = country_center.get("lat")
+        c_lon = country_center.get("lon")
+        e_lat = emsc_event.get("latitude")
+        e_lon = emsc_event.get("longitude")
+        if c_lat is not None and c_lon is not None and e_lat is not None and e_lon is not None:
+            from .evaluator import haversine_km
+            distance_km = haversine_km(e_lat, e_lon, c_lat, c_lon)
+
+    poll_radius_km = country_config.get("poll_radius_km")
+
+    # Evaluate whether the tier's rule matched — INCLUDING the hard
+    # radius gate that applies to every tier, all_ingested included.
+    # Fix for BUG-2026-08-06-preview-worldwide: previously all_ingested
+    # returned True unconditionally, so worldwide events (10,000+km
+    # away) generated Malta previews.
+    should_fire, skip_reason = should_send_preview(
         evaluations=emsc_event.get("evaluations") or [],
         country_code=country_code,
         trigger_tier=trigger_tier,
-    ):
+        distance_km=distance_km,
+        poll_radius_km=poll_radius_km,
+    )
+    if not should_fire:
+        # Log every skip so operators can audit "why didn't I get it"
+        # and — critically — spot false negatives during Day-14 review.
+        # A distant-event skip is expected; a near-event skip would be a bug.
+        await db.emsc_preview_notifications.insert_one({
+            "sent_at": datetime.now(timezone.utc),
+            "device_id": None,
+            "delivered": False,
+            "skipped_reason": skip_reason,
+            "emsc_event_ref": {"provider": emsc_event.get("provider"),
+                               "external_id": emsc_event.get("external_id"),
+                               "revision": emsc_event.get("revision"),
+                               "magnitude": emsc_event.get("magnitude"),
+                               "distance_km": distance_km},
+            "country_code": country_code,
+            "trigger_tier": trigger_tier,
+        })
         return None
 
     now = datetime.now(timezone.utc)
@@ -201,17 +268,11 @@ async def dispatch_preview_if_needed(
         })
         return {"attempted": 0, "reason": "no_matching_devices"}
 
-    # Compute the direction/distance chunk. We use the first matching
-    # evaluation for this country to get an authoritative distance number.
+    # Bearing for the notification body. distance_km was already
+    # computed above for the radius gate — reuse it.
     country_center = country_config.get("center") or {}
     c_lat = country_center.get("lat")
     c_lon = country_center.get("lon")
-    distance_km = None
-    for ev in emsc_event.get("evaluations") or []:
-        if ev.get("country_code") == country_code:
-            distance_km = ev.get("distance_km")
-            break
-
     bearing = None
     if c_lat is not None and c_lon is not None:
         bearing = bearing_deg(
