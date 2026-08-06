@@ -151,6 +151,15 @@ before any live firing.
 - Firing pushes based on `would_have_fired` — gated by manual flip of
   `country_configs.shadow_mode: false` after soak analysis
 
+### Continuity tracking (landed 2026-08-06 after 18h gap incident)
+- **What went wrong:** initial Phase 1 landing had no persistent continuity check. Credit exhaustion suspended the pod for ~18h; on resume the poller restarted but the `poller_started_at` field got overwritten with the current-process start time. `total_polls` counter also reset (Mongo persistence quirk under pod suspension). No way to distinguish "quiet period" from "was dead" — would have contaminated threshold-tuning on day 14.
+- **What was added:**
+  - `emsc_soak_meta` singleton with authoritative `soak_started_at`. Only reset by explicit admin action; survives all restarts.
+  - `emsc_poller_gaps` collection. On poller startup, compare persisted `last_success_at` (per provider) to `now`. Any gap ≥3× poll interval writes a row: `{provider, gap_start, gap_end, gap_seconds, detected_at, detection_reason}`. Unique index on (provider, gap_start) prevents duplicates.
+  - `GET /api/admin/emsc/continuity` — soak_started_at, wall_seconds, dead_seconds, **coverage_pct**, gap list, reset_history. THIS is the number to quote when claiming "we've soaked for N days".
+  - `POST /api/admin/emsc/reset-soak-clock` — admin-only, `confirm: true` required, `reason` required (audit trail).
+- **Contract:** any tuning decision on day 14 requires reading `/continuity` first and confirming `coverage_pct` is acceptable. "We polled for 14 days" is dishonest if coverage_pct is 60%.
+
 ## Task #9 — Per-user Google sign-in (landed 2026-08-05)
 
 Replaces the shared `X-Admin-Token` shared-secret with per-user identities

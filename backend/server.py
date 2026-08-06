@@ -2365,6 +2365,157 @@ async def emsc_get_config(country_code: str, request: Request):
     return _serialize_country_config(doc)
 
 
+@api_router.get("/admin/emsc/continuity")
+async def emsc_continuity(request: Request):
+    """Authoritative soak-continuity report.
+
+    Answers: how much of the claimed soak wall-time did the poller
+    ACTUALLY run for? Without this, silent gaps (pod suspension,
+    credit exhaustion, deploy pauses) hide inside `total_polls` and
+    contaminate the threshold-tuning data at the end of soak.
+
+    Returns:
+      - soak_started_at: authoritative start (only resets on explicit admin action)
+      - wall_seconds: seconds elapsed since soak_started_at
+      - dead_seconds: total across all recorded gaps
+      - coverage_pct: 100 * (wall_seconds - dead_seconds) / wall_seconds
+      - gaps: list of recorded gap rows, newest first
+      - reset_history: audit trail of every deliberate soak-clock reset
+    """
+    principal = await resolve_principal(
+        request,
+        request.headers.get("x-admin-token"),
+        ADMIN_TRIGGER_PASSWORD,
+        db,
+    )
+    require_role(principal, "admin", "operator")
+
+    meta = await db.emsc_soak_meta.find_one({"_id": "singleton"})
+    if not meta:
+        # Should have been created on startup. If missing (e.g., admin
+        # reset while poller down), return an honest empty state.
+        return {
+            "soak_started_at": None,
+            "wall_seconds": 0,
+            "dead_seconds": 0,
+            "coverage_pct": None,
+            "gaps": [],
+            "reset_history": [],
+            "warning": "emsc_soak_meta not initialized — no active soak clock",
+        }
+
+    soak_start = meta.get("soak_started_at")
+    if isinstance(soak_start, datetime) and soak_start.tzinfo is None:
+        soak_start = soak_start.replace(tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
+    wall_seconds = int((now - soak_start).total_seconds()) if soak_start else 0
+
+    # Gaps recorded since soak_started_at only. Older gaps (pre-reset)
+    # are historical, kept in the collection but not counted against
+    # the current soak's coverage percentage.
+    gap_rows = await db.emsc_poller_gaps.find(
+        {"gap_end": {"$gte": soak_start}} if soak_start else {},
+    ).sort("gap_end", -1).to_list(200)
+
+    # Dead time is the union of per-provider gaps, but for Phase 1 we
+    # simply sum: a gap in one provider IS soak-relevant even if the
+    # other kept polling — evaluation depends on BOTH feeds. If we
+    # later want the more forgiving "at least one provider was alive"
+    # interpretation we can refine here.
+    dead_seconds = sum(int(g.get("gap_seconds") or 0) for g in gap_rows)
+    coverage_pct = None
+    if wall_seconds > 0:
+        coverage_pct = round(100.0 * max(0, wall_seconds - dead_seconds) / wall_seconds, 2)
+
+    return {
+        "soak_started_at": _iso(soak_start),
+        "checked_at": now.isoformat(),
+        "wall_seconds": wall_seconds,
+        "wall_hours": round(wall_seconds / 3600.0, 2),
+        "dead_seconds": dead_seconds,
+        "dead_hours": round(dead_seconds / 3600.0, 2),
+        "coverage_pct": coverage_pct,
+        "gap_count": len(gap_rows),
+        "gaps": [
+            {
+                "provider": g.get("provider"),
+                "gap_start": _iso(g.get("gap_start")),
+                "gap_end": _iso(g.get("gap_end")),
+                "gap_seconds": g.get("gap_seconds"),
+                "gap_hours": round((g.get("gap_seconds") or 0) / 3600.0, 2),
+                "detection_reason": g.get("detection_reason"),
+            }
+            for g in gap_rows
+        ],
+        "reset_history": [
+            {
+                "at": _iso(r.get("at")),
+                "by": r.get("by"),
+                "previous_soak_started_at": _iso(r.get("previous_soak_started_at")),
+                "reason": r.get("reason"),
+            }
+            for r in (meta.get("reset_history") or [])
+        ],
+    }
+
+
+class ResetSoakBody(BaseModel):
+    reason: str = Field(..., min_length=3, max_length=500)
+    confirm: bool = Field(..., description="Must be true to proceed — safety rail.")
+
+
+@api_router.post("/admin/emsc/reset-soak-clock")
+async def emsc_reset_soak_clock(body: ResetSoakBody, request: Request):
+    """Reset the authoritative soak_started_at to now.
+
+    Use ONLY when a genuine break in soak continuity means the previous
+    clock is untrustworthy (e.g., 18-hour pod suspension during credit
+    exhaustion). This is a deliberate destructive-ish action — the
+    previous soak_started_at is preserved in reset_history so the
+    action is auditable, but the effective clock everyone quotes from
+    that point on starts from `now`.
+
+    Admin-only. Requires an explicit `confirm: true` payload to prevent
+    accidental resets via a partially-crafted request.
+    """
+    principal = await resolve_principal(
+        request,
+        request.headers.get("x-admin-token"),
+        ADMIN_TRIGGER_PASSWORD,
+        db,
+    )
+    require_role(principal, "admin")
+    if not body.confirm:
+        raise HTTPException(400, "confirm must be true to reset the soak clock")
+
+    now = datetime.now(timezone.utc)
+    prev = await db.emsc_soak_meta.find_one({"_id": "singleton"})
+    prev_started = prev.get("soak_started_at") if prev else None
+
+    reset_entry = {
+        "at": now,
+        "by": principal.get("email", "unknown"),
+        "previous_soak_started_at": prev_started,
+        "reason": body.reason,
+    }
+    await db.emsc_soak_meta.update_one(
+        {"_id": "singleton"},
+        {
+            "$set": {"soak_started_at": now},
+            "$push": {"reset_history": reset_entry},
+            "$setOnInsert": {"created_at": now},
+        },
+        upsert=True,
+    )
+    return {
+        "ok": True,
+        "new_soak_started_at": now.isoformat(),
+        "previous_soak_started_at": _iso(prev_started),
+        "reset_by": principal.get("email"),
+        "reason": body.reason,
+    }
+
+
 def _iso(v):
     if not v:
         return None
@@ -2431,9 +2582,18 @@ async def bootstrap_users_and_indexes():
     can't be silently re-enabled by a redeploy.
     """
     try:
-        # Idempotent index creation. sparse=true on google_sub so pre-linked
-        # allowlist entries (email-only, no google_sub yet) don't collide.
-        await db.users.create_index("google_sub", unique=True, sparse=True)
+        # Idempotent index creation.
+        # partialFilterExpression (NOT sparse) so pre-linked allowlist
+        # entries (email-only, google_sub=null) don't violate uniqueness
+        # against each other. `sparse` only excludes MISSING fields,
+        # not explicit-null values — a footgun the original code hit
+        # when adding a second operator.
+        await db.users.create_index(
+            "google_sub",
+            unique=True,
+            partialFilterExpression={"google_sub": {"$type": "string"}},
+            name="google_sub_unique_when_set",
+        )
         await db.users.create_index("email_normalized", unique=True)
     except Exception as e:
         logger.warning("users index creation failed: %s", e)

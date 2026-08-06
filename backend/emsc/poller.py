@@ -80,11 +80,92 @@ class EMSCPoller:
             )
             await self.db.emsc_events.create_index("ingested_at")
             await self.db.emsc_events.create_index("observed_at")
+            await self.db.emsc_poller_gaps.create_index("provider")
+            await self.db.emsc_poller_gaps.create_index("gap_end")
         except Exception as e:
             log.warning("emsc_events index creation failed: %s", e)
 
+        # Continuity check — if the persisted `last_success_at` for a
+        # provider is more than 3× poll interval old, we were dead for
+        # that gap. Record it in emsc_poller_gaps so continuity is
+        # queryable AFTER the fact. Without this, silent gaps (pod
+        # suspension, credit exhaustion, deploy pauses) look identical
+        # to "genuinely quiet seismic period" and destroy soak-data
+        # trustworthiness.
+        try:
+            await self._detect_and_record_gaps_on_startup()
+        except Exception as e:
+            log.warning("startup gap detection failed: %s", e)
+
+        # Ensure a soak_meta document exists so /continuity can report
+        # authoritative soak_started_at. Never overwrites an existing
+        # value — reset is a deliberate admin action, not a startup
+        # side effect.
+        try:
+            await self.db.emsc_soak_meta.update_one(
+                {"_id": "singleton"},
+                {"$setOnInsert": {
+                    "soak_started_at": datetime.now(timezone.utc),
+                    "created_at": datetime.now(timezone.utc),
+                    "reset_history": [],
+                }},
+                upsert=True,
+            )
+        except Exception as e:
+            log.warning("emsc_soak_meta initialization failed: %s", e)
+
         self.task = asyncio.create_task(self._run(), name="emsc_poller")
         log.info("EMSC poller started (%s providers, %ss interval)", len(self.providers), POLL_INTERVAL_SEC)
+
+    async def _detect_and_record_gaps_on_startup(self) -> None:
+        """For each provider, if the last_success_at persisted from a
+        previous run is more than GAP_THRESHOLD_SEC old, log a gap.
+        Called once per start(). Idempotent — a gap that overlaps an
+        existing recorded gap is deduped by (provider, gap_start)."""
+        now = datetime.now(timezone.utc)
+        gap_threshold_sec = POLL_INTERVAL_SEC * 3   # 3 minutes @ 60s cadence
+
+        try:
+            await self.db.emsc_poller_gaps.create_index(
+                [("provider", 1), ("gap_start", 1)],
+                unique=True,
+            )
+        except Exception:
+            pass
+
+        for provider in self.providers:
+            row = await self.db.emsc_poller_health.find_one({"_id": provider.name})
+            if not row:
+                continue
+            last = row.get("last_success_at")
+            if not last:
+                continue
+            if isinstance(last, datetime) and last.tzinfo is None:
+                last = last.replace(tzinfo=timezone.utc)
+            gap_sec = (now - last).total_seconds()
+            if gap_sec < gap_threshold_sec:
+                continue
+
+            gap_doc = {
+                "provider": provider.name,
+                "gap_start": last,
+                "gap_end": now,
+                "gap_seconds": int(gap_sec),
+                "detected_at": now,
+                "detection_reason": "startup_continuity_check",
+                "poll_interval_sec": POLL_INTERVAL_SEC,
+            }
+            try:
+                await self.db.emsc_poller_gaps.insert_one(gap_doc)
+                log.warning(
+                    "EMSC continuity gap detected for %s: %d seconds (%.1f hours) — "
+                    "gap_start=%s gap_end=%s",
+                    provider.name, int(gap_sec), gap_sec / 3600, last, now,
+                )
+            except Exception as e:
+                # Duplicate-key means this gap is already logged — fine.
+                if "duplicate key" not in str(e).lower():
+                    log.warning("gap insert failed for %s: %s", provider.name, e)
 
     async def stop(self) -> None:
         if self.task:
