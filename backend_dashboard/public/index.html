@@ -20,6 +20,15 @@
     font-family: -apple-system, "Segoe UI", Arial, sans-serif;
     background: var(--bg);
     color: #222;
+    /* Flex column so the map fills whatever vertical space is left after
+       the sign-in bar, preview panel, trigger button and header — rather
+       than assuming a fixed offset. The old calc(100vh - 60px) on .layout
+       was written when the header was the ONLY thing above the map; every
+       control added since pushed the page taller than the viewport and
+       scrolled the sign-in bar and trigger button off the top. */
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
   }
   header {
     background: linear-gradient(135deg, #1c2b36 0%, #23384a 55%, #1a2a35 100%);
@@ -42,7 +51,9 @@
   }
   header h1 { font-size: 18px; margin: 0; font-weight: 700; letter-spacing: .2px; }
   header p { margin: 2px 0 0; font-size: 12px; color: #b7c2cc; }
-  .layout { display: flex; height: calc(100vh - 60px); flex-wrap: wrap; }
+  /* flex:1 makes the map/sidebar row absorb the remaining height, so the
+     controls above it always stay on screen no matter how many we add. */
+  .layout { display: flex; flex: 1 1 auto; min-height: 420px; flex-wrap: wrap; }
   #map-wrap { position: relative; flex: 1 1 60%; min-height: 400px; }
   #map { position: absolute; inset: 0; }
   .map-filters {
@@ -229,7 +240,9 @@
   @media (max-width: 820px) {
     .layout {
       display: block;
+      flex: 0 0 auto;
       height: auto;
+      min-height: 0;
     }
     #map-wrap {
       height: 50vh;
