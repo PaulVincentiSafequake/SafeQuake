@@ -1,0 +1,364 @@
+<!-- ═════════════════════════════════════════════════════════════════════
+     Quake Angel — Preview Mode dashboard panel (admin-only)
+     ═════════════════════════════════════════════════════════════════════
+     Paste this snippet ONCE inside the dashboard's <body>, AFTER
+     dashboard-auth.snippet.html has loaded (this panel calls qaApi + qaAuth).
+
+     What it does:
+       - Admin-only card that surfaces the current EMSC preview_mode config
+         for Malta (enabled/disabled, tier, rate limit, allowlisted devices).
+       - Lists recent iOS device registrations so Paul can identify HIS
+         phone (by most-recent check-in metadata) and enrol it in one
+         click — no typing device IDs, no curl commands, no reading them
+         off the mobile app's diag screen.
+       - Trigger-tier dropdown, rate-limit input.
+       - Big red PANIC KILL button that disables preview mode everywhere.
+       - Recent preview-notification log (last 20) so the volume is
+         honestly visible before it becomes annoying.
+
+     Not built here:
+       - Multi-country support (only Malta today).
+       - Live activity graph (deferred until we have enough soak data
+         to make one useful).
+
+     Why the UI, not a curl:
+       Every activation step being "here's a curl command, run it on your
+       laptop" assumes there's a developer between the owner and the
+       product. There isn't. Everything an admin needs to do in ongoing
+       operations should be a click. This is the first of several such
+       panels — user management, subscription monitoring, and audit
+       export will follow the same pattern.
+     ═════════════════════════════════════════════════════════════════════ -->
+
+<div id="qa-preview-panel" style="display:none;"></div>
+
+<script>
+(function () {
+  "use strict";
+
+  // ── Config ───────────────────────────────────────────────────────────
+  const COUNTRY = "MT";
+  const CONTAINER_ID = "qa-preview-panel";
+  const TIERS = [
+    {value: "all_ingested",  label: "All ingested events (M2.5+, ≤600km)"},
+    {value: "quiet_tier",    label: "Quiet tier (M3.0+, ≤100km, sev ≥2.0)"},
+    {value: "critical_tier", label: "Critical tier (M5.0+, ≤300km, sev ≥4.0)"},
+    {value: "neo_original",  label: "Neo original (M4.0+, ≤300km, sev ≥3.0)"},
+  ];
+
+  const container = document.getElementById(CONTAINER_ID);
+  if (!container) return;
+
+  // ── Styles ───────────────────────────────────────────────────────────
+  const CSS = `
+    #${CONTAINER_ID} {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      max-width: 900px; margin: 16px auto; padding: 20px;
+      background: #fff; border: 1px solid #e5e5e5; border-radius: 12px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+    }
+    #${CONTAINER_ID}.show { display: block; }
+    #${CONTAINER_ID} h2 {
+      margin: 0 0 4px; font-size: 18px; font-weight: 800; color: #222;
+      display: flex; align-items: center; gap: 8px;
+    }
+    #${CONTAINER_ID} h2 .qa-pv-badge {
+      font-size: 10px; padding: 3px 8px; border-radius: 999px;
+      background: #fee; color: #a11; font-weight: 700; letter-spacing: 1px;
+    }
+    #${CONTAINER_ID} h2 .qa-pv-badge.on { background: #e0f3e5; color: #1F8A3A; }
+    #${CONTAINER_ID} .qa-pv-sub { font-size: 12px; color: #666; margin-bottom: 16px; }
+    #${CONTAINER_ID} .qa-pv-grid {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 12px;
+    }
+    #${CONTAINER_ID} .qa-pv-card {
+      padding: 12px; background: #fafafa; border: 1px solid #eaeaea; border-radius: 8px;
+    }
+    #${CONTAINER_ID} .qa-pv-card h3 {
+      margin: 0 0 8px; font-size: 13px; font-weight: 700; color: #333;
+      text-transform: uppercase; letter-spacing: 0.5px;
+    }
+    #${CONTAINER_ID} .qa-pv-row { display: flex; align-items: center; gap: 8px; padding: 6px 0; font-size: 13px; }
+    #${CONTAINER_ID} .qa-pv-row + .qa-pv-row { border-top: 1px solid #eee; }
+    #${CONTAINER_ID} .qa-pv-row code { font-family: SFMono-Regular, Menlo, monospace; font-size: 11px; color: #444; background: #eee; padding: 2px 6px; border-radius: 4px; }
+    #${CONTAINER_ID} .qa-pv-row .qa-pv-meta { color: #777; font-size: 11px; }
+    #${CONTAINER_ID} .qa-pv-row button { margin-left: auto; }
+    #${CONTAINER_ID} button {
+      padding: 8px 14px; border-radius: 8px; border: 0; cursor: pointer;
+      font-size: 13px; font-weight: 700;
+    }
+    #${CONTAINER_ID} .qa-pv-btn-add { background: #1F8A3A; color: #fff; }
+    #${CONTAINER_ID} .qa-pv-btn-remove { background: #eee; color: #333; }
+    #${CONTAINER_ID} .qa-pv-btn-primary { background: #1877E7; color: #fff; padding: 10px 18px; }
+    #${CONTAINER_ID} .qa-pv-btn-kill { background: #C11414; color: #fff; padding: 10px 18px; }
+    #${CONTAINER_ID} .qa-pv-btn-primary:disabled, #${CONTAINER_ID} .qa-pv-btn-add:disabled { opacity: 0.5; cursor: not-allowed; }
+    #${CONTAINER_ID} .qa-pv-controls { display: flex; align-items: center; gap: 12px; margin-top: 16px; flex-wrap: wrap; }
+    #${CONTAINER_ID} .qa-pv-controls label { font-size: 13px; color: #333; font-weight: 600; }
+    #${CONTAINER_ID} .qa-pv-controls select, #${CONTAINER_ID} .qa-pv-controls input {
+      padding: 8px; border: 1px solid #ccc; border-radius: 6px; font-size: 13px;
+    }
+    #${CONTAINER_ID} .qa-pv-toggle {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 8px 14px; border-radius: 999px; background: #fee; color: #a11;
+      font-size: 13px; font-weight: 700;
+    }
+    #${CONTAINER_ID} .qa-pv-toggle.on { background: #e0f3e5; color: #1F8A3A; }
+    #${CONTAINER_ID} .qa-pv-recent-item {
+      display: flex; gap: 8px; padding: 6px 0; font-size: 12px;
+      border-bottom: 1px solid #eee; align-items: center;
+    }
+    #${CONTAINER_ID} .qa-pv-recent-item .qa-pv-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+    #${CONTAINER_ID} .qa-pv-recent-item .qa-pv-dot.ok { background: #1F8A3A; }
+    #${CONTAINER_ID} .qa-pv-recent-item .qa-pv-dot.err { background: #C11414; }
+    #${CONTAINER_ID} .qa-pv-recent-item .qa-pv-dot.skip { background: #C99; }
+    #${CONTAINER_ID} .qa-pv-empty { color: #888; font-size: 12px; padding: 12px; text-align: center; font-style: italic; }
+    #${CONTAINER_ID} .qa-pv-banner {
+      padding: 10px 14px; border-radius: 8px; font-size: 13px; margin-bottom: 12px;
+    }
+    #${CONTAINER_ID} .qa-pv-banner.err { background: #fee; color: #a11; }
+    #${CONTAINER_ID} .qa-pv-banner.ok { background: #e0f3e5; color: #1F8A3A; }
+    #${CONTAINER_ID} .qa-pv-warn { background: #fff3cd; color: #856404; padding: 10px 14px; border-radius: 8px; font-size: 12px; margin-bottom: 12px; }
+    @media (max-width: 640px) {
+      #${CONTAINER_ID} .qa-pv-grid { grid-template-columns: 1fr; }
+    }
+  `;
+  const styleEl = document.createElement("style");
+  styleEl.textContent = CSS;
+  document.head.appendChild(styleEl);
+
+  // ── State ────────────────────────────────────────────────────────────
+  let state = {config: null, candidates: [], recent: []};
+
+  // ── API helpers ──────────────────────────────────────────────────────
+  async function apiGet(path) {
+    if (!window.qaApi) throw new Error("qaApi not loaded — dashboard-auth.snippet.html must load first");
+    const r = await window.qaApi(path);
+    if (!r.ok) throw new Error(`${path}: ${r.status}`);
+    return r.json();
+  }
+  async function apiPost(path, body) {
+    if (!window.qaApi) throw new Error("qaApi not loaded");
+    const r = await window.qaApi(path, {method: "POST", body: JSON.stringify(body || {})});
+    if (!r.ok) {
+      const detail = (await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`;
+      throw new Error(detail);
+    }
+    return r.json();
+  }
+
+  // ── Rendering ────────────────────────────────────────────────────────
+  function showBanner(kind, msg) {
+    const existing = container.querySelector(".qa-pv-banner.transient");
+    if (existing) existing.remove();
+    const el = document.createElement("div");
+    el.className = "qa-pv-banner " + kind + " transient";
+    el.textContent = msg;
+    container.insertBefore(el, container.firstChild);
+    setTimeout(() => el.remove(), 6000);
+  }
+
+  function fmt(dt) {
+    if (!dt) return "—";
+    try { return new Date(dt).toLocaleString(); } catch (_) { return String(dt); }
+  }
+  function timeAgo(dt) {
+    if (!dt) return "—";
+    const s = Math.floor((Date.now() - new Date(dt).getTime()) / 1000);
+    if (s < 60) return `${s}s ago`;
+    if (s < 3600) return `${Math.floor(s/60)}m ago`;
+    if (s < 86400) return `${Math.floor(s/3600)}h ago`;
+    return `${Math.floor(s/86400)}d ago`;
+  }
+  function escapeHtml(s) {
+    return String(s ?? "").replace(/[&<>"']/g, c => ({
+      "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;"
+    }[c]));
+  }
+
+  function render() {
+    const cfg = state.config?.preview_mode || {};
+    const enabled = !!cfg.enabled;
+    const enrolled = new Set(cfg.device_ids || []);
+
+    // Filter candidates to those NOT already enrolled (cleaner UI).
+    const unenrolled = (state.candidates || []).filter(c => !enrolled.has(c.device_id));
+
+    container.innerHTML = `
+      <h2>
+        Preview mode
+        <span class="qa-pv-badge ${enabled ? "on" : ""}">${enabled ? "ENABLED" : "DISABLED"}</span>
+      </h2>
+      <div class="qa-pv-sub">
+        Sends non-critical preview notifications to allow-listed iOS devices for EMSC/USGS events in ${state.config?.country_name || COUNTRY}.
+        Never uses the critical-alerts / siren path. Rate-limited per device. Audit-tagged separately from real triggers.
+      </div>
+
+      <div id="qa-pv-banner-slot"></div>
+
+      <div class="qa-pv-controls">
+        <div class="qa-pv-toggle ${enabled ? "on" : ""}">${enabled ? "● Currently ON" : "○ Currently OFF"}</div>
+        <button class="qa-pv-btn-primary" data-action="toggle">
+          ${enabled ? "Turn OFF" : "Turn ON"}
+        </button>
+        <button class="qa-pv-btn-kill" data-action="kill" title="Disable preview mode across ALL countries immediately">
+          🚨 PANIC KILL
+        </button>
+      </div>
+
+      <div class="qa-pv-controls">
+        <label>Trigger tier:
+          <select data-action="set-tier">
+            ${TIERS.map(t => `<option value="${t.value}"${cfg.trigger_tier===t.value?" selected":""}>${escapeHtml(t.label)}</option>`).join("")}
+          </select>
+        </label>
+        <label>Rate limit (min/device):
+          <input type="number" min="1" max="1440" value="${cfg.rate_limit_minutes || 10}" data-action="set-rate" style="width:80px">
+        </label>
+        <button class="qa-pv-btn-primary" data-action="save-tier-rate">Save</button>
+      </div>
+
+      <div class="qa-pv-grid">
+        <div class="qa-pv-card">
+          <h3>Enrolled devices (${enrolled.size})</h3>
+          ${enrolled.size === 0 ? '<div class="qa-pv-empty">No devices enrolled yet.</div>' :
+            Array.from(enrolled).map(id => `
+              <div class="qa-pv-row">
+                <code>${escapeHtml(id)}</code>
+                <button class="qa-pv-btn-remove" data-action="remove" data-id="${escapeHtml(id)}">Remove</button>
+              </div>`).join("")}
+        </div>
+
+        <div class="qa-pv-card">
+          <h3>Recent iOS registrations (${unenrolled.length})</h3>
+          ${unenrolled.length === 0 ? '<div class="qa-pv-empty">No unenrolled iOS devices in the last 20 registrations.</div>' :
+            unenrolled.map(c => `
+              <div class="qa-pv-row">
+                <div>
+                  <code>${escapeHtml(c.device_id)}</code>
+                  <div class="qa-pv-meta">Registered ${timeAgo(c.updated_at)} · token ${escapeHtml(c.device_token_fingerprint || "—")}</div>
+                </div>
+                <button class="qa-pv-btn-add" data-action="add" data-id="${escapeHtml(c.device_id)}">Add to preview</button>
+              </div>`).join("")}
+        </div>
+      </div>
+
+      <div class="qa-pv-card" style="margin-top:16px;">
+        <h3>Recent preview activity (last ${state.recent.length})</h3>
+        ${state.recent.length === 0 ? '<div class="qa-pv-empty">No preview notifications have fired yet. Enable + wait for a seismic event.</div>' :
+          state.recent.map(n => `
+            <div class="qa-pv-recent-item">
+              <span class="qa-pv-dot ${n.delivered ? "ok" : (n.skipped_reason ? "skip" : "err")}"></span>
+              <div style="flex:1;">
+                <div><strong>${escapeHtml(n.title || "(no title)")}</strong> — ${escapeHtml(n.body || "")}</div>
+                <div class="qa-pv-meta">
+                  ${timeAgo(n.sent_at)} ·
+                  device <code>${escapeHtml(n.device_id || "—")}</code> ·
+                  ${n.delivered ? "delivered" : (n.skipped_reason ? "skipped: " + escapeHtml(n.skipped_reason) : "failed: " + escapeHtml(n.error || n.reason || "unknown"))}
+                </div>
+              </div>
+            </div>`).join("")}
+      </div>
+
+      <div style="margin-top:12px; font-size:11px; color:#888; text-align:right;">
+        Last refreshed ${fmt(new Date())} ·
+        <a href="#" data-action="refresh">Refresh now</a>
+      </div>
+    `;
+
+    // Wire event handlers
+    container.querySelectorAll("[data-action]").forEach(el => {
+      el.addEventListener("click", handleAction);
+    });
+  }
+
+  // ── Actions ──────────────────────────────────────────────────────────
+  async function handleAction(e) {
+    e.preventDefault();
+    const action = e.currentTarget.getAttribute("data-action");
+    const id = e.currentTarget.getAttribute("data-id");
+    try {
+      if (action === "add") {
+        await apiPost("/api/admin/emsc/preview/add-device", {device_id: id});
+        showBanner("ok", `Added ${id} to allowlist.`);
+      } else if (action === "remove") {
+        // No dedicated remove endpoint — send a full device_ids array minus this one.
+        const cfg = state.config.preview_mode || {};
+        const newList = (cfg.device_ids || []).filter(x => x !== id);
+        await apiPost("/api/admin/emsc/preview/config", {device_ids: newList});
+        showBanner("ok", `Removed ${id}.`);
+      } else if (action === "toggle") {
+        const cur = !!state.config.preview_mode?.enabled;
+        await apiPost("/api/admin/emsc/preview/config", {enabled: !cur});
+        showBanner("ok", cur ? "Preview mode DISABLED." : "Preview mode ENABLED.");
+      } else if (action === "set-tier") {
+        return;  // handled by save-tier-rate
+      } else if (action === "set-rate") {
+        return;  // handled by save-tier-rate
+      } else if (action === "save-tier-rate") {
+        const tier = container.querySelector("[data-action=set-tier]").value;
+        const rate = parseInt(container.querySelector("[data-action=set-rate]").value, 10);
+        await apiPost("/api/admin/emsc/preview/config", {trigger_tier: tier, rate_limit_minutes: rate});
+        showBanner("ok", `Tier=${tier}, rate=${rate}min saved.`);
+      } else if (action === "kill") {
+        if (!confirm("Disable preview mode across ALL countries immediately?")) return;
+        const r = await apiPost("/api/admin/emsc/preview/kill", {});
+        showBanner("ok", `KILL: ${r.countries_affected} country/ies affected.`);
+      } else if (action === "refresh") {
+        // fall through to refresh
+      }
+      await refresh();
+    } catch (err) {
+      showBanner("err", "Failed: " + (err.message || err));
+    }
+  }
+
+  // ── Data loading ─────────────────────────────────────────────────────
+  async function refresh() {
+    try {
+      const [cfg, cands, recent] = await Promise.all([
+        apiGet(`/api/admin/emsc/preview/config?country_code=${COUNTRY}`),
+        apiGet("/api/admin/emsc/preview/candidates?limit=20"),
+        apiGet("/api/admin/emsc/preview/recent?limit=20"),
+      ]);
+      state.config = cfg;
+      state.candidates = cands.candidates || [];
+      state.recent = recent.notifications || [];
+      render();
+    } catch (err) {
+      container.innerHTML = `<div class="qa-pv-banner err">Failed to load preview config: ${escapeHtml(err.message || String(err))}</div>`;
+    }
+  }
+
+  // ── Visibility gating ────────────────────────────────────────────────
+  // Only show for admin role. Uses qaAuth.onChange to react to sign-in.
+  function updateVisibility() {
+    const user = window.qaAuth && window.qaAuth.user();
+    if (user && user.role === "admin") {
+      container.classList.add("show");
+      refresh();
+    } else {
+      container.classList.remove("show");
+      container.innerHTML = "";
+    }
+  }
+  if (window.qaAuth) {
+    window.qaAuth.onChange(updateVisibility);
+    updateVisibility();
+  } else {
+    // Auth snippet hasn't loaded yet — retry briefly. Race condition
+    // if this snippet renders faster than the async GSI init.
+    let tries = 0;
+    const wait = setInterval(() => {
+      tries += 1;
+      if (window.qaAuth) {
+        clearInterval(wait);
+        window.qaAuth.onChange(updateVisibility);
+        updateVisibility();
+      } else if (tries > 50) {
+        clearInterval(wait);
+        console.error("[QuakeAngel] Preview panel: qaAuth never appeared — dashboard-auth.snippet.html not loaded?");
+      }
+    }, 100);
+  }
+})();
+</script>

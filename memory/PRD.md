@@ -143,6 +143,25 @@ before any live firing.
 - `emsc_poller_health` — one doc per provider (upserted). Source of truth
   for "is the poller alive".
 
+### Operational standard (locked 2026-08-06)
+
+**No terminal-required final steps.** If a feature's activation path requires the account owner to run a curl command after landing, the feature is not complete. Every ongoing admin operation must ship with a UI — dashboard panel, mobile-app control, or equivalent one-click surface. Applies to: adding operators, enabling/disabling features, kill switches, config toggles, expiry renewal, all similar operations.
+
+Rationale: Paul is the operator, not a developer. Assuming there's a developer between him and the product produces stalled deliveries and a false sense of "done." Curl commands during initial setup (bootstrap admin, one-time production migration) are acceptable if I run them myself; asking the account owner to run one is not.
+
+### EMSC preview mode dashboard UI (landed 2026-08-06)
+
+`dashboard-preview-mode.snippet.html` — admin-only self-service panel:
+- Enable/disable toggle
+- Trigger tier dropdown (all_ingested / quiet_tier / critical_tier / neo_original)
+- Rate-limit input (1-1440 minutes)
+- "Recent iOS registrations" list with one-click "Add to preview" buttons
+- Enrolled-devices list with per-row remove
+- Recent notification activity log (delivered / skipped / failed, colour-coded)
+- Big red PANIC KILL button (with confirm) — disables preview mode across ALL countries
+- Auto-refreshes after every action
+- Admin-role gated via `qaAuth.user().role === "admin"`; entirely hidden for operators
+
 ### Phase 2 (NOT in this landing)
 - Cross-provider dedup / corroboration signal
 - Circuit breaker + exponential backoff (Phase 1 uses simple retry)
