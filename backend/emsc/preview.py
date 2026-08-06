@@ -240,16 +240,18 @@ async def dispatch_preview_if_needed(
     rate_limit_minutes = int(preview_cfg.get("rate_limit_minutes") or 10)
 
     # Fetch push_devices rows for the allowlisted device_ids that
-    # currently have iOS tokens. Preview mode is iOS-only for v1 (Paul's
-    # device); Android will need its own path later via the Emergent
-    # push relay.
+    # currently have iOS tokens. Preview mode is iOS-only for v1.
+    # We ALSO pull notification_preset so we can enforce per-device
+    # user preferences (Requirement 1, 2026-08-06 — the in-app off
+    # switch that keeps users from reaching for iOS's blanket
+    # notification-disable and killing critical alerts too).
     push_devices = await db.push_devices.find(
         {
             "user_id": {"$in": device_ids},
             "platform": {"$in": ["ios", "iOS"]},
             "device_token": {"$exists": True, "$ne": None},
         },
-        {"_id": 0, "user_id": 1, "device_token": 1},
+        {"_id": 0, "user_id": 1, "device_token": 1, "notification_preset": 1},
     ).to_list(50)
 
     if not push_devices:
@@ -289,19 +291,56 @@ async def dispatch_preview_if_needed(
         country_name=country_config.get("country_name") or country_code,
     )
 
-    # Rate-limit filter: only devices that haven't been notified in the
-    # last N minutes get a real send. Others get logged as skipped.
+    # Rate-limit filter + notification-preset filter. Two separate gates
+    # applied per device:
+    #   (1) preset: does this user want notifications at this MMI level?
+    #   (2) rate limit: has this device been notified too recently?
+    # A device that fails either check is logged as skipped with the
+    # honest reason — never silently dropped.
+    #
+    # `effective_mmi` for preset comparison is derived once here from
+    # the event's intensity_estimates block. Same value used across all
+    # eligible devices for consistency.
+    from notification_presets import preset_would_fire, DEFAULT_PRESET as _DEFAULT_PRESET
+    from .intensity import effective_mmi_for_tier_decision
+    intensity_at_country = (emsc_event.get("intensity_estimates") or {}).get(f"at_{country_code}_center") or {}
+    effective_mmi = effective_mmi_for_tier_decision(intensity_at_country)
+
     eligible: List[dict] = []
     skipped: List[dict] = []
+    skipped_by_preset: List[tuple[dict, str]] = []
     for pd in push_devices:
         did = pd.get("user_id") or ""
         if not did:
             continue
+        # Preset gate — user's own off-switch / sensitivity choice.
+        user_preset = pd.get("notification_preset") or _DEFAULT_PRESET
+        preset_fire, preset_reason = preset_would_fire(user_preset, effective_mmi)
+        if not preset_fire:
+            skipped_by_preset.append((pd, preset_reason or "user_preset"))
+            continue
+        # Rate-limit gate — swarm-flood defence.
         limited = await _recently_notified(db, did, rate_limit_minutes, now)
         if limited:
             skipped.append(pd)
         else:
             eligible.append(pd)
+
+    # Log preset-blocked ones with their specific reason.
+    for pd, preset_reason in skipped_by_preset:
+        await db.emsc_preview_notifications.insert_one({
+            "sent_at": now,
+            "device_id": pd.get("user_id"),
+            "delivered": False,
+            "skipped_reason": preset_reason,
+            "user_preset": pd.get("notification_preset") or _DEFAULT_PRESET,
+            "effective_mmi_at_dispatch": effective_mmi,
+            "emsc_event_ref": {"provider": emsc_event.get("provider"),
+                               "external_id": emsc_event.get("external_id"),
+                               "revision": emsc_event.get("revision")},
+            "country_code": country_code,
+            "trigger_tier": trigger_tier,
+        })
 
     # Log the rate-limited ones so the volume is honestly visible.
     for pd in skipped:

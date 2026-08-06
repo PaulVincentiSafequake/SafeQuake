@@ -657,6 +657,22 @@ export default function HomeScreen() {
           </View>
         </View>
 
+        {/* Notification settings link — safety-critical placement.
+            The user must be able to reach the informational-notification
+            off-switch easily, otherwise a frustrated user reaches for
+            iOS Settings' notification blanket switch and kills critical
+            alerts too. Discrete but reachable in one tap from home. */}
+        <Pressable
+          onPress={() => router.push("/settings/notifications" as any)}
+          style={styles.diagLinkRow}
+          testID="open-notification-settings"
+          accessibilityRole="button"
+          accessibilityLabel="Notification settings"
+        >
+          <Ionicons name="notifications-outline" size={14} color={colors.onSurfaceTertiary} />
+          <Text style={styles.diagLinkText}>Notification settings</Text>
+        </Pressable>
+
         {/* Diagnostics link (discrete) */}
         <Pressable
           onPress={() => router.push("/diag")}

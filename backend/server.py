@@ -37,6 +37,7 @@ from apns import (
 from emsc.poller import EMSCPoller
 from emsc.seed import seed_country_configs
 from emsc.testimonies import TestimoniesSweeper
+from notification_presets import VALID_PRESETS, DEFAULT_PRESET
 
 # Auth module — per-user Google sign-in (task #9, 2026-08-04).
 # Handles: Google ID token verification, JWT issuance/decoding, request-time
@@ -695,6 +696,61 @@ class TriggerAlertBody(BaseModel):
     magnitude: Optional[float] = None
     distance_km: Optional[float] = None
     intensity: Optional[str] = None
+
+
+class NotificationPresetBody(BaseModel):
+    device_id: str = Field(..., min_length=3, max_length=200)
+    preset: str = Field(..., description="One of: off, significant, noticeable, everything")
+
+
+@api_router.get("/devices/{device_id}/notification-preset")
+async def get_notification_preset(device_id: str):
+    """Current informational-notification preset for a device.
+
+    Public endpoint — device_id IS the auth, same trust model as /api/status.
+    Returns the default preset ('noticeable') if never saved, so the
+    mobile UI always has a value to display.
+    """
+    row = await db.push_devices.find_one(
+        {"user_id": device_id}, {"_id": 0, "notification_preset": 1},
+    )
+    stored = (row or {}).get("notification_preset")
+    return {
+        "device_id": device_id,
+        "preset": stored or DEFAULT_PRESET,
+        "default_used": stored is None,
+    }
+
+
+@api_router.post("/devices/notification-preset")
+async def set_notification_preset(body: NotificationPresetBody):
+    """Update a device's informational-notification preset.
+
+    Governs INFORMATIONAL (preview) notifications only. Critical alerts
+    fire regardless — enforced by the separation of send paths
+    (send_critical_alerts bypasses preset; preview dispatch respects it).
+    Mobile settings screen MUST make this clear to the user.
+    """
+    preset = (body.preset or "").strip().lower()
+    if preset not in VALID_PRESETS:
+        raise HTTPException(
+            400,
+            f"preset must be one of {sorted(VALID_PRESETS)} (got '{body.preset}')",
+        )
+    now = datetime.now(timezone.utc)
+    await db.push_devices.update_one(
+        {"user_id": body.device_id},
+        {
+            "$set": {
+                "notification_preset": preset,
+                "notification_preset_updated_at": now,
+            },
+            "$setOnInsert": {"user_id": body.device_id, "created_at": now},
+        },
+        upsert=True,
+    )
+    return {"ok": True, "device_id": body.device_id, "preset": preset}
+
 
 @api_router.post("/register-push", status_code=201)
 async def register_push(body: RegisterPushBody):
