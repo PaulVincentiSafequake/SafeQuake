@@ -90,6 +90,7 @@ PyJWT==2.13.0
 pymongo==4.6.3
 pyparsing==3.3.2
 pytest==9.1.1
+pytest-asyncio==1.4.0
 python-dateutil==2.9.0.post0
 python-dotenv==1.2.2
 python-jose==3.5.0
@@ -98,6 +99,7 @@ pytokens==0.4.1
 PyYAML==6.0.3
 referencing==0.37.0
 regex==2026.7.19
+reportlab==5.0.0
 requests==2.34.2
 requests-oauthlib==2.0.0
 rich==15.0.0

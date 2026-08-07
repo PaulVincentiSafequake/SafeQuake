@@ -1,5 +1,5 @@
 from fastapi import FastAPI, APIRouter, HTTPException, Header, Query, Body, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 from dotenv import load_dotenv, dotenv_values
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -692,6 +692,391 @@ code{{background:#f4f4f6;padding:1px 6px;border-radius:4px;font-size:12px;font-f
 </div>
 {rows_html}
 </body></html>""")
+
+
+# ---------- Audit log exports (CSV + PDF) ---------------------------------
+#
+# Both endpoints are admin-gated (same auth as /api/admin/audit-log HTML
+# view). They return the same data as GET /api/audit, but formatted for
+# offline archival, incident reporting, and Malta Civil Protection
+# handover packages.
+#
+# Design decisions:
+#
+#  1. **CSV includes ALL fields flat.** Every event kind gets its own
+#     column footprint — trigger events populate magnitude/recipients,
+#     status events populate lat/lon/battery, rescued events populate
+#     rescued_by/notes/prior_status. Empty cells where a field doesn't
+#     apply. This means the CSV is wide but any single row is
+#     unambiguously self-describing — no cross-referencing needed when
+#     the file lands on someone's desk two months later.
+#
+#  2. **PDF is landscape A4, table-first, no logo/branding chrome.**
+#     Reports get printed and archived; a colourful header wastes ink and
+#     confuses non-Quake-Angel readers ("what is this branding, am I
+#     looking at a marketing document?"). We're producing evidence.
+#
+#  3. **Since/until filters can span arbitrary windows.** The CSV path
+#     accepts up to 30 days at a time (capped server-side); PDF caps at
+#     500 events per document (readability). Longer windows → paginate
+#     the request client-side.
+#
+#  4. **Notes are included in BOTH exports** (admin-gated, so no
+#     leak-to-public risk). Redaction happens at storage time via
+#     /api/admin/redact-notes if operationally needed.
+#
+#  5. **UTC timestamps in ISO 8601, always.** Malta uses CET/CEST which
+#     shifts twice a year — any local-time timestamp on a paper report
+#     becomes ambiguous the moment DST changes. Reader can convert if
+#     they need local.
+
+import csv as _csv
+import io as _io
+
+MAX_EXPORT_WINDOW_DAYS = 30
+MAX_EXPORT_ROWS = 500
+
+
+def _parse_iso_or_none(s: Optional[str]) -> Optional[datetime]:
+    if not s:
+        return None
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except ValueError:
+        raise HTTPException(400, f"Invalid ISO 8601 datetime: {s!r}")
+
+
+async def _fetch_audit_for_export(
+    since_iso: Optional[str],
+    until_iso: Optional[str],
+    kind: Optional[str],
+    limit: int,
+) -> list[dict]:
+    """Shared query used by both CSV and PDF exports.
+
+    Same shape as get_audit_log() but with the notes-visibility switch
+    fixed to `is_admin=True` (both callers are already admin-gated) and
+    with an inclusive `until` filter.
+    """
+    since_dt = _parse_iso_or_none(since_iso)
+    until_dt = _parse_iso_or_none(until_iso)
+
+    # Sanity-clamp the window. Default: last 7 days.
+    if since_dt is None:
+        since_dt = datetime.now(timezone.utc) - timedelta(days=7)
+    if until_dt is None:
+        until_dt = datetime.now(timezone.utc)
+    if until_dt < since_dt:
+        raise HTTPException(400, "until must be >= since")
+    if (until_dt - since_dt).days > MAX_EXPORT_WINDOW_DAYS:
+        raise HTTPException(
+            400,
+            f"Window too wide (max {MAX_EXPORT_WINDOW_DAYS} days). Paginate the request.",
+        )
+
+    since_iso_norm = since_dt.isoformat()
+    until_iso_norm = until_dt.isoformat()
+
+    events: list[dict] = []
+
+    # Trigger events
+    if kind in (None, "trigger"):
+        tq: dict = {"created_at": {"$gte": since_iso_norm, "$lte": until_iso_norm}}
+        rows = await db.push_events.find(tq, {"_id": 0}).sort("created_at", -1).to_list(limit)
+        for r in rows:
+            events.append({
+                "kind": "trigger",
+                "at": r.get("created_at"),
+                "idempotency_key": r.get("idempotency_key"),
+                "triggered_by": r.get("triggered_by") or "dashboard",
+                "magnitude": r.get("magnitude"),
+                "recipients_total": r.get("recipients_total") or 0,
+                "ios_count": r.get("ios_count") or 0,
+                "android_count": r.get("android_count") or 0,
+                "delivered": bool(r.get("push_delivered")),
+                "error": r.get("push_error"),
+            })
+
+    # Status / rescued / reverted events
+    want_status   = kind in (None, "status")
+    want_rescued  = kind in (None, "rescued")
+    want_reverted = kind in (None, "rescue_reverted")
+    if want_status or want_rescued or want_reverted:
+        sq: dict = {"recorded_at": {"$gte": since_iso_norm, "$lte": until_iso_norm}}
+        rows = await db.status_events.find(sq, {"_id": 0}).sort("recorded_at", -1).to_list(limit)
+        for r in rows:
+            base = {
+                "at": r.get("recorded_at") or r.get("updated_at"),
+                "device_id": r.get("device_id"),
+                "short_code": _short_code(r.get("device_id")),
+                "display_name": r.get("display_name"),
+                "status": r.get("status"),
+                "severity": r.get("severity"),
+                "mobility": r.get("mobility"),
+                "latitude": r.get("latitude"),
+                "longitude": r.get("longitude"),
+                "accuracy_m": r.get("accuracy_m"),
+                "battery_pct": r.get("battery_pct"),
+                "battery_state": r.get("battery_state"),
+                "platform": r.get("platform"),
+            }
+            if r.get("rescue_reverted"):
+                if want_reverted:
+                    events.append({**base, "kind": "rescue_reverted",
+                                   "reverted_by": r.get("reverted_by") or "dashboard"})
+            elif r.get("status") == "rescued":
+                if want_rescued:
+                    events.append({**base, "kind": "rescued",
+                                   "rescued_by": r.get("rescued_by") or "dashboard",
+                                   "notes": r.get("notes"),
+                                   "prior_status": r.get("prior_status"),
+                                   "prior_severity": r.get("prior_severity"),
+                                   "prior_mobility": r.get("prior_mobility")})
+            else:
+                if want_status:
+                    events.append({**base, "kind": "status"})
+
+    events.sort(key=lambda e: e.get("at") or "", reverse=True)
+    return events[:limit]
+
+
+# Column order for CSV. Locked here so the header is stable across
+# releases — analytics scripts and archival tooling can rely on it.
+_CSV_COLUMNS = [
+    "at", "kind",
+    # Trigger fields
+    "idempotency_key", "triggered_by", "magnitude",
+    "recipients_total", "ios_count", "android_count",
+    "delivered", "error",
+    # Device / status fields
+    "device_id", "short_code", "display_name",
+    "status", "severity", "mobility",
+    "latitude", "longitude", "accuracy_m",
+    "battery_pct", "battery_state", "platform",
+    # Rescue / revert fields
+    "rescued_by", "prior_status", "prior_severity", "prior_mobility", "notes",
+    "reverted_by",
+]
+
+
+@api_router.get("/admin/audit-log/export.csv")
+async def export_audit_log_csv(
+    request: Request,
+    since: Optional[str] = Query(default=None, description="ISO 8601 start (inclusive). Default: 7 days ago."),
+    until: Optional[str] = Query(default=None, description="ISO 8601 end (inclusive). Default: now."),
+    kind: Optional[str] = Query(default=None, description="Optional filter: trigger|status|rescued|rescue_reverted"),
+    limit: int = Query(default=MAX_EXPORT_ROWS, ge=1, le=MAX_EXPORT_ROWS),
+):
+    """Downloadable CSV of audit events in the given window. Admin-only."""
+    principal = await resolve_principal(
+        request,
+        request.headers.get("x-admin-token"),
+        ADMIN_TRIGGER_PASSWORD,
+        db,
+    )
+    require_role(principal, "admin", "operator")
+
+    events = await _fetch_audit_for_export(since, until, kind, limit)
+
+    buf = _io.StringIO()
+    writer = _csv.DictWriter(buf, fieldnames=_CSV_COLUMNS, extrasaction="ignore")
+    writer.writeheader()
+    for ev in events:
+        # Normalize datetime → ISO string. csv.DictWriter would str() it
+        # otherwise, which produces "datetime.datetime(...)" for naive
+        # datetimes — ugly and hard to parse.
+        row = {}
+        for col in _CSV_COLUMNS:
+            v = ev.get(col)
+            if isinstance(v, datetime):
+                row[col] = v.isoformat()
+            elif v is None:
+                row[col] = ""
+            else:
+                row[col] = v
+        writer.writerow(row)
+
+    csv_text = buf.getvalue()
+    filename = f"quakeangel-audit-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.csv"
+    return Response(
+        content=csv_text,
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-Row-Count": str(len(events)),
+        },
+    )
+
+
+@api_router.get("/admin/audit-log/export.pdf")
+async def export_audit_log_pdf(
+    request: Request,
+    since: Optional[str] = Query(default=None),
+    until: Optional[str] = Query(default=None),
+    kind: Optional[str] = Query(default=None),
+    limit: int = Query(default=MAX_EXPORT_ROWS, ge=1, le=MAX_EXPORT_ROWS),
+):
+    """Downloadable PDF of audit events. Admin-only. Uses ReportLab.
+
+    Landscape A4, monospaced tables, no branding chrome (see design
+    note #2 in the section header). Suitable for print + archival.
+    """
+    principal = await resolve_principal(
+        request,
+        request.headers.get("x-admin-token"),
+        ADMIN_TRIGGER_PASSWORD,
+        db,
+    )
+    require_role(principal, "admin", "operator")
+
+    events = await _fetch_audit_for_export(since, until, kind, limit)
+
+    # Lazy-import ReportLab so we never pay the ~200ms cold-start cost
+    # on non-PDF requests.
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.platypus import (
+        SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak,
+    )
+
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "AuditTitle", parent=styles["Heading1"],
+        fontSize=14, spaceAfter=6, textColor=colors.HexColor("#111111"),
+    )
+    meta_style = ParagraphStyle(
+        "AuditMeta", parent=styles["Normal"],
+        fontSize=8, textColor=colors.HexColor("#555555"), spaceAfter=10,
+    )
+    cell_style = ParagraphStyle(
+        "AuditCell", parent=styles["Normal"],
+        fontSize=7, leading=9, wordWrap="CJK",
+    )
+
+    generated_at = datetime.now(timezone.utc).isoformat()
+    since_str = (_parse_iso_or_none(since) or datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+    until_str = (_parse_iso_or_none(until) or datetime.now(timezone.utc)).isoformat()
+
+    story: list = [
+        Paragraph("Quake Angel — audit log export", title_style),
+        Paragraph(
+            f"Window: {since_str} → {until_str} (UTC) &nbsp;·&nbsp; "
+            f"Events: {len(events)} &nbsp;·&nbsp; "
+            f"Generated: {generated_at} &nbsp;·&nbsp; "
+            f"By: {principal.get('email', '?')}",
+            meta_style,
+        ),
+    ]
+
+    def _cell(s) -> "Paragraph":
+        # Wrap every cell in a Paragraph so long strings wrap instead
+        # of overflowing off the page.
+        if s is None or s == "":
+            return Paragraph("&nbsp;", cell_style)
+        return Paragraph(_html.escape(str(s)), cell_style)
+
+    header = ["Time (UTC)", "Kind", "Actor / Device", "Details", "Location / Meta"]
+
+    data: list = [header]
+    for e in events:
+        at = e.get("at") or ""
+        if isinstance(at, datetime):
+            at = at.isoformat()
+        kind_str = e.get("kind", "?")
+        if kind_str == "trigger":
+            actor = e.get("triggered_by") or "?"
+            details = (
+                f"M={e.get('magnitude') or '?'} · "
+                f"{e.get('recipients_total') or 0} devices "
+                f"(iOS {e.get('ios_count') or 0}, Android {e.get('android_count') or 0}) · "
+                f"{'delivered' if e.get('delivered') else 'FAILED'}"
+            )
+            if e.get("error"):
+                details += f"\nError: {e.get('error')}"
+            meta = e.get("idempotency_key") or ""
+        elif kind_str == "rescued":
+            actor = f"rescued by {e.get('rescued_by') or '?'}"
+            details = (
+                f"Device {e.get('short_code') or '?'} "
+                f"(was {e.get('prior_status') or '?'}/{e.get('prior_severity') or '?'}). "
+                f"Notes: {e.get('notes') or '—'}"
+            )
+            meta = e.get("device_id") or ""
+        elif kind_str == "rescue_reverted":
+            actor = f"reverted by {e.get('reverted_by') or '?'}"
+            details = f"Device {e.get('short_code') or '?'} restored to {e.get('status') or '?'}"
+            meta = e.get("device_id") or ""
+        else:  # status
+            actor = f"{e.get('display_name') or e.get('short_code') or '?'}"
+            details = (
+                f"{e.get('status') or '?'} / {e.get('severity') or '?'}"
+                + (f" · battery {e.get('battery_pct')}%" if e.get("battery_pct") is not None else "")
+            )
+            lat = e.get("latitude"); lon = e.get("longitude")
+            if lat is not None and lon is not None:
+                meta = f"{lat:.4f}, {lon:.4f}" + (f" ±{e.get('accuracy_m'):.0f}m" if e.get("accuracy_m") else "")
+            else:
+                meta = e.get("platform") or ""
+
+        data.append([_cell(at), _cell(kind_str), _cell(actor), _cell(details), _cell(meta)])
+
+    # Column widths: at, kind, actor, details, meta.
+    # Sum ~= 270mm which fits landscape A4 (297mm - margins).
+    col_widths = [35*mm, 25*mm, 50*mm, 110*mm, 50*mm]
+
+    table = Table(data, colWidths=col_widths, repeatRows=1)
+    table.setStyle(TableStyle([
+        ("BACKGROUND",  (0, 0), (-1, 0), colors.HexColor("#e6e6ea")),
+        ("FONTNAME",    (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE",    (0, 0), (-1, 0), 8),
+        ("TEXTCOLOR",   (0, 0), (-1, 0), colors.HexColor("#111111")),
+        ("BOTTOMPADDING", (0, 0), (-1, 0), 6),
+        ("TOPPADDING",  (0, 0), (-1, 0), 6),
+        ("GRID",        (0, 0), (-1, -1), 0.3, colors.HexColor("#c9ccd2")),
+        ("VALIGN",      (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING",  (0, 1), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 1), (-1, -1), 3),
+        # Alternate row shading for readability on print.
+        *[
+            ("BACKGROUND", (0, i), (-1, i), colors.HexColor("#fafbfc"))
+            for i in range(2, len(data), 2)
+        ],
+    ]))
+    story.append(table)
+
+    if not events:
+        story.append(Spacer(0, 20))
+        story.append(Paragraph("No events in the specified window.", meta_style))
+
+    buf = _io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf,
+        pagesize=landscape(A4),
+        leftMargin=12*mm, rightMargin=12*mm,
+        topMargin=12*mm, bottomMargin=12*mm,
+        title="Quake Angel Audit Log",
+        author=principal.get("email", ""),
+    )
+    doc.build(story)
+    pdf_bytes = buf.getvalue()
+
+    filename = f"quakeangel-audit-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.pdf"
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-Row-Count": str(len(events)),
+        },
+    )
+
 
 # ---------- Push registration + fan-out ----------
 class RegisterPushBody(BaseModel):

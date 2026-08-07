@@ -48,6 +48,40 @@
     color: #888;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   }
+  #qg-audit .qg-export-bar {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 12px;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+  #qg-audit .qg-export-btn {
+    padding: 5px 11px;
+    background: #fff;
+    border: 1px solid #cbd0d8;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: 600;
+    color: #333;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  #qg-audit .qg-export-btn:hover:not(:disabled) { background:#f0f2f6; border-color:#a8b0bd; }
+  #qg-audit .qg-export-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  #qg-audit .qg-export-range {
+    padding: 4px 8px;
+    border: 1px solid #cbd0d8;
+    border-radius: 4px;
+    font-size: 12px;
+    font-family: inherit;
+  }
+  #qg-audit .qg-export-msg {
+    font-size: 12px;
+    color: #666;
+    margin-left: 6px;
+  }
+  #qg-audit .qg-export-msg.error   { color: #b0141a; }
+  #qg-audit .qg-export-msg.success { color: #1a7f37; }
   #qg-audit .qg-audit-row {
     background: #fff;
     border: 1px solid #e6e6ea;
@@ -99,6 +133,27 @@
     <h3>Recent activity</h3>
     <span class="qg-audit-meta" id="qg-audit-meta">Loading…</span>
   </div>
+
+  <!-- Export toolbar. Uses window.qaApi (from dashboard-auth.snippet.html)
+       to authenticate the admin-gated export endpoints. Only rendered if
+       the auth guard is present and the user is admin OR operator; hidden
+       otherwise. See design notes in server.py: audit exports are
+       admin+operator (not admin-only) because operators generate the
+       incident reports.
+       Window options are relative to "now"; a "custom range" opens a
+       small inline picker. -->
+  <div class="qg-export-bar" id="qg-export-bar" style="display:none">
+    <label style="font-size:12px;color:#555">Export</label>
+    <select class="qg-export-range" id="qg-export-range">
+      <option value="24">Last 24h</option>
+      <option value="168" selected>Last 7 days</option>
+      <option value="720">Last 30 days</option>
+    </select>
+    <button class="qg-export-btn" id="qg-export-csv">Download CSV</button>
+    <button class="qg-export-btn" id="qg-export-pdf">Download PDF</button>
+    <span class="qg-export-msg" id="qg-export-msg"></span>
+  </div>
+
   <div id="qg-audit-body"></div>
 </div>
 
@@ -285,5 +340,104 @@
 
   refresh();
   setInterval(refresh, POLL_MS);
+
+  // ─── Export toolbar (CSV + PDF) ─────────────────────────────────
+  //
+  // Uses window.qaApi from dashboard-auth.snippet.html so JWT-authed
+  // admins/operators can download without pasting the X-Admin-Token.
+  // If the auth guard isn't loaded, the toolbar stays hidden — falling
+  // back to a token-input UI would create a second auth path that
+  // isn't audit-logged the same way, and we want a single source of
+  // truth for who exported what.
+  //
+  // We use a Blob → object-URL → anchor-click pattern rather than
+  // window.open(), because window.open cannot attach Authorization
+  // headers. The download filename comes from the server's
+  // Content-Disposition header, but browsers only honor that on
+  // same-origin — for cross-origin dashboard→backend we fall back to
+  // computing the filename client-side (same format).
+  var exportBar = document.getElementById("qg-export-bar");
+  var exportRange = document.getElementById("qg-export-range");
+  var exportCsvBtn = document.getElementById("qg-export-csv");
+  var exportPdfBtn = document.getElementById("qg-export-pdf");
+  var exportMsg = document.getElementById("qg-export-msg");
+
+  function showExportMsg(kind, text) {
+    if (!exportMsg) return;
+    exportMsg.className = "qg-export-msg " + kind;
+    exportMsg.textContent = text;
+    if (kind === "success") setTimeout(function () {
+      if (exportMsg.className.indexOf("success") !== -1) exportMsg.textContent = "";
+    }, 4000);
+  }
+
+  function applyExportVisibility() {
+    if (typeof window.qaApi !== "function" || typeof window.qaAuth !== "object") {
+      exportBar.style.display = "none";
+      return;
+    }
+    var u = window.qaAuth.user();
+    if (u && (u.role === "admin" || u.role === "operator")) {
+      exportBar.style.display = "flex";
+    } else {
+      exportBar.style.display = "none";
+    }
+  }
+
+  async function doExport(kind /* "csv" | "pdf" */) {
+    if (typeof window.qaApi !== "function") return;
+    var hours = parseInt(exportRange.value, 10) || 168;
+    // Compute since = now - hours; server defaults until = now.
+    var since = new Date(Date.now() - hours * 3600 * 1000).toISOString();
+    var path = "/api/admin/audit-log/export." + kind +
+               "?since=" + encodeURIComponent(since);
+    var btn = kind === "csv" ? exportCsvBtn : exportPdfBtn;
+    btn.disabled = true;
+    showExportMsg("", "Preparing…");
+    try {
+      var r = await window.qaApi(path);
+      if (!r.ok) {
+        var detail = "HTTP " + r.status;
+        try {
+          var body = await r.json();
+          detail = body.detail || detail;
+        } catch (_) { /* not JSON — leave HTTP N */ }
+        showExportMsg("error", "Export failed: " + detail);
+        return;
+      }
+      var rowCount = r.headers.get("X-Row-Count") || "?";
+      var blob = await r.blob();
+      var url = URL.createObjectURL(blob);
+      // Try to extract server-supplied filename from Content-Disposition.
+      // Cross-origin CORS often hides this header — fall back to a
+      // client-computed name that matches the server's format.
+      var cd = r.headers.get("Content-Disposition") || "";
+      var m = /filename="([^"]+)"/.exec(cd);
+      var stamp = new Date().toISOString().replace(/[-:]/g,"").replace(/\.\d+/,"").replace("T","T");
+      var filename = m ? m[1] : ("quakeangel-audit-" + stamp + "." + kind);
+      var a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      // Revoke the blob URL after a short delay so Safari has time to
+      // actually initiate the download before the URL becomes invalid.
+      setTimeout(function () { URL.revokeObjectURL(url); }, 5000);
+      showExportMsg("success", "Downloaded " + rowCount + " row(s).");
+    } catch (e) {
+      showExportMsg("error", "Export failed: " + (e && e.message ? e.message : e));
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  if (exportCsvBtn) exportCsvBtn.addEventListener("click", function () { doExport("csv"); });
+  if (exportPdfBtn) exportPdfBtn.addEventListener("click", function () { doExport("pdf"); });
+
+  applyExportVisibility();
+  if (window.qaAuth && typeof window.qaAuth.onChange === "function") {
+    window.qaAuth.onChange(applyExportVisibility);
+  }
 })();
 </script>
