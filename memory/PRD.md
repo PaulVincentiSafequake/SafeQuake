@@ -354,7 +354,7 @@ Map always shows full Mediterranean regardless of notification preset. Preset go
    - `/app/memory/emergent-support-email.md` — drafted email covering the 5 blocking questions (reliability tier, DB export, integration continuity, App Store implications, GitHub export scope)
    - `/app/backend/tests/test_emsc_continuity_migration.py` — 6-test regression suite that runs pre/post migration to verify soak continuity is preserved
    - **GITHUB PUSHED 2026-08-06**: hand-pushed to `https://github.com/PaulVincentiSafequate/quake-angel-app` (private) from inside the pod. Emergent's built-in Save-to-GitHub UI was broken for this user. Sanitization commit `e90660e` scrubbed leaked admin tokens across 13 tracked test files + `test_result.md` before push. `backend/.env`, `frontend/.env`, `memory/test_credentials.md`, `test_reports/` all correctly excluded (404 on GitHub API). PAT `github_pat_11CJLEDEA...` used for the push was **REVOKED by Paul on 2026-08-06** immediately after verification — zero live credential exposure remains.
-   - **Blocked on** Paul sending the support email and receiving reply. Execution is human-driven (Fly.io + Atlas provisioning + DNS cutover), not agent-driven.
+   - **Blocked on** Emergent Support reply. Support email SENT by Paul on 2026-08-06; awaiting reply. Execution is human-driven (Fly.io + Atlas provisioning + DNS cutover), not agent-driven.
 7. Next backlog: User Management dashboard screen, audit CSV+PDF, dual reports, Crockford Base32 rescue codes.
 6. Production migration (post Emergent Support response)
 7. Existing backlog (audit export, dual reports, dashboard category filter, QR)

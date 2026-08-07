@@ -234,6 +234,16 @@ async def resolve_principal(
             raise AuthError("Access revoked", status_code=403)
         if user.get("session_version", 1) != claims.get("sv"):
             raise AuthError("Session invalidated", status_code=401)
+        # Account expiry check. A null expires_at means "never expires"
+        # (used for the primary admin so a bad expiry policy can never
+        # lock out the last admin). Any past expires_at → deny with a
+        # distinct message so the dashboard snippet can surface the
+        # 'renew via admin' instruction instead of a generic 401.
+        expires_at = user.get("expires_at")
+        if expires_at is not None:
+            exp_aware = expires_at if getattr(expires_at, "tzinfo", None) else expires_at.replace(tzinfo=timezone.utc)
+            if exp_aware < datetime.now(timezone.utc):
+                raise AuthError("Account expired — contact your admin to renew", status_code=403)
         return {
             "email": user["email_normalized"],
             "role": user["role"],

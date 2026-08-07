@@ -2341,6 +2341,14 @@ def _user_public(u: dict) -> dict:
     """Shape a users doc for API responses. Never returns fields that
     would be sensitive if the response were misrouted (session_version,
     google_sub, timestamps of the LAST login, are all fine — no secrets)."""
+    exp = u.get("expires_at")
+    now = datetime.now(timezone.utc)
+    # A user is "expired" iff expires_at is set AND in the past. A null
+    # expires_at means "never expires" (used for the primary admin).
+    is_expired = False
+    if exp is not None:
+        exp_aware = exp if getattr(exp, "tzinfo", None) else exp.replace(tzinfo=timezone.utc) if exp else None
+        is_expired = exp_aware is not None and exp_aware < now
     return {
         "email": u.get("email_normalized"),
         "display_name": u.get("display_name") or u.get("email_normalized"),
@@ -2353,7 +2361,18 @@ def _user_public(u: dict) -> dict:
         "created_by": u.get("created_by"),
         "disabled_at": u.get("disabled_at"),
         "disabled_by": u.get("disabled_by"),
+        "expires_at": u.get("expires_at"),
+        "is_expired": is_expired,
     }
+
+
+# Default account lifetime — 90 days. Locked with Paul 2026-08-06.
+# Rationale: an operator who hasn't been onboarded to the current
+# dispatch protocol for 90 days shouldn't retain access without an
+# admin re-confirmation. Set to None on the doc to mean "never expires"
+# (used for the primary admin so a bad expiry policy can never lock out
+# the last admin).
+DEFAULT_ACCOUNT_LIFETIME_DAYS = 90
 
 
 @api_router.post("/auth/google")
@@ -2525,6 +2544,10 @@ async def create_user(payload: UserCreatePayload, request: Request):
         "google_sub": None,
         "created_at": datetime.now(timezone.utc),
         "created_by": principal["email"],
+        # Default account expiry: 90 days from creation. Admins can override
+        # via PATCH or POST /extend after creation. The primary/bootstrap
+        # admin doc has this set to null so their access never expires.
+        "expires_at": datetime.now(timezone.utc) + timedelta(days=DEFAULT_ACCOUNT_LIFETIME_DAYS),
     }
     await db.users.insert_one(doc)
     return {"ok": True, "user": _user_public(doc)}
@@ -2581,6 +2604,179 @@ async def enable_user(email: str, request: Request):
     if res.matched_count == 0:
         raise HTTPException(404, f"User {email_norm} not found")
     return {"ok": True}
+
+
+# ---------- User update / expiry / delete (Task 4: User Management dashboard) ----
+
+class UserPatchBody(BaseModel):
+    """Partial-update payload for PATCH /admin/users/{email}.
+
+    All fields optional; only supplied ones are applied. Empty patch is a
+    no-op (returns 400 to prevent accidental empty PATCHes that look like
+    a UI bug at the caller).
+    """
+    role: Optional[str] = Field(None, description="'admin' or 'operator'")
+    # expires_at accepts ISO8601 string OR the sentinel "never" (which
+    # sets the field to null on the doc). Mobile-app JSON serialization
+    # is quirky about nullable datetimes, so this two-mode API is safer
+    # than trying to distinguish 'null' from 'field absent'.
+    expires_at: Optional[str] = Field(
+        None,
+        description="ISO 8601 datetime, or the string 'never' to remove expiry.",
+    )
+
+
+@api_router.patch("/admin/users/{email}")
+async def patch_user(email: str, body: UserPatchBody, request: Request):
+    """Update role and/or expiry on an existing user.
+
+    Safety rails (all enforced server-side, not just in the dashboard):
+      - Admin cannot demote their own account (would lock themselves out
+        of user management).
+      - Admin cannot set their own expiry into the past.
+      - Session version is bumped on role change so any active JWTs for
+        the updated user are invalidated within one request cycle (they
+        get a 401 on next call and re-authenticate — new JWT reflects
+        new role).
+
+    Deliberately does NOT allow email or display_name changes here —
+    those would require a Google-sub re-link. Delete + re-add if needed.
+    """
+    principal = await resolve_principal(
+        request,
+        request.headers.get("x-admin-token"),
+        ADMIN_TRIGGER_PASSWORD,
+        db,
+    )
+    require_role(principal, "admin")
+
+    email_norm = email.strip().lower()
+    target = await db.users.find_one({"email_normalized": email_norm})
+    if not target:
+        raise HTTPException(404, f"User {email_norm} not found")
+
+    is_self = email_norm == (principal.get("email") or "").lower()
+
+    set_fields: dict = {}
+    bump_session = False
+
+    if body.role is not None:
+        if body.role not in {"admin", "operator"}:
+            raise HTTPException(400, "role must be 'admin' or 'operator'")
+        if is_self and body.role != "admin":
+            # Self-demotion lockout guard.
+            raise HTTPException(400, "Cannot demote your own admin account")
+        if body.role != target.get("role"):
+            set_fields["role"] = body.role
+            bump_session = True
+
+    if body.expires_at is not None:
+        raw = body.expires_at.strip()
+        if raw.lower() == "never":
+            set_fields["expires_at"] = None
+        else:
+            # Parse ISO 8601. Accept both 'Z' and '+00:00' suffixes.
+            try:
+                new_exp = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                if new_exp.tzinfo is None:
+                    new_exp = new_exp.replace(tzinfo=timezone.utc)
+            except ValueError:
+                raise HTTPException(400, f"expires_at is not a valid ISO 8601 datetime: {raw!r}")
+            if is_self and new_exp < datetime.now(timezone.utc):
+                # Self-expire lockout guard.
+                raise HTTPException(400, "Cannot set your own expiry to a past date")
+            set_fields["expires_at"] = new_exp
+
+    if not set_fields:
+        raise HTTPException(400, "No fields to update")
+
+    update: dict = {"$set": set_fields}
+    if bump_session:
+        update["$inc"] = {"session_version": 1}
+
+    await db.users.update_one({"email_normalized": email_norm}, update)
+    doc = await db.users.find_one({"email_normalized": email_norm})
+    return {"ok": True, "user": _user_public(doc)}
+
+
+@api_router.post("/admin/users/{email}/extend")
+async def extend_user_expiry(email: str, request: Request):
+    """One-click 'extend by 90 days from now' action.
+
+    Convenience wrapper around PATCH — the dashboard's most common
+    account-renewal flow ("Karen's account expires next week, extend
+    it another 90 days") shouldn't require the admin to compute an
+    ISO date string.
+
+    Sets expires_at = now + 90 days regardless of the previous value.
+    Deliberately not "now + 90 from previous expiry" because that would
+    let admins accumulate arbitrarily long lifetimes by clicking
+    Extend a few times.
+    """
+    principal = await resolve_principal(
+        request,
+        request.headers.get("x-admin-token"),
+        ADMIN_TRIGGER_PASSWORD,
+        db,
+    )
+    require_role(principal, "admin")
+
+    email_norm = email.strip().lower()
+    new_exp = datetime.now(timezone.utc) + timedelta(days=DEFAULT_ACCOUNT_LIFETIME_DAYS)
+    res = await db.users.update_one(
+        {"email_normalized": email_norm},
+        {"$set": {"expires_at": new_exp, "extended_at": datetime.now(timezone.utc), "extended_by": principal["email"]}},
+    )
+    if res.matched_count == 0:
+        raise HTTPException(404, f"User {email_norm} not found")
+    doc = await db.users.find_one({"email_normalized": email_norm})
+    return {"ok": True, "user": _user_public(doc)}
+
+
+@api_router.delete("/admin/users/{email}")
+async def delete_user(email: str, request: Request):
+    """Permanently remove a user.
+
+    In most cases, DISABLE is safer than DELETE — a disabled account
+    keeps its audit trail (which rows they triggered, which they
+    rescued) intact. Delete only when a user was created by mistake
+    or must be scrubbed for GDPR/data-subject-request reasons.
+
+    Safety rails:
+      - Cannot delete yourself.
+      - Cannot delete the LAST admin account (would leave nobody
+        able to manage users going forward — recovery would require
+        direct Mongo access).
+    """
+    principal = await resolve_principal(
+        request,
+        request.headers.get("x-admin-token"),
+        ADMIN_TRIGGER_PASSWORD,
+        db,
+    )
+    require_role(principal, "admin")
+
+    email_norm = email.strip().lower()
+    if email_norm == (principal.get("email") or "").lower():
+        raise HTTPException(400, "Cannot delete your own account")
+
+    target = await db.users.find_one({"email_normalized": email_norm})
+    if not target:
+        raise HTTPException(404, f"User {email_norm} not found")
+
+    # Last-admin guard.
+    if target.get("role") == "admin":
+        remaining_admins = await db.users.count_documents({
+            "role": "admin",
+            "email_normalized": {"$ne": email_norm},
+            "disabled": {"$ne": True},
+        })
+        if remaining_admins == 0:
+            raise HTTPException(400, "Cannot delete the last remaining admin")
+
+    await db.users.delete_one({"email_normalized": email_norm})
+    return {"ok": True, "deleted": email_norm}
+
 
 
 # ── EMSC/USGS shadow-mode monitoring (Phase 1) ──────────────────────────
