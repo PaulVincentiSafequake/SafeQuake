@@ -868,9 +868,14 @@ async def export_audit_log_csv(
     since: Optional[str] = Query(default=None, description="ISO 8601 start (inclusive). Default: 7 days ago."),
     until: Optional[str] = Query(default=None, description="ISO 8601 end (inclusive). Default: now."),
     kind: Optional[str] = Query(default=None, description="Optional filter: trigger|status|rescued|rescue_reverted"),
-    limit: int = Query(default=MAX_EXPORT_ROWS, ge=1, le=MAX_EXPORT_ROWS),
+    limit: int = Query(default=MAX_EXPORT_ROWS, ge=1),
 ):
     """Downloadable CSV of audit events in the given window. Admin-only."""
+    # Silent-clamp limit — this is an operator export action, not a query
+    # validation surface; getting 500 rows when you asked for 99999 is
+    # the correct interpretation of "give me a lot", not a 422 error page.
+    limit = min(limit, MAX_EXPORT_ROWS)
+
     principal = await resolve_principal(
         request,
         request.headers.get("x-admin-token"),
@@ -917,13 +922,16 @@ async def export_audit_log_pdf(
     since: Optional[str] = Query(default=None),
     until: Optional[str] = Query(default=None),
     kind: Optional[str] = Query(default=None),
-    limit: int = Query(default=MAX_EXPORT_ROWS, ge=1, le=MAX_EXPORT_ROWS),
+    limit: int = Query(default=MAX_EXPORT_ROWS, ge=1),
 ):
     """Downloadable PDF of audit events. Admin-only. Uses ReportLab.
 
     Landscape A4, monospaced tables, no branding chrome (see design
     note #2 in the section header). Suitable for print + archival.
     """
+    # Silent-clamp limit — same rationale as the CSV export.
+    limit = min(limit, MAX_EXPORT_ROWS)
+
     principal = await resolve_principal(
         request,
         request.headers.get("x-admin-token"),
