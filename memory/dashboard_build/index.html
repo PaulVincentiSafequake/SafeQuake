@@ -1,0 +1,2593 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Quake Angel — Emergency Response Dashboard</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<style>
+  :root {
+    --safe: #2e7d32;
+    --trapped: #c62828;
+    --waiting: #f9a825;
+    --danger: #757575;
+    --rescued: #1F8A3A;
+    --bg: #f4f5f7;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, "Segoe UI", Arial, sans-serif;
+    background: var(--bg);
+    color: #222;
+    /* Flex column so the map fills whatever vertical space is left after
+       the sign-in bar, preview panel, trigger button and header — rather
+       than assuming a fixed offset. The old calc(100vh - 60px) on .layout
+       was written when the header was the ONLY thing above the map; every
+       control added since pushed the page taller than the viewport and
+       scrolled the sign-in bar and trigger button off the top. */
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
+  }
+  header {
+    background: linear-gradient(135deg, #1c2b36 0%, #23384a 55%, #1a2a35 100%);
+    color: #fff;
+    padding: 14px 20px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 10px;
+    box-shadow: 0 2px 14px rgba(0,0,0,0.25);
+  }
+  .header-brand { display: flex; align-items: center; gap: 12px; }
+  .header-brand img {
+    width: 40px;
+    height: 40px;
+    border-radius: 10px;
+    box-shadow: 0 3px 10px rgba(0,0,0,0.35), 0 0 0 1px rgba(255,255,255,0.08);
+    flex-shrink: 0;
+  }
+  header h1 { font-size: 18px; margin: 0; font-weight: 700; letter-spacing: .2px; }
+  header p { margin: 2px 0 0; font-size: 12px; color: #b7c2cc; }
+  /* flex:1 makes the map/sidebar row absorb the remaining height, so the
+     controls above it always stay on screen no matter how many we add. */
+  .layout { display: flex; flex: 1 1 auto; min-height: 420px; flex-wrap: wrap; }
+  #map-wrap { position: relative; flex: 1 1 60%; min-height: 400px; }
+  #map { position: absolute; inset: 0; }
+  .map-filters {
+    position: absolute;
+    top: 12px;
+    left: 12px;
+    z-index: 1000;
+    display: flex;
+    gap: 6px;
+    background: rgba(255,255,255,0.95);
+    padding: 6px;
+    border-radius: 10px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.18);
+  }
+  .map-filter-btn {
+    border: none;
+    background: transparent;
+    padding: 6px 10px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+    color: #333;
+  }
+  .map-filter-btn:hover { background: rgba(0,0,0,0.06); }
+  .map-filter-btn.active { background: #1c2b36; color: #fff; }
+  .sidebar {
+    flex: 1 1 320px;
+    max-width: 380px;
+    background: #fff;
+    padding: 16px;
+    overflow-y: auto;
+    border-left: 1px solid #e0e0e0;
+  }
+  .stat-row { display: flex; gap: 10px; margin-bottom: 16px; flex-wrap: wrap; }
+  .stat {
+    flex: 1 1 calc(50% - 5px);
+    background: #fff;
+    border-radius: 14px;
+    padding: 12px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    box-shadow: 0 2px 8px rgba(20,30,40,0.08);
+    border: 1px solid #edeff2;
+    transition: transform .12s ease, box-shadow .12s ease;
+  }
+  .stat:hover { transform: translateY(-1px); box-shadow: 0 5px 16px rgba(20,30,40,0.13); }
+  .stat-icon {
+    flex-shrink: 0;
+    width: 38px;
+    height: 38px;
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .stat-icon svg { width: 20px; height: 20px; }
+  .stat-text { min-width: 0; }
+  .stat .num { font-size: 21px; font-weight: 800; line-height: 1.05; }
+  .stat.safe .num { color: var(--safe); }
+  .stat.trapped .num { color: var(--trapped); }
+  .stat.waiting .num { color: var(--waiting); }
+  .stat.danger .num { color: var(--danger); }
+  .stat.rescued .num { color: var(--rescued); }
+  .stat.safe .stat-icon    { background: #e6f4e8; color: var(--safe); }
+  .stat.trapped .stat-icon { background: #fbe6e6; color: var(--trapped); }
+  .stat.waiting .stat-icon { background: #fdf1da; color: #b9790a; }
+  .stat.danger .stat-icon  { background: #ececec; color: var(--danger); }
+  .stat.rescued .stat-icon { background: #e2f5e7; color: var(--rescued); }
+  .stat .label { font-size: 10.5px; color: #777; text-transform: uppercase; letter-spacing: .3px; }
+
+  .triage-group {
+    margin-bottom: 10px;
+    border-radius: 8px;
+    overflow: hidden;
+    border: 1px solid #e0e0e0;
+  }
+  .triage-group summary {
+    cursor: pointer;
+    padding: 8px 10px;
+    font-weight: 700;
+    font-size: 12.5px;
+    list-style: none;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .triage-group summary::-webkit-details-marker { display: none; }
+  .triage-group.group-red summary { background: #fdecea; color: #b71c1c; }
+  .triage-group.group-yellow summary { background: #fff8e1; color: #8a6100; }
+  .triage-group.group-green summary { background: #e8f5e9; color: #1b5e20; }
+  .triage-group.group-other summary { background: #f4f5f7; color: #555; }
+  .triage-group.group-rescued summary { background: #e6f6ec; color: #145c2b; }
+  .group-count {
+    background: rgba(0,0,0,0.08);
+    border-radius: 10px;
+    padding: 1px 8px;
+    font-size: 11px;
+  }
+  .triage-group ul.userlist { padding: 8px; margin: 0; }
+  .triage-group li.empty {
+    color: #999;
+    font-style: italic;
+    border-left: none;
+    background: transparent;
+    padding: 4px 2px;
+    margin-bottom: 0;
+  }
+
+  ul.userlist { list-style: none; padding: 0; margin: 0; }
+  ul.userlist li {
+    padding: 10px;
+    border-radius: 8px;
+    margin-bottom: 8px;
+    border-left: 4px solid #ccc;
+    background: var(--bg);
+    font-size: 13px;
+  }
+  li.safe { border-color: var(--safe); }
+  li.trapped-red { border-color: var(--trapped); background: #fdecea; }
+  li.trapped-yellow { border-color: var(--waiting); }
+  li.trapped-green { border-color: var(--safe); }
+  li.waiting { border-color: var(--waiting); }
+  li.danger { border-color: var(--danger); }
+  li.rescued { border-color: var(--rescued); background: #f7fdf9; }
+  .qg-rescue-slot { margin-top: 6px; }
+  li .id { font-weight: 700; }
+  li .meta { color: #666; margin-top: 2px; }
+  .badge {
+    display: inline-block;
+    padding: 1px 7px;
+    border-radius: 10px;
+    font-size: 10px;
+    font-weight: 700;
+    color: #fff;
+    margin-left: 6px;
+  }
+  .badge.bt { background: #455a64; }
+  .badge.sos { background: #c62828; }
+  .badge.rescued-badge { background: var(--rescued); }
+  .sos-label {
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    color: #c62828;
+    font-weight: 800;
+    font-size: 11px;
+    text-shadow: 0 0 3px #fff, 0 0 3px #fff, 0 0 3px #fff;
+  }
+  /* Confirmed-rescued map label. Deliberately quieter than SOS — a
+     resolved case should read as "handled", not compete for attention
+     with people still waiting. */
+  .rescued-label {
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    color: #fff;
+    font-weight: 900;
+    font-size: 13px;
+    text-shadow: 0 0 3px rgba(0,0,0,.55), 0 0 3px rgba(0,0,0,.55);
+  }
+  button.demo {
+    background: #1c2b36;
+    color: #fff;
+    border: none;
+    padding: 8px 14px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 12px;
+  }
+
+  /* ── Phone / narrow-screen layout ──────────────────────────────────────
+     The desktop layout pins .layout to calc(100vh - 60px). On a narrow
+     screen the map and sidebar wrap onto separate rows, so the content
+     becomes taller than that fixed height and spills out — drawing on top
+     of the Recent Activity panel below it. Overlapping, unreadable text.
+
+     On phones we drop the fixed height entirely and let the page flow
+     normally: map on top with its own height, list underneath, activity
+     panel below that. Also enlarges tap targets, because an operator may
+     be doing this one-handed in the field.
+     ─────────────────────────────────────────────────────────────────── */
+  @media (max-width: 820px) {
+    .layout {
+      display: block;
+      flex: 0 0 auto;
+      height: auto;
+      min-height: 0;
+    }
+    #map-wrap {
+      height: 50vh;
+      min-height: 280px;
+      width: 100%;
+    }
+    .sidebar {
+      max-width: none;
+      width: 100%;
+      overflow-y: visible;
+      border-left: none;
+      border-top: 1px solid #e0e0e0;
+    }
+    #qg-audit { margin: 16px 12px 40px; }
+
+    /* Stat cards: two per row is still readable on a phone. */
+    .stat { flex: 1 1 calc(50% - 5px); }
+
+    /* Finger-sized tap targets. */
+    .map-filter-btn { padding: 9px 12px; font-size: 13px; }
+    .qg-bulk-check { padding: 6px 0; font-size: 13px; }
+    .qg-bulk-check input { width: 18px; height: 18px; }
+
+    header { padding: 12px 14px; }
+    header h1 { font-size: 15px; }
+    #qg-trigger-btn { width: 100%; justify-content: center; }
+    #qg-trigger-wrap { display: block; }
+
+    /* Modals: full-width with breathing room rather than a fixed box. */
+    #qg-rescue-modal, #qg-modal { width: calc(100vw - 32px); max-width: none; }
+
+    /* Bulk bar spans the screen bottom instead of floating centred. */
+    #qg-bulk-bar {
+      left: 12px;
+      right: 12px;
+      transform: translateY(140%);
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+    #qg-bulk-bar.show { transform: translateY(0); }
+  }
+</style>
+<style>
+  #qg-trigger-wrap {
+    position: relative;
+    display: inline-block;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  #qg-trigger-btn {
+    background: #FF3B30;
+    color: #fff;
+    font-size: 15px;
+    font-weight: 800;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    border: none;
+    border-radius: 12px;
+    padding: 14px 22px;
+    cursor: pointer;
+    box-shadow: 0 6px 22px rgba(255, 59, 48, 0.35);
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    transition: transform .08s ease, opacity .15s ease;
+  }
+  #qg-trigger-btn:hover  { transform: translateY(-1px); }
+  #qg-trigger-btn:active { transform: translateY(0); opacity: .9; }
+  #qg-trigger-btn[disabled] { opacity: .55; cursor: not-allowed; }
+
+  #qg-banner {
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    min-height: 68px;
+    padding: 14px 22px;
+    z-index: 99998;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    font-size: 20px;
+    font-weight: 800;
+    letter-spacing: .3px;
+    color: #fff;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.25);
+    transform: translateY(-100%);
+    transition: transform .35s cubic-bezier(.2,.9,.3,1);
+    text-align: center;
+  }
+  #qg-banner.show { transform: translateY(0); }
+  #qg-banner.ok  { background: #1F8A3A; }
+  #qg-banner.err { background: #C21818; }
+  #qg-banner .qg-banner-icon { font-size: 28px; line-height: 1; }
+  #qg-banner .qg-banner-close {
+    background: rgba(255,255,255,0.2);
+    color: #fff;
+    border: 0;
+    border-radius: 999px;
+    width: 32px; height: 32px;
+    font-size: 20px; font-weight: 900;
+    line-height: 1;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    margin-left: 12px;
+    padding: 0;
+  }
+  #qg-banner .qg-banner-close:hover { background: rgba(255,255,255,0.32); }
+
+  #qg-modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.72);
+    z-index: 99999;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+  }
+  #qg-modal-backdrop.show { display: flex; }
+  #qg-modal {
+    background: #fff;
+    border-radius: 16px;
+    padding: 32px 32px 24px;
+    max-width: 480px;
+    width: 100%;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.4);
+    border-top: 8px solid #C21818;
+    text-align: center;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  #qg-modal .qg-modal-icon { font-size: 56px; line-height: 1; margin-bottom: 12px; }
+  #qg-modal .qg-modal-title {
+    font-size: 26px;
+    font-weight: 900;
+    color: #C21818;
+    margin-bottom: 8px;
+    letter-spacing: .3px;
+  }
+  #qg-modal .qg-modal-body { font-size: 17px; color: #333; line-height: 1.45; margin-bottom: 22px; }
+  #qg-modal .qg-modal-actions {
+    display: flex;
+    gap: 12px;
+    justify-content: center;
+  }
+  #qg-modal .qg-modal-cancel {
+    background: #eee;
+    color: #333;
+    border: 0;
+    font-size: 17px;
+    font-weight: 700;
+    padding: 12px 24px;
+    border-radius: 10px;
+    cursor: pointer;
+    min-width: 120px;
+  }
+  #qg-modal .qg-modal-cancel:hover { background: #ddd; }
+  #qg-modal .qg-modal-ok {
+    background: #C21818;
+    color: #fff;
+    border: 0;
+    border-radius: 10px;
+    padding: 14px 40px;
+    font-size: 16px;
+    font-weight: 800;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    cursor: pointer;
+    min-width: 140px;
+  }
+  #qg-modal .qg-modal-ok:hover { background: #A11313; }
+
+  @media (max-width: 520px) {
+    #qg-banner { font-size: 16px; padding: 12px 16px; }
+    #qg-modal .qg-modal-title { font-size: 22px; }
+    #qg-modal .qg-modal-body { font-size: 15px; }
+  }
+</style>
+<style>
+  #qg-audit {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    max-width: 100%;
+    margin: 20px;
+  }
+  #qg-audit .qg-audit-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    margin-bottom: 12px;
+  }
+  #qg-audit h3 { margin: 0; font-size: 18px; font-weight: 800; color: #222; }
+  #qg-audit .qg-audit-meta {
+    font-size: 12px;
+    color: #888;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  #qg-audit .qg-audit-row {
+    background: #fff;
+    border: 1px solid #e6e6ea;
+    border-left-width: 4px;
+    border-radius: 8px;
+    padding: 10px 14px;
+    margin-bottom: 8px;
+  }
+  #qg-audit .qg-audit-row.trigger { border-left-color: #C21818; }
+  #qg-audit .qg-audit-row.status  { border-left-color: #4A90E2; }
+  #qg-audit .qg-audit-row.rescued         { border-left-color: #1F8A3A; background: #f7fdf9; }
+  #qg-audit .qg-audit-row.rescue_reverted { border-left-color: #EA9500; background: #fff8ec; }
+  #qg-audit .qg-audit-title { font-weight: 700; font-size: 14px; color: #222; }
+  #qg-audit .qg-audit-at {
+    color: #888;
+    font-size: 11px;
+    margin-top: 4px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  #qg-audit .qg-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 700;
+    color: #fff;
+    margin-left: 6px;
+    vertical-align: middle;
+  }
+  #qg-audit .qg-audit-empty {
+    color: #888;
+    font-size: 13px;
+    padding: 20px;
+    text-align: center;
+    background: #fafafa;
+    border-radius: 8px;
+  }
+  #qg-audit code {
+    background: #f4f4f6;
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+</style>
+</head>
+<body>
+<!-- ═════════════════════════════════════════════════════════════════════
+     Quake Angel dashboard auth guard — per-user Google sign-in.
+     Must load BEFORE any script that calls qaApi() or qaAuth.jwt().
+     Exposes: qaAuth.jwt() / .user() / .signIn() / .signOut() / .onChange(cb)
+              qaAuth.idle.expireNow() / .reset()  (test hooks)
+              qaApi(path, options) -> raw Response, attaches Bearer JWT,
+              clears local session on 401 before returning.
+     Also: automatic idle-timeout sign-out (15 min default, 60s warning
+     modal). Set CONFIG.IDLE_TIMEOUT_MS = 0 to disable.
+     ═════════════════════════════════════════════════════════════════════ -->
+
+<div id="qa-auth-container"></div>
+
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<script>
+(function () {
+  "use strict";
+
+  // ── Config ────────────────────────────────────────────────────────────
+  const CONFIG = {
+    API_BASE: "https://quake-alert-18.emergent.host",
+    GOOGLE_CLIENT_ID: "182168290060-ak0g5brvumsehktg0co4iulnd464fc19.apps.googleusercontent.com",
+    CONTAINER_ID: "qa-auth-container",
+    REQUIRE_ROLES: ["admin", "operator"],
+    STORAGE_KEY: "qa_jwt",
+    STORAGE_USER_KEY: "qa_user",
+    // Idle timeout — signs the operator out after N ms of no activity.
+    // 15 min matches the "currently signed in" definition used elsewhere.
+    // Warning modal appears N ms before expiry with a "Stay signed in" CTA.
+    // Set IDLE_TIMEOUT_MS to 0 to disable entirely (not recommended on
+    // shared workstations — this is what closes the "walked-away-from-desk"
+    // gap in the per-user attribution model).
+    IDLE_TIMEOUT_MS: 15 * 60 * 1000,
+    IDLE_WARNING_MS: 60 * 1000,
+  };
+
+  // ── State ─────────────────────────────────────────────────────────────
+  const listeners = new Set();
+  function notify() { listeners.forEach(fn => { try { fn(qaAuth.user()); } catch (_) {} }); }
+
+  // ── Persistence helpers ───────────────────────────────────────────────
+  function getStoredJwt() { try { return sessionStorage.getItem(CONFIG.STORAGE_KEY); } catch (_) { return null; } }
+  function getStoredUser() {
+    try {
+      const raw = sessionStorage.getItem(CONFIG.STORAGE_USER_KEY);
+      return raw ? JSON.parse(raw) : null;
+    } catch (_) { return null; }
+  }
+  function setStored(jwt, user) {
+    try {
+      if (jwt) sessionStorage.setItem(CONFIG.STORAGE_KEY, jwt);
+      else sessionStorage.removeItem(CONFIG.STORAGE_KEY);
+      if (user) sessionStorage.setItem(CONFIG.STORAGE_USER_KEY, JSON.stringify(user));
+      else sessionStorage.removeItem(CONFIG.STORAGE_USER_KEY);
+    } catch (_) { /* private-mode etc. — session is memory-only, which is fine */ }
+    renderChip();
+    notify();
+  }
+
+  // ── Google credential callback ────────────────────────────────────────
+  async function onGoogleCredential(response) {
+    if (!response || !response.credential) return;
+    try {
+      const r = await fetch(CONFIG.API_BASE + "/api/auth/google", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({id_token: response.credential}),
+      });
+      if (!r.ok) {
+        const detail = (await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`;
+        showError("Sign-in failed: " + detail);
+        setStored(null, null);
+        return;
+      }
+      const data = await r.json();
+      setStored(data.token, data.user);
+    } catch (e) {
+      showError("Sign-in failed: " + (e.message || "network error"));
+      setStored(null, null);
+    }
+  }
+
+  window.__qaGoogleCredential = onGoogleCredential;
+
+  // ── UI rendering ──────────────────────────────────────────────────────
+  const CSS = `
+    .qa-auth-root { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    .qa-signed-out { display: flex; align-items: center; gap: 12px; padding: 12px; background: #f8f8f8; border: 1px solid #e5e5e5; border-radius: 8px; }
+    .qa-signed-out h3 { margin: 0; font-size: 14px; color: #333; font-weight: 600; }
+    .qa-signed-out .g_id_signin { flex-shrink: 0; }
+    .qa-chip { display: inline-flex; align-items: center; gap: 8px; padding: 6px 10px; background: #fff; border: 1px solid #e0e0e0; border-radius: 999px; font-size: 12px; color: #444; }
+    .qa-chip b { color: #111; }
+    .qa-chip .qa-role { background: #eef; color: #226; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; }
+    .qa-chip .qa-role.admin { background: #fee; color: #a11; }
+    .qa-chip button { background: none; border: none; color: #a44; cursor: pointer; font-size: 12px; padding: 0; }
+    .qa-chip button:hover { text-decoration: underline; }
+    .qa-error { margin-top: 8px; padding: 8px 12px; background: #fee; border: 1px solid #fbb; color: #a11; border-radius: 6px; font-size: 13px; }
+    .qa-role-denied { padding: 16px; background: #fee; border: 1px solid #fbb; border-radius: 8px; color: #700; font-size: 14px; }
+    /* ── Idle timeout warning modal ─────────────────────────────────── */
+    .qa-idle-backdrop {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.72);
+      z-index: 99999; display: none; align-items: center; justify-content: center;
+      padding: 24px;
+    }
+    .qa-idle-backdrop.show { display: flex; }
+    .qa-idle-modal {
+      background: #fff; border-radius: 16px; padding: 32px;
+      max-width: 440px; width: 100%; text-align: center;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.4);
+      border-top: 8px solid #EA9500;
+    }
+    .qa-idle-modal .qa-idle-icon { font-size: 48px; margin-bottom: 12px; }
+    .qa-idle-modal .qa-idle-title {
+      font-size: 22px; font-weight: 900; color: #222; margin-bottom: 8px;
+    }
+    .qa-idle-modal .qa-idle-body {
+      font-size: 15px; color: #444; line-height: 1.5; margin-bottom: 20px;
+    }
+    .qa-idle-modal .qa-idle-countdown {
+      font-size: 32px; font-weight: 900; color: #EA9500;
+      font-variant-numeric: tabular-nums; margin-bottom: 20px;
+    }
+    .qa-idle-modal .qa-idle-btn {
+      width: 100%; padding: 14px 20px; border-radius: 10px;
+      font-size: 14px; font-weight: 800; letter-spacing: 1px; text-transform: uppercase;
+      cursor: pointer; border: 0; background: #1F8A3A; color: #fff;
+    }
+    .qa-idle-modal .qa-idle-btn:hover { opacity: 0.9; }
+  `;
+  const styleEl = document.createElement("style");
+  styleEl.textContent = CSS;
+  document.head.appendChild(styleEl);
+
+  const container = document.getElementById(CONFIG.CONTAINER_ID);
+  if (!container) {
+    console.error("[QuakeAngel] Auth container #" + CONFIG.CONTAINER_ID + " not found");
+    return;
+  }
+  container.className = "qa-auth-root";
+
+  function showError(msg) {
+    let el = container.querySelector(".qa-error");
+    if (!el) { el = document.createElement("div"); el.className = "qa-error"; container.appendChild(el); }
+    el.textContent = msg;
+    setTimeout(() => { if (el.parentNode) el.parentNode.removeChild(el); }, 6000);
+  }
+
+  function renderChip() {
+    const user = getStoredUser();
+    if (!user) {
+      renderSignInButton();
+      return;
+    }
+    if (CONFIG.REQUIRE_ROLES && CONFIG.REQUIRE_ROLES.length &&
+        !CONFIG.REQUIRE_ROLES.includes(user.role)) {
+      container.innerHTML =
+        '<div class="qa-role-denied">Your account (<b>' +
+        escapeHtml(user.email) + '</b>) does not have permission to use this dashboard. ' +
+        'Required role: <code>' + CONFIG.REQUIRE_ROLES.join(" or ") + '</code>. ' +
+        'Ask an admin to upgrade your role.</div>';
+      return;
+    }
+    container.innerHTML = "";
+    const chip = document.createElement("div");
+    chip.className = "qa-chip";
+    chip.innerHTML =
+      '<span>Signed in as <b>' + escapeHtml(user.email) + '</b></span>' +
+      '<span class="qa-role ' + (user.role === "admin" ? "admin" : "operator") + '">' +
+      escapeHtml(user.role) + '</span>' +
+      '<button type="button" data-qa-logout>Sign out</button>';
+    chip.querySelector("[data-qa-logout]").addEventListener("click", () => qaAuth.signOut());
+    container.appendChild(chip);
+  }
+
+  function renderSignInButton() {
+    container.innerHTML = "";
+    const wrap = document.createElement("div");
+    wrap.className = "qa-signed-out";
+    wrap.innerHTML =
+      '<h3>Dashboard sign-in</h3>' +
+      '<div id="qa-google-button"></div>';
+    container.appendChild(wrap);
+
+    const tryInit = () => {
+      if (!window.google || !window.google.accounts || !window.google.accounts.id) {
+        return setTimeout(tryInit, 100);
+      }
+      window.google.accounts.id.initialize({
+        client_id: CONFIG.GOOGLE_CLIENT_ID,
+        callback: window.__qaGoogleCredential,
+        auto_select: false,
+        cancel_on_tap_outside: true,
+      });
+      window.google.accounts.id.renderButton(
+        document.getElementById("qa-google-button"),
+        {
+          theme: "outline",
+          size: "large",
+          type: "standard",
+          text: "signin_with",
+          shape: "rectangular",
+          logo_alignment: "left",
+        },
+      );
+    };
+    tryInit();
+  }
+
+  function escapeHtml(s) {
+    return String(s ?? "").replace(/[&<>"']/g, c => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+    }[c]));
+  }
+
+  // ── Public API ────────────────────────────────────────────────────────
+  window.qaAuth = {
+    jwt: () => getStoredJwt(),
+    user: () => getStoredUser(),
+    signIn: () => {
+      if (!getStoredJwt()) renderSignInButton();
+    },
+    signOut: async () => {
+      const jwt = getStoredJwt();
+      if (jwt) {
+        try {
+          await fetch(CONFIG.API_BASE + "/api/auth/logout", {
+            method: "POST",
+            headers: {"Authorization": "Bearer " + jwt},
+          });
+        } catch (_) { /* offline logout is fine */ }
+      }
+      setStored(null, null);
+    },
+    onChange: (cb) => { listeners.add(cb); return () => listeners.delete(cb); },
+    // Idle timeout hooks — mostly for testing / manual triggering. In
+    // normal use the idle timer runs automatically once signed in.
+    idle: {
+      expireNow: () => (window.__qaIdleTimeout && window.__qaIdleTimeout.expire()),
+      reset: () => (window.__qaIdleTimeout && window.__qaIdleTimeout.restart()),
+    },
+  };
+
+  // ── Global fetch wrapper ──────────────────────────────────────────────
+  window.qaApi = async function (path, options) {
+    options = options || {};
+    const headers = Object.assign(
+      {"Content-Type": "application/json"},
+      options.headers || {},
+    );
+    const jwt = getStoredJwt();
+    if (jwt) headers["Authorization"] = "Bearer " + jwt;
+    const r = await fetch(CONFIG.API_BASE + path, Object.assign({}, options, {headers}));
+    if (r.status === 401) {
+      setStored(null, null);
+    }
+    return r;
+  };
+
+  // ── Idle timeout ──────────────────────────────────────────────────────
+  // Signs the operator out after CONFIG.IDLE_TIMEOUT_MS of no activity.
+  // Warning modal appears CONFIG.IDLE_WARNING_MS before expiry with a
+  // countdown and a "Stay signed in" button.
+  //
+  // Why this exists: per-user Google sign-in gives us named attribution in
+  // the audit trail, but that attribution is only meaningful if the named
+  // person is actually the one at the keyboard. An operator who walks away
+  // from an unlocked dashboard tab lets the next person to touch the
+  // keyboard act under their identity — silently undermining the entire
+  // audit trail. Idle timeout closes that gap.
+  //
+  // Not solving cross-tab sync in v1 — sessionStorage is per-tab anyway
+  // (each tab has its own JWT), and multiple tabs on one dispatcher
+  // workstation is uncommon. Per-tab idle timers is honest.
+  const IdleTimeout = (function () {
+    let expiryTimer = null;
+    let warningTimer = null;
+    let countdownInterval = null;
+    let lastActivity = Date.now();
+    let installed = false;
+    let backdropEl = null;
+    let countdownEl = null;
+    // Debounce: mousemove alone can fire dozens of times per second. Reset
+    // the timer at most every 5s to avoid CPU noise while keeping the
+    // "recent activity extends the session" guarantee accurate to within
+    // 5 seconds — well inside the 15-minute budget.
+    const ACTIVITY_DEBOUNCE_MS = 5000;
+    const ACTIVITY_EVENTS = [
+      "mousemove", "mousedown", "keydown",
+      "touchstart", "scroll", "click",
+    ];
+    function ensureModal() {
+      if (backdropEl) return;
+      backdropEl = document.createElement("div");
+      backdropEl.className = "qa-idle-backdrop";
+      backdropEl.setAttribute("role", "alertdialog");
+      backdropEl.setAttribute("aria-modal", "true");
+      backdropEl.innerHTML =
+        '<div class="qa-idle-modal">' +
+          '<div class="qa-idle-icon" aria-hidden="true">⏱️</div>' +
+          '<div class="qa-idle-title">Still there?</div>' +
+          '<div class="qa-idle-body">You\'ll be signed out for inactivity to protect the audit trail. Move your mouse or press any key to stay signed in.</div>' +
+          '<div class="qa-idle-countdown" aria-live="polite">60</div>' +
+          '<button type="button" class="qa-idle-btn">Stay signed in</button>' +
+        '</div>';
+      document.body.appendChild(backdropEl);
+      countdownEl = backdropEl.querySelector(".qa-idle-countdown");
+      backdropEl.querySelector(".qa-idle-btn").addEventListener("click", extendSession);
+    }
+    function showWarning() {
+      ensureModal();
+      backdropEl.classList.add("show");
+      let secondsLeft = Math.ceil(CONFIG.IDLE_WARNING_MS / 1000);
+      countdownEl.textContent = String(secondsLeft);
+      if (countdownInterval) clearInterval(countdownInterval);
+      countdownInterval = setInterval(() => {
+        secondsLeft -= 1;
+        if (secondsLeft <= 0) {
+          countdownEl.textContent = "0";
+          clearInterval(countdownInterval);
+          countdownInterval = null;
+          return;
+        }
+        countdownEl.textContent = String(secondsLeft);
+      }, 1000);
+    }
+    function hideWarning() {
+      if (backdropEl) backdropEl.classList.remove("show");
+      if (countdownInterval) {
+        clearInterval(countdownInterval);
+        countdownInterval = null;
+      }
+    }
+    function extendSession() {
+      // Explicit user gesture — reset the whole clock.
+      hideWarning();
+      lastActivity = Date.now();
+      restart();
+    }
+    async function expire() {
+      hideWarning();
+      stop();
+      // Same path as manual sign-out — server-side audit line + client clear.
+      try { await window.qaAuth.signOut(); } catch (_) {}
+    }
+    function scheduleExpiry() {
+      if (expiryTimer) clearTimeout(expiryTimer);
+      if (warningTimer) clearTimeout(warningTimer);
+      const timeout = CONFIG.IDLE_TIMEOUT_MS;
+      const warnAt = timeout - CONFIG.IDLE_WARNING_MS;
+      if (warnAt > 0) {
+        warningTimer = setTimeout(showWarning, warnAt);
+      } else {
+        showWarning();
+      }
+      expiryTimer = setTimeout(expire, timeout);
+    }
+    function restart() {
+      scheduleExpiry();
+    }
+    function onActivity() {
+      const now = Date.now();
+      if (now - lastActivity < ACTIVITY_DEBOUNCE_MS) return;
+      lastActivity = now;
+      if (!getStoredJwt()) return;
+      // If the warning modal is showing, DON'T silently reset — require the
+      // explicit "Stay signed in" click. A stray mouse twitch shouldn't get
+      // to answer "did you mean to still be signed in?" on the user's
+      // behalf. Deliberate UX call.
+      if (backdropEl && backdropEl.classList.contains("show")) return;
+      scheduleExpiry();
+    }
+    function install() {
+      if (installed) return;
+      if (!CONFIG.IDLE_TIMEOUT_MS || CONFIG.IDLE_TIMEOUT_MS <= 0) return;
+      ACTIVITY_EVENTS.forEach(evt => {
+        window.addEventListener(evt, onActivity, {passive: true, capture: true});
+      });
+      installed = true;
+    }
+    function start() {
+      install();
+      if (!getStoredJwt()) return;
+      lastActivity = Date.now();
+      scheduleExpiry();
+    }
+    function stop() {
+      if (expiryTimer) { clearTimeout(expiryTimer); expiryTimer = null; }
+      if (warningTimer) { clearTimeout(warningTimer); warningTimer = null; }
+      if (countdownInterval) { clearInterval(countdownInterval); countdownInterval = null; }
+      hideWarning();
+    }
+    return { start, stop, restart, expire, _debug: {
+      getLastActivity: () => lastActivity,
+      isWarningShowing: () => backdropEl && backdropEl.classList.contains("show"),
+    }};
+  })();
+
+  // Wire idle timeout to auth state changes: start on sign-in, stop on
+  // sign-out. onChange fires on every setStored() call, so we just check
+  // "signed in?" each time and start/stop accordingly.
+  window.__qaIdleTimeout = IdleTimeout;
+  listeners.add((user) => {
+    if (user) IdleTimeout.start();
+    else IdleTimeout.stop();
+  });
+
+  // ── Boot ──────────────────────────────────────────────────────────────
+  renderChip();
+  // Start the idle timer immediately if we booted with a cached JWT.
+  IdleTimeout.start();
+  (async () => {
+    if (!getStoredJwt()) return;
+    try {
+      const r = await window.qaApi("/api/auth/me");
+      if (r.ok) {
+        const data = await r.json();
+        if (data.user) setStored(getStoredJwt(), data.user);
+      }
+    } catch (_) { /* offline is fine — cached state remains */ }
+  })();
+})();
+</script>
+
+<!-- ═════════════════════════════════════════════════════════════════════
+     Quake Angel — Preview Mode dashboard panel (admin-only)
+     Must load AFTER the auth guard above (calls qaApi + qaAuth).
+     Admin-only card: enrol a device in one click, toggle preview on/off,
+     set trigger tier + rate limit, panic kill, and see recent activity.
+     ═════════════════════════════════════════════════════════════════════ -->
+<!-- NOTE: hidden via CSS (below), NOT an inline style. An inline
+     style="display:none" would out-specify the .show class rule and the
+     panel could never become visible. -->
+<div id="qa-preview-panel"></div>
+<script>
+(function () {
+  "use strict";
+
+  // ── Config ───────────────────────────────────────────────────────────
+  const COUNTRY = "MT";
+  const CONTAINER_ID = "qa-preview-panel";
+  const TIERS = [
+    {value: "all_ingested",  label: "All ingested events (M2.5+, ≤600km)"},
+    {value: "quiet_tier",    label: "Quiet tier (M3.0+, ≤100km, sev ≥2.0)"},
+    {value: "critical_tier", label: "Critical tier (M5.0+, ≤300km, sev ≥4.0)"},
+    {value: "neo_original",  label: "Neo original (M4.0+, ≤300km, sev ≥3.0)"},
+  ];
+
+  const container = document.getElementById(CONTAINER_ID);
+  if (!container) return;
+
+  // ── Styles ───────────────────────────────────────────────────────────
+  const CSS = `
+    #${CONTAINER_ID} {
+      display: none;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      max-width: 900px; margin: 16px auto; padding: 20px;
+      background: #fff; border: 1px solid #e5e5e5; border-radius: 12px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+    }
+    #${CONTAINER_ID}.show { display: block; }
+    #${CONTAINER_ID} h2 {
+      margin: 0 0 4px; font-size: 18px; font-weight: 800; color: #222;
+      display: flex; align-items: center; gap: 8px;
+    }
+    #${CONTAINER_ID} h2 .qa-pv-badge {
+      font-size: 10px; padding: 3px 8px; border-radius: 999px;
+      background: #fee; color: #a11; font-weight: 700; letter-spacing: 1px;
+    }
+    #${CONTAINER_ID} h2 .qa-pv-badge.on { background: #e0f3e5; color: #1F8A3A; }
+    #${CONTAINER_ID} .qa-pv-sub { font-size: 12px; color: #666; margin-bottom: 16px; }
+    #${CONTAINER_ID} .qa-pv-grid {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 12px;
+    }
+    #${CONTAINER_ID} .qa-pv-card {
+      padding: 12px; background: #fafafa; border: 1px solid #eaeaea; border-radius: 8px;
+    }
+    #${CONTAINER_ID} .qa-pv-card h3 {
+      margin: 0 0 8px; font-size: 13px; font-weight: 700; color: #333;
+      text-transform: uppercase; letter-spacing: 0.5px;
+    }
+    #${CONTAINER_ID} .qa-pv-row { display: flex; align-items: center; gap: 8px; padding: 6px 0; font-size: 13px; }
+    #${CONTAINER_ID} .qa-pv-row + .qa-pv-row { border-top: 1px solid #eee; }
+    #${CONTAINER_ID} .qa-pv-row code { font-family: SFMono-Regular, Menlo, monospace; font-size: 11px; color: #444; background: #eee; padding: 2px 6px; border-radius: 4px; }
+    #${CONTAINER_ID} .qa-pv-row .qa-pv-meta { color: #777; font-size: 11px; }
+    #${CONTAINER_ID} .qa-pv-row button { margin-left: auto; }
+    #${CONTAINER_ID} button {
+      padding: 8px 14px; border-radius: 8px; border: 0; cursor: pointer;
+      font-size: 13px; font-weight: 700;
+    }
+    #${CONTAINER_ID} .qa-pv-btn-add { background: #1F8A3A; color: #fff; }
+    #${CONTAINER_ID} .qa-pv-btn-remove { background: #eee; color: #333; }
+    #${CONTAINER_ID} .qa-pv-btn-primary { background: #1877E7; color: #fff; padding: 10px 18px; }
+    #${CONTAINER_ID} .qa-pv-btn-kill { background: #C11414; color: #fff; padding: 10px 18px; }
+    #${CONTAINER_ID} .qa-pv-btn-primary:disabled, #${CONTAINER_ID} .qa-pv-btn-add:disabled { opacity: 0.5; cursor: not-allowed; }
+    #${CONTAINER_ID} .qa-pv-controls { display: flex; align-items: center; gap: 12px; margin-top: 16px; flex-wrap: wrap; }
+    #${CONTAINER_ID} .qa-pv-controls label { font-size: 13px; color: #333; font-weight: 600; }
+    #${CONTAINER_ID} .qa-pv-controls select, #${CONTAINER_ID} .qa-pv-controls input {
+      padding: 8px; border: 1px solid #ccc; border-radius: 6px; font-size: 13px;
+    }
+    #${CONTAINER_ID} .qa-pv-toggle {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 8px 14px; border-radius: 999px; background: #fee; color: #a11;
+      font-size: 13px; font-weight: 700;
+    }
+    #${CONTAINER_ID} .qa-pv-toggle.on { background: #e0f3e5; color: #1F8A3A; }
+    #${CONTAINER_ID} .qa-pv-recent-item {
+      display: flex; gap: 8px; padding: 6px 0; font-size: 12px;
+      border-bottom: 1px solid #eee; align-items: center;
+    }
+    #${CONTAINER_ID} .qa-pv-recent-item .qa-pv-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+    #${CONTAINER_ID} .qa-pv-recent-item .qa-pv-dot.ok { background: #1F8A3A; }
+    #${CONTAINER_ID} .qa-pv-recent-item .qa-pv-dot.err { background: #C11414; }
+    #${CONTAINER_ID} .qa-pv-recent-item .qa-pv-dot.skip { background: #C99; }
+    #${CONTAINER_ID} .qa-pv-empty { color: #888; font-size: 12px; padding: 12px; text-align: center; font-style: italic; }
+    #${CONTAINER_ID} .qa-pv-banner {
+      padding: 10px 14px; border-radius: 8px; font-size: 13px; margin-bottom: 12px;
+    }
+    #${CONTAINER_ID} .qa-pv-banner.err { background: #fee; color: #a11; }
+    #${CONTAINER_ID} .qa-pv-banner.ok { background: #e0f3e5; color: #1F8A3A; }
+    #${CONTAINER_ID} .qa-pv-warn { background: #fff3cd; color: #856404; padding: 10px 14px; border-radius: 8px; font-size: 12px; margin-bottom: 12px; }
+    @media (max-width: 640px) {
+      #${CONTAINER_ID} .qa-pv-grid { grid-template-columns: 1fr; }
+    }
+  `;
+  const styleEl = document.createElement("style");
+  styleEl.textContent = CSS;
+  document.head.appendChild(styleEl);
+
+  // ── State ────────────────────────────────────────────────────────────
+  let state = {config: null, candidates: [], recent: []};
+
+  // ── API helpers ──────────────────────────────────────────────────────
+  async function apiGet(path) {
+    if (!window.qaApi) throw new Error("qaApi not loaded — auth guard must load first");
+    const r = await window.qaApi(path);
+    if (!r.ok) throw new Error(`${path}: ${r.status}`);
+    return r.json();
+  }
+  async function apiPost(path, body) {
+    if (!window.qaApi) throw new Error("qaApi not loaded");
+    const r = await window.qaApi(path, {method: "POST", body: JSON.stringify(body || {})});
+    if (!r.ok) {
+      const detail = (await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`;
+      throw new Error(detail);
+    }
+    return r.json();
+  }
+
+  // ── Rendering ────────────────────────────────────────────────────────
+  function showBanner(kind, msg) {
+    const existing = container.querySelector(".qa-pv-banner.transient");
+    if (existing) existing.remove();
+    const el = document.createElement("div");
+    el.className = "qa-pv-banner " + kind + " transient";
+    el.textContent = msg;
+    container.insertBefore(el, container.firstChild);
+    setTimeout(() => el.remove(), 6000);
+  }
+  function fmt(dt) {
+    if (!dt) return "—";
+    try { return new Date(dt).toLocaleString(); } catch (_) { return String(dt); }
+  }
+  function timeAgo(dt) {
+    if (!dt) return "—";
+    const s = Math.floor((Date.now() - new Date(dt).getTime()) / 1000);
+    if (s < 60) return `${s}s ago`;
+    if (s < 3600) return `${Math.floor(s/60)}m ago`;
+    if (s < 86400) return `${Math.floor(s/3600)}h ago`;
+    return `${Math.floor(s/86400)}d ago`;
+  }
+  function escapeHtml(s) {
+    return String(s ?? "").replace(/[&<>"']/g, c => ({
+      "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;"
+    }[c]));
+  }
+
+  function render() {
+    const cfg = (state.config && state.config.preview_mode) || {};
+    const enabled = !!cfg.enabled;
+    const enrolled = new Set(cfg.device_ids || []);
+    const unenrolled = (state.candidates || []).filter(c => !enrolled.has(c.device_id));
+
+    container.innerHTML = `
+      <h2>
+        Preview mode
+        <span class="qa-pv-badge ${enabled ? "on" : ""}">${enabled ? "ENABLED" : "DISABLED"}</span>
+      </h2>
+      <div class="qa-pv-sub">
+        Sends non-critical preview notifications to allow-listed iOS devices for EMSC/USGS events in ${(state.config && state.config.country_name) || COUNTRY}.
+        Never uses the critical-alerts / siren path. Rate-limited per device. Audit-tagged separately from real triggers.
+      </div>
+      <div id="qa-pv-banner-slot"></div>
+      <div class="qa-pv-controls">
+        <div class="qa-pv-toggle ${enabled ? "on" : ""}">${enabled ? "● Currently ON" : "○ Currently OFF"}</div>
+        <button class="qa-pv-btn-primary" data-action="toggle">
+          ${enabled ? "Turn OFF" : "Turn ON"}
+        </button>
+        <button class="qa-pv-btn-kill" data-action="kill" title="Disable preview mode across ALL countries immediately">
+          🚨 PANIC KILL
+        </button>
+      </div>
+      <div class="qa-pv-controls">
+        <label>Trigger tier:
+          <select data-action="set-tier">
+            ${TIERS.map(t => `<option value="${t.value}"${cfg.trigger_tier===t.value?" selected":""}>${escapeHtml(t.label)}</option>`).join("")}
+          </select>
+        </label>
+        <label>Rate limit (min/device):
+          <input type="number" min="1" max="1440" value="${cfg.rate_limit_minutes || 10}" data-action="set-rate" style="width:80px">
+        </label>
+        <button class="qa-pv-btn-primary" data-action="save-tier-rate">Save</button>
+      </div>
+      <div class="qa-pv-grid">
+        <div class="qa-pv-card">
+          <h3>Enrolled devices (${enrolled.size})</h3>
+          ${enrolled.size === 0 ? '<div class="qa-pv-empty">No devices enrolled yet.</div>' :
+            Array.from(enrolled).map(id => `
+              <div class="qa-pv-row">
+                <code>${escapeHtml(id)}</code>
+                <button class="qa-pv-btn-remove" data-action="remove" data-id="${escapeHtml(id)}">Remove</button>
+              </div>`).join("")}
+        </div>
+        <div class="qa-pv-card">
+          <h3>Recent iOS registrations (${unenrolled.length})</h3>
+          ${unenrolled.length === 0 ? '<div class="qa-pv-empty">No unenrolled iOS devices in the last 20 registrations.</div>' :
+            unenrolled.map(c => `
+              <div class="qa-pv-row">
+                <div>
+                  <code>${escapeHtml(c.device_id)}</code>
+                  <div class="qa-pv-meta">Registered ${timeAgo(c.updated_at)} · token ${escapeHtml(c.device_token_fingerprint || "—")}</div>
+                </div>
+                <button class="qa-pv-btn-add" data-action="add" data-id="${escapeHtml(c.device_id)}">Add to preview</button>
+              </div>`).join("")}
+        </div>
+      </div>
+      <div class="qa-pv-card" style="margin-top:16px;">
+        <h3>Recent preview activity (last ${state.recent.length})</h3>
+        ${state.recent.length === 0 ? '<div class="qa-pv-empty">No preview notifications have fired yet. Enable + wait for a seismic event.</div>' :
+          state.recent.map(n => `
+            <div class="qa-pv-recent-item">
+              <span class="qa-pv-dot ${n.delivered ? "ok" : (n.skipped_reason ? "skip" : "err")}"></span>
+              <div style="flex:1;">
+                <div><strong>${escapeHtml(n.title || "(no title)")}</strong> — ${escapeHtml(n.body || "")}</div>
+                <div class="qa-pv-meta">
+                  ${timeAgo(n.sent_at)} ·
+                  device <code>${escapeHtml(n.device_id || "—")}</code> ·
+                  ${n.delivered ? "delivered" : (n.skipped_reason ? "skipped: " + escapeHtml(n.skipped_reason) : "failed: " + escapeHtml(n.error || n.reason || "unknown"))}
+                </div>
+              </div>
+            </div>`).join("")}
+      </div>
+      <div style="margin-top:12px; font-size:11px; color:#888; text-align:right;">
+        Last refreshed ${fmt(new Date())} ·
+        <a href="#" data-action="refresh">Refresh now</a>
+      </div>
+    `;
+
+    container.querySelectorAll("[data-action]").forEach(el => {
+      el.addEventListener("click", handleAction);
+    });
+  }
+
+  // ── Actions ──────────────────────────────────────────────────────────
+  async function handleAction(e) {
+    e.preventDefault();
+    const action = e.currentTarget.getAttribute("data-action");
+    const id = e.currentTarget.getAttribute("data-id");
+    try {
+      if (action === "add") {
+        await apiPost("/api/admin/emsc/preview/add-device", {device_id: id});
+        showBanner("ok", `Added ${id} to allowlist.`);
+      } else if (action === "remove") {
+        const cfg = state.config.preview_mode || {};
+        const newList = (cfg.device_ids || []).filter(x => x !== id);
+        await apiPost("/api/admin/emsc/preview/config", {device_ids: newList});
+        showBanner("ok", `Removed ${id}.`);
+      } else if (action === "toggle") {
+        const cur = !!(state.config.preview_mode && state.config.preview_mode.enabled);
+        await apiPost("/api/admin/emsc/preview/config", {enabled: !cur});
+        showBanner("ok", cur ? "Preview mode DISABLED." : "Preview mode ENABLED.");
+      } else if (action === "set-tier") {
+        return;
+      } else if (action === "set-rate") {
+        return;
+      } else if (action === "save-tier-rate") {
+        const tier = container.querySelector("[data-action=set-tier]").value;
+        const rate = parseInt(container.querySelector("[data-action=set-rate]").value, 10);
+        await apiPost("/api/admin/emsc/preview/config", {trigger_tier: tier, rate_limit_minutes: rate});
+        showBanner("ok", `Tier=${tier}, rate=${rate}min saved.`);
+      } else if (action === "kill") {
+        if (!confirm("Disable preview mode across ALL countries immediately?")) return;
+        const r = await apiPost("/api/admin/emsc/preview/kill", {});
+        showBanner("ok", `KILL: ${r.countries_affected} country/ies affected.`);
+      } else if (action === "refresh") {
+        // fall through to refresh
+      }
+      await refresh();
+    } catch (err) {
+      showBanner("err", "Failed: " + (err.message || err));
+    }
+  }
+
+  // ── Data loading ─────────────────────────────────────────────────────
+  async function refresh() {
+    try {
+      const [cfg, cands, recent] = await Promise.all([
+        apiGet(`/api/admin/emsc/preview/config?country_code=${COUNTRY}`),
+        apiGet("/api/admin/emsc/preview/candidates?limit=20"),
+        apiGet("/api/admin/emsc/preview/recent?limit=20"),
+      ]);
+      state.config = cfg;
+      state.candidates = cands.candidates || [];
+      state.recent = recent.notifications || [];
+      render();
+    } catch (err) {
+      container.innerHTML = `<div class="qa-pv-banner err">Failed to load preview config: ${escapeHtml(err.message || String(err))}</div>`;
+    }
+  }
+
+  // ── Visibility gating ────────────────────────────────────────────────
+  function updateVisibility() {
+    const user = window.qaAuth && window.qaAuth.user();
+    if (user && user.role === "admin") {
+      container.classList.add("show");
+      refresh();
+    } else {
+      container.classList.remove("show");
+      container.innerHTML = "";
+    }
+  }
+  if (window.qaAuth) {
+    window.qaAuth.onChange(updateVisibility);
+    updateVisibility();
+  } else {
+    let tries = 0;
+    const wait = setInterval(() => {
+      tries += 1;
+      if (window.qaAuth) {
+        clearInterval(wait);
+        window.qaAuth.onChange(updateVisibility);
+        updateVisibility();
+      } else if (tries > 50) {
+        clearInterval(wait);
+        console.error("[QuakeAngel] Preview panel: qaAuth never appeared — auth guard not loaded?");
+      }
+    }, 100);
+  }
+})();
+</script>
+
+<div id="qg-trigger-wrap">
+  <button id="qg-trigger-btn" type="button" aria-label="Trigger earthquake alert">
+    <span aria-hidden="true">⚠️</span>
+    Trigger Earthquake Alert
+  </button>
+</div>
+
+<div id="qg-banner" role="status" aria-live="assertive">
+  <span class="qg-banner-icon" aria-hidden="true">✓</span>
+  <span class="qg-banner-text">Ready.</span>
+  <button class="qg-banner-close" type="button" aria-label="Dismiss">×</button>
+</div>
+
+<div id="qg-modal-backdrop" role="alertdialog" aria-modal="true" aria-labelledby="qg-modal-title">
+  <div id="qg-modal">
+    <div class="qg-modal-icon" aria-hidden="true">🔒</div>
+    <div class="qg-modal-title" id="qg-modal-title">Wrong password</div>
+    <div class="qg-modal-body">
+      The password you entered doesn&rsquo;t match. No alert was sent. Try
+      again or contact whoever manages the deployment.
+    </div>
+    <div class="qg-modal-actions">
+      <button class="qg-modal-cancel" type="button">Cancel</button>
+      <button class="qg-modal-ok" type="button">Try Again</button>
+    </div>
+  </div>
+</div>
+
+<header>
+  <div class="header-brand">
+    <img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAFAAAABQCAYAAACOEfKtAAALWElEQVR4nO2ce7BdVX3HP7+19z777PO4JwnhEQnmASGTgDwKCVokWCUKoxgGyuhQHekf1qlOW2hheEynY9vR6Qz0D5RHpCKDMsZWxYggQnEUMxqLApZCE0AEwiNCQsjj3vPYr59/rHNiQu4595yz981jcr4z586de89e+7e++7d+r/XbS2q1mjLC0DAHWoBDHSMCM2JEYEa4vf5pZH+JcXAj7eEluhKoCvVwOsQ59FDwuivTpASqgu/BornTKdahAQFe3gL11uQk7kOgEat5i+bCz77kYIDDNc5RBb8AK69KWfekUi1Bmu79nd42sP05bAlkai/bk0Dd43M4op+5j8KYjBgRmBEjAjNiRGBGjAjMiBGBGTEiMCNGBGbEiMCMGBGYEdNCoB6Eud90yZQ7gYKtYKgeHER2ZPAL0zN+bgQqVtgwhhc3C56rOObAkqgKrgNGlBc3C0nau7o8DHIj0AgEY8rWHcp5V5b417s8jKOYA0SiKjgOJKpcs7rAR64JqDdTSlVFctyqyEygKngubHodPvdvBb77iIPnCjesKXP9Vzxc17K3PzlUBRFQlCu/VOC275fwXOHrD7pccWOBLdutZubxYLMTiNU+Y5Tv/cznC9+o0ggNR9SU1feWuPUeh6Cs+1RypxOqUAyUG77pcvdDJY6aqby1y+Gf76xy//oCnqPkpYSZCRQsib/aYCgWoOwrSWInUQ2EL95d4sGfC+UyJPuBxCSFUln5r4cNN327RK1iH16aQrUExsCvNprcjFfmYVIF4yqPP+vyxnYHpz2iqtXKJHG46tYSz76kBP6+ewp5Ik2hVIQnNsL1t5dwHGMfsNqH7Bjl1a0uTz7v4Hiai0PJTKARiGM4Y3FMuZiS7CFUmkLRVza94XH9V4q0orZTyXrTSdBxGjsnlGtWB7y506Xg7k1SksJYKeXUE2LSWHJxJpkITFIISvCTxwz/cEsZz5V9DHOSQK2s/Pevfe56wKFYmh57mCr4ReW2tS7rn/YZK+mkJkNE+Jubyjy2wWprVlkyESgCSQTzjlGqgRInkz/VVKFYEG6+p8gLL9ugNs94LFUIivDUc/AfPyhSCSa3tyIQxcKMivKO2Uock1kLc/PC5WJ3m2L3V5VNr3vccb+H62m+61hBRFl9b4Et2108R7uGKKpQKSpIPiJkIjBNwQ2UB35Z4P9e8Cj53QVPUygHsObhIk//Fop+PlqYphAE8D9PCWvX+VS7LF2w5JWKyqMbC/z0iQJekN2RZF7CGguLjouZUUmJk+7fVQXPUbZsd1jzYw/jdid7cDmUux/y2Dnxxyhg0u8BcQKzaykL5yRoJJnjwewEJnBkLaUcKEna27Olag33d37i89yL2LAmA4kd7Xt8I9z3C59KMIVTEEgSoVZOmTWW2u8eSBuYpmB8Zf3TBV7d4uB7vbVKFQqusnmby43/WUDJlhEYgTBSbljjs2PCwXW0p13r2OLnX3N57BkPp4fJ6VuGTBcLpKFw5uKIY2cntKKpvVqSQrWkrF1X5JHHhaCLx5wKSQrFMvxwveHBR4tUgu62rwMRaEXCgjkxp5wQkbSyx4LZCDQQteC0RSlL5sW0wv4EsuGE4abv+NSb7bLXAPftlKl27FBuucdHRPpaiiLQDOG0E2KWzFPCMHsTaeYl7Pvw1O+EJ593KfqK9qFN1iMrj/yvz7ceHjy47gTNd9zn8uiGgg2h+rheFYIC/Hqjy3OvCMUc4tHMTiSKYe6RypwjUqK4P00AQMFzhNvv9Xlzmy2J9WOP0nbP3sub4c4HfAJf+iZBsAXfuUelHDNLiZLMPiQ7gWEExxwNH1we0hpgSaQKga9seKnA7fe6FIpT2zBoL19Pufkej02ve1M6rrfLG8Xw4feEzJhpfz/gmYgxEDbh2ZedgW1ZqlAuwm1rA9b/RqhU7aS6IYqhXIUH1wt3/Sjoy3G8HSLwzCaHNAf7B3lUxdSSWKv0DiEmvVTBcZRGy+GKmwOeeUGpjlkPu6dWqbbreTXlif9Xrr61RJqaoQgQYEZFkZy2GnIp6buucPn5IeViMnB1o1Pyev6VAh//fJmH1kO5/McNqY7HLQXK935s+It/qbD5TQ+/MFga1slCapWEy1ZGCAPY6x7Ipy6rdjlE8XASpSkEReWVLR6f+kKVq77sUW/Z2qHrwPZx5bP/XuAzN1Z4c6f19sOUoRSr3a5DbsWM7CV9A60QTj5e+dDyFs1QhlpaaQpFT3Ec4cvfLfPFb3gUXAVR/vGrBe64v4RfEFskHYI86/CEj7wn5IS5SvNgsYECRAlUx4RV743aW2LDjZW2L501BmvX+fx+G/zuVeGHv/SZXbPedti4zZb0Uy4+NyQoSW77M7ksYQFIlZ0TQhhnMy2qYFAmmsL2cWHrDmi2U66sRj+MhfF6ToXANnIh0BhoNYVL359w0TlN6q3hljFgKyYqVEtKrazMGrNZS5oOH7MZA42WcNl5DS7405Rmg55lr4HGzmMQwcZo1RqcsThhvG6FHnasOIZjZqXMHIOjZipH1lLiZHi9FqDeVM5amhCUIc5xTya31g7HQFgXVp0Ts3JZa2gtFGMT/uVLIgIfZlTg9BOjru+qTQUjVvsuOqfFymUJrQnBOZhaOzropHUL5sPZ74oYbwyuhUasvVu2JOTKj0WEkaAqXPuJkJPmR7SiwctPxsBEE849LeIdx+aTvu01fn5DtbVwXLh4RcyyxSGNAbVQBHZMwMUrWsyZYx9IM4SF823+un18MNtlBOpNYcWpLc4/K6E1LrnZvt33yHMwaW+yn7gQ3rUwtsuuzzt0anV/dnqLVe9NCet2so6BqCF87P0xZy21cWa/GmSMfU31zMUx8+dB3EfBd1Dk32ApEDaEv7s0Yun8iEYfVd9OkPvOo2PuvK7OcUeze89WBKIQFs+Dr13b4IixuOv+856wS1dYviTkrz4a0RqXoR1bz/vkPWCnZHTiQmXlmSGNEDynd2wo2BRrZkWplYVWuLemiEAY2gB7rGybl6aSwTHQipQPvzvkncfZPDhv7YNp6pF2DDTGhWs/GXHJigavbDF9RdfGsRHupBMVELUNQr2I6DQTvbpF+MsLGnz2z2Pqu/K3fR1MW5e+AuWi8E+Xh3xm1QS+1z3879iqU4+PKZXb2rLH/0Xs32bU4KQFCRPN7s5EgUqQcsWlE1xzWYjvTu/JGdNGoA1J4Lij4ObrWrzv9CZv7TIUvL3J6cRpJ80PufyCmKRH15Sq8OkLQxbMifZxJiL2nIdtOw0Xnt3khqtDZs+QXDaOes5z+oZu79vGEI0bPn1hxKK5IW+8ZdqJPbsr2NVSwu1X11m6EFpdAmYj0GzCspPhlivreG6y29Y5xlZzfr/NcMrxLT75wZhwp5k2u7eXXNM7fDsMieDdpyi3/n2dj55dp1RM2T4uTDSF17Yazj+rxZ8sgYkpUkBjoD4OK05Xzj0t5LWthomm8NYuYUYl4ZL31Vl9VYNTF9uQZbrs3p7oeWZCXrATF5YvhTVnNLn7/piv3Rdw5MyUY2fH/PVFEVHUZ9Ddbs+47hMhs2vKa1tdtu0y/O0ldVZ9ICGcMNQnhs/FB4W8/fQ2I9agn7wA1uV87Emn1bZY6NxLwYE4lIFSLFV7GI7jKZoAKig2EBfyW7adY0/OG/bYk7zRaSDoTFSxHa1GBpt0J+9O31b9PhBHVe1XAjvoTFR2/xgcIuRaVRkWo7c1M2JEYEaMCMyIEYEZMSIwI0YEZkTv09v0MD+9rY+37rsSKGKj8MP6/EAFp9A7yN8nlYP26wg+LJ0vu19nPSzRbt3b8JKyq0uhY1ICwZLYaE23hIcGggJdm0e7LmEj9gXlEUDT7quwpxPZn6/pH6oYhTEZMSIwI0YEZsQfAN1poZrz4VedAAAAAElFTkSuQmCC" alt="Quake Angel">
+    <div>
+      <h1>Quake Angel &mdash; Emergency Response Dashboard (PILOT / DEMO)</h1>
+      <p>Live device data. Refreshes every 4 seconds.</p>
+    </div>
+  </div>
+</header>
+
+<div class="layout">
+  <div id="map-wrap">
+    <div class="map-filters">
+      <button class="map-filter-btn active" data-filter="all" onclick="setFilter('all')">All</button>
+      <button class="map-filter-btn" data-filter="red" onclick="setFilter('red')">🔴 Immediate</button>
+      <button class="map-filter-btn" data-filter="yellow" onclick="setFilter('yellow')">🟡 Serious/Stable</button>
+      <button class="map-filter-btn" data-filter="green" onclick="setFilter('green')">🟢 Minor</button>
+    </div>
+    <div id="map"></div>
+  </div>
+  <div class="sidebar">
+    <div class="stat-row">
+      <div class="stat safe"><div class="stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg></div><div class="stat-text"><div class="num" id="count-safe">0</div><div class="label">Safe</div></div></div>
+      <div class="stat trapped"><div class="stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg></div><div class="stat-text"><div class="num" id="count-trapped">0</div><div class="label">Trapped</div></div></div>
+      <div class="stat waiting"><div class="stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><line x1="12" y1="17" x2="12.01" y2="17"></line></svg></div><div class="stat-text"><div class="num" id="count-waiting">0</div><div class="label">Unknown</div></div></div>
+      <div class="stat danger"><div class="stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.68 13.31a16 16 0 0 0 3.41 2.6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 17.92z"></path><line x1="23" y1="1" x2="1" y2="23"></line></svg></div><div class="stat-text"><div class="num" id="count-danger">0</div><div class="label">Not Responding</div></div></div>
+      <div class="stat rescued"><div class="stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path><path d="m9 12 2 2 4-4"></path></svg></div><div class="stat-text"><div class="num" id="count-rescued">0</div><div class="label">Rescued</div></div></div>
+    </div>
+    <div class="triage-groups" id="userlist"></div>
+  </div>
+</div>
+
+<!-- ═════════════════════════════════════════════════════════════════════
+     Quake Angel dashboard — User Management panel (admin-only, collapsible)
+     Requires dashboard-auth guard above (uses window.qaApi + window.qaAuth).
+     ═════════════════════════════════════════════════════════════════════ -->
+<style>
+  .qa-um-panel {
+    margin: 24px 12px;
+    padding: 16px;
+    background: #f8f9fb;
+    border: 1px solid #d9dde3;
+    border-radius: 8px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  .qa-um-panel h2 {
+    margin: 0 0 4px 0;
+    font-size: 17px;
+    font-weight: 600;
+    color: #1a1a1a;
+    cursor: pointer;
+    user-select: none;
+  }
+  .qa-um-panel h2::before {
+    content: "▸ ";
+    display: inline-block;
+    width: 14px;
+    transition: transform 0.15s ease;
+  }
+  .qa-um-panel.qa-um-open h2::before { transform: rotate(90deg); }
+  .qa-um-panel .qa-um-subtitle { font-size: 12px; color: #666; margin: 0 0 12px 0; }
+  .qa-um-panel .qa-um-body { display: none; margin-top: 12px; }
+  .qa-um-panel.qa-um-open .qa-um-body { display: block; }
+
+  .qa-um-table {
+    width: 100%; border-collapse: collapse; background: #fff;
+    font-size: 13px; border: 1px solid #e0e3e8; border-radius: 6px; overflow: hidden;
+  }
+  .qa-um-table th, .qa-um-table td {
+    padding: 8px 10px; text-align: left; border-bottom: 1px solid #eef0f4; vertical-align: middle;
+  }
+  .qa-um-table th {
+    background: #f0f2f6; font-size: 11px; font-weight: 600; color: #555;
+    text-transform: uppercase; letter-spacing: 0.03em;
+  }
+  .qa-um-table tr:last-child td { border-bottom: none; }
+  .qa-um-table tr.qa-um-self { background: #fffbea; }
+  .qa-um-table tr.qa-um-expired { background: #ffefef; }
+  .qa-um-table tr.qa-um-disabled { opacity: 0.55; }
+
+  .qa-um-role-badge {
+    display: inline-block; padding: 2px 8px; border-radius: 999px;
+    font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em;
+  }
+  .qa-um-role-badge.admin   { background: #fbe6e6; color: #a01717; }
+  .qa-um-role-badge.operator{ background: #e0eeff; color: #0f4d99; }
+
+  .qa-um-status-chip {
+    display: inline-block; padding: 1px 7px; border-radius: 4px;
+    font-size: 11px; font-weight: 500; margin-right: 4px;
+  }
+  .qa-um-status-chip.active   { background: #e6f7ea; color: #1a7f37; }
+  .qa-um-status-chip.disabled { background: #ffebeb; color: #b0141a; }
+  .qa-um-status-chip.expired  { background: #fff0e1; color: #ba4700; }
+
+  .qa-um-action-btn {
+    display: inline-block; padding: 4px 9px; margin-right: 4px; margin-bottom: 4px;
+    background: #fff; border: 1px solid #cbd0d8; border-radius: 4px;
+    font-size: 11px; color: #333; cursor: pointer; font-family: inherit;
+  }
+  .qa-um-action-btn:hover:not(:disabled) { background: #f0f2f6; border-color: #a8b0bd; }
+  .qa-um-action-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+  .qa-um-action-btn.qa-um-danger        { color: #b0141a; border-color: #f0c9c9; }
+  .qa-um-action-btn.qa-um-danger:hover:not(:disabled) { background: #ffefef; border-color: #d99999; }
+  .qa-um-action-btn.qa-um-primary       { background: #0f4d99; color: #fff; border-color: #0f4d99; }
+  .qa-um-action-btn.qa-um-primary:hover:not(:disabled) { background: #0d3e7d; }
+
+  .qa-um-add-form {
+    display: flex; align-items: center; gap: 10px; padding: 12px; margin-bottom: 12px;
+    background: #fff; border: 1px solid #e0e3e8; border-radius: 6px; flex-wrap: wrap;
+  }
+  .qa-um-add-form input[type="email"] {
+    flex: 1; min-width: 220px; padding: 6px 10px;
+    border: 1px solid #cbd0d8; border-radius: 4px; font-size: 13px; font-family: inherit;
+  }
+  .qa-um-add-form label { font-size: 13px; color: #333; margin-right: 4px; }
+  .qa-um-add-form input[type="radio"] { margin-right: 3px; vertical-align: -1px; }
+
+  .qa-um-msg { padding: 8px 12px; border-radius: 4px; margin-bottom: 12px; font-size: 13px; }
+  .qa-um-msg.error   { background: #ffefef; color: #b0141a; border: 1px solid #f0c9c9; }
+  .qa-um-msg.success { background: #e6f7ea; color: #1a7f37; border: 1px solid #b8e2c4; }
+
+  .qa-um-modal-bg {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.4); display: none;
+    align-items: center; justify-content: center; z-index: 9999;
+  }
+  .qa-um-modal-bg.qa-um-show { display: flex; }
+  .qa-um-modal {
+    background: #fff; padding: 20px 22px; border-radius: 8px;
+    max-width: 460px; width: 90%; font-family: inherit;
+  }
+  .qa-um-modal h3 { margin: 0 0 8px 0; font-size: 16px; font-weight: 600; }
+  .qa-um-modal p  { margin: 0 0 12px 0; font-size: 13px; color: #333; line-height: 1.5; }
+  .qa-um-modal input[type="text"], .qa-um-modal input[type="datetime-local"] {
+    width: 100%; padding: 8px 10px; border: 1px solid #cbd0d8; border-radius: 4px;
+    font-size: 13px; font-family: inherit; box-sizing: border-box; margin-bottom: 12px;
+  }
+  .qa-um-modal-actions { display: flex; gap: 8px; justify-content: flex-end; }
+</style>
+
+<div id="qa-um-root" class="qa-um-panel" style="display:none">
+  <h2 id="qa-um-toggle">Operators &amp; Access</h2>
+  <div class="qa-um-subtitle">
+    Add operators, change roles, and manage 90-day account expiry. Admin-only.
+  </div>
+  <div class="qa-um-body">
+    <div id="qa-um-msg-slot"></div>
+
+    <form class="qa-um-add-form" id="qa-um-add-form" onsubmit="return false">
+      <input type="email" id="qa-um-add-email" placeholder="new.operator@example.com" required />
+      <label><input type="radio" name="qa-um-add-role" value="operator" checked> Operator</label>
+      <label><input type="radio" name="qa-um-add-role" value="admin"> Admin</label>
+      <button type="submit" class="qa-um-action-btn qa-um-primary" id="qa-um-add-submit">
+        Add operator
+      </button>
+    </form>
+
+    <table class="qa-um-table" id="qa-um-table">
+      <thead>
+        <tr>
+          <th>Email</th>
+          <th>Role</th>
+          <th>Status</th>
+          <th>Expires</th>
+          <th>Last login</th>
+          <th style="min-width:200px">Actions</th>
+        </tr>
+      </thead>
+      <tbody id="qa-um-tbody">
+        <tr><td colspan="6" style="padding:16px;text-align:center;color:#888">Loading…</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="qa-um-modal-bg" id="qa-um-modal-bg">
+  <div class="qa-um-modal">
+    <h3 id="qa-um-modal-title">Confirm</h3>
+    <p id="qa-um-modal-body"></p>
+    <input type="text" id="qa-um-modal-input" style="display:none" autocomplete="off" />
+    <input type="datetime-local" id="qa-um-modal-datetime" style="display:none" />
+    <div class="qa-um-modal-actions">
+      <button class="qa-um-action-btn" id="qa-um-modal-cancel">Cancel</button>
+      <button class="qa-um-action-btn qa-um-primary" id="qa-um-modal-confirm">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+  if (typeof window.qaApi !== 'function' || typeof window.qaAuth !== 'object') {
+    console.error('[qa-user-mgmt] Requires dashboard-auth guard to be loaded first.');
+    return;
+  }
+  const root      = document.getElementById('qa-um-root');
+  const toggleEl  = document.getElementById('qa-um-toggle');
+  const tbody     = document.getElementById('qa-um-tbody');
+  const msgSlot   = document.getElementById('qa-um-msg-slot');
+  const addForm   = document.getElementById('qa-um-add-form');
+  const addEmail  = document.getElementById('qa-um-add-email');
+  const addSubmit = document.getElementById('qa-um-add-submit');
+  const modalBg    = document.getElementById('qa-um-modal-bg');
+  const modalTitle = document.getElementById('qa-um-modal-title');
+  const modalBody  = document.getElementById('qa-um-modal-body');
+  const modalInput = document.getElementById('qa-um-modal-input');
+  const modalDate  = document.getElementById('qa-um-modal-datetime');
+  const modalCancel  = document.getElementById('qa-um-modal-cancel');
+  const modalConfirm = document.getElementById('qa-um-modal-confirm');
+
+  function h(str) {
+    return String(str == null ? '' : str)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+  function showMsg(kind, text) {
+    msgSlot.innerHTML = '<div class="qa-um-msg ' + kind + '">' + h(text) + '</div>';
+    if (kind === 'success') {
+      setTimeout(function () {
+        if (msgSlot.querySelector('.success')) msgSlot.innerHTML = '';
+      }, 4000);
+    }
+  }
+  function fmtDate(iso) {
+    if (!iso) return '—';
+    try {
+      const d = new Date(iso);
+      const now = new Date();
+      const days = Math.round((d - now) / 86400000);
+      const dateStr = d.toLocaleDateString(undefined, {year:'numeric', month:'short', day:'numeric'});
+      if (Math.abs(days) < 1) return dateStr + ' (today)';
+      if (days > 0 && days <= 30) return dateStr + ' (in ' + days + 'd)';
+      if (days < 0) return dateStr + ' (' + Math.abs(days) + 'd ago)';
+      return dateStr;
+    } catch (_) { return iso; }
+  }
+
+  let pendingResolve = null;
+  function closeModal(value) {
+    modalBg.classList.remove('qa-um-show');
+    modalInput.style.display = 'none';
+    modalDate.style.display  = 'none';
+    modalInput.value = ''; modalDate.value = '';
+    if (pendingResolve) { const r = pendingResolve; pendingResolve = null; r(value); }
+  }
+  modalCancel.addEventListener('click', function () { closeModal(null); });
+  modalBg.addEventListener('click', function (e) { if (e.target === modalBg) closeModal(null); });
+
+  function confirmTyping(title, body, expectedString) {
+    return new Promise(function (resolve) {
+      modalTitle.textContent = title;
+      modalBody.textContent  = body;
+      modalInput.style.display = 'block';
+      modalInput.placeholder = 'Type: ' + expectedString;
+      modalDate.style.display = 'none';
+      modalBg.classList.add('qa-um-show');
+      pendingResolve = resolve;
+      modalConfirm.textContent = 'Confirm';
+      modalConfirm.onclick = function () {
+        if (modalInput.value.trim() === expectedString) { closeModal(true); }
+        else {
+          modalInput.style.borderColor = '#b0141a';
+          setTimeout(function () { modalInput.style.borderColor = ''; }, 800);
+        }
+      };
+      setTimeout(function () { modalInput.focus(); }, 50);
+    });
+  }
+  function chooseDatetime(title, body, defaultIsoDays) {
+    return new Promise(function (resolve) {
+      modalTitle.textContent = title; modalBody.textContent = body;
+      modalInput.style.display = 'none'; modalDate.style.display = 'block';
+      const def = new Date(Date.now() + defaultIsoDays * 86400000);
+      const pad = function (n) { return String(n).padStart(2, '0'); };
+      modalDate.value = def.getFullYear() + '-' + pad(def.getMonth()+1) + '-' + pad(def.getDate()) +
+        'T' + pad(def.getHours()) + ':' + pad(def.getMinutes());
+      modalBg.classList.add('qa-um-show');
+      pendingResolve = resolve;
+      modalConfirm.textContent = 'Set expiry';
+      modalConfirm.onclick = function () {
+        if (!modalDate.value) return;
+        const d = new Date(modalDate.value);
+        closeModal(d.toISOString());
+      };
+    });
+  }
+
+  async function fetchUsers() {
+    const r = await window.qaApi('/api/admin/users');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const data = await r.json();
+    return data.users || [];
+  }
+  function renderRow(u, selfEmail) {
+    const isSelf = (u.email || '').toLowerCase() === (selfEmail || '').toLowerCase();
+    const rowClass =
+      (isSelf ? 'qa-um-self ' : '') +
+      (u.is_expired && !u.disabled ? 'qa-um-expired ' : '') +
+      (u.disabled ? 'qa-um-disabled ' : '');
+    const chips = [];
+    if (u.disabled)  chips.push('<span class="qa-um-status-chip disabled">Disabled</span>');
+    else if (u.is_expired) chips.push('<span class="qa-um-status-chip expired">Expired</span>');
+    else             chips.push('<span class="qa-um-status-chip active">Active</span>');
+    if (isSelf) chips.push('<span class="qa-um-status-chip" style="background:#fff4bd;color:#7a5c00">You</span>');
+    const otherRole = u.role === 'admin' ? 'operator' : 'admin';
+    const buttons = [];
+    if (!isSelf) buttons.push('<button class="qa-um-action-btn" data-act="role" data-email="' + h(u.email) + '" data-newrole="' + otherRole + '">Make ' + otherRole + '</button>');
+    if (u.disabled) buttons.push('<button class="qa-um-action-btn" data-act="enable" data-email="' + h(u.email) + '">Re-enable</button>');
+    else if (!isSelf) buttons.push('<button class="qa-um-action-btn" data-act="disable" data-email="' + h(u.email) + '">Disable</button>');
+    buttons.push('<button class="qa-um-action-btn" data-act="extend" data-email="' + h(u.email) + '">Extend +90d</button>');
+    buttons.push('<button class="qa-um-action-btn" data-act="expiry" data-email="' + h(u.email) + '">Set expiry…</button>');
+    if (u.expires_at) buttons.push('<button class="qa-um-action-btn" data-act="never" data-email="' + h(u.email) + '">Never expires</button>');
+    if (!isSelf) buttons.push('<button class="qa-um-action-btn qa-um-danger" data-act="delete" data-email="' + h(u.email) + '">Delete</button>');
+    return '<tr class="' + rowClass.trim() + '">' +
+      '<td>' + h(u.display_name || u.email) +
+        (u.display_name && u.display_name !== u.email
+          ? '<div style="font-size:11px;color:#888">' + h(u.email) + '</div>' : '') +
+      '</td>' +
+      '<td><span class="qa-um-role-badge ' + u.role + '">' + h(u.role) + '</span></td>' +
+      '<td>' + chips.join(' ') + '</td>' +
+      '<td>' + (u.expires_at ? h(fmtDate(u.expires_at)) : '<span style="color:#888">never</span>') + '</td>' +
+      '<td>' + (u.last_login_at ? h(fmtDate(u.last_login_at)) : '<span style="color:#888">never</span>') + '</td>' +
+      '<td>' + buttons.join('') + '</td>' +
+      '</tr>';
+  }
+  async function refresh() {
+    try {
+      const users = await fetchUsers();
+      const self  = window.qaAuth.user() || {};
+      if (users.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="6" style="padding:16px;text-align:center;color:#888">No operators yet.</td></tr>';
+      } else {
+        tbody.innerHTML = users.map(function (u) { return renderRow(u, self.email); }).join('');
+      }
+    } catch (e) {
+      tbody.innerHTML = '<tr><td colspan="6" style="padding:16px;text-align:center;color:#b0141a">Load failed: ' + h(e.message) + '</td></tr>';
+    }
+  }
+  async function doAction(act, email, extra) {
+    let r;
+    try {
+      if (act === 'role') {
+        r = await window.qaApi('/api/admin/users/' + encodeURIComponent(email), {
+          method: 'PATCH', headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({role: extra.newrole}),
+        });
+      } else if (act === 'disable') {
+        r = await window.qaApi('/api/admin/users/' + encodeURIComponent(email) + '/disable', {method:'POST'});
+      } else if (act === 'enable') {
+        r = await window.qaApi('/api/admin/users/' + encodeURIComponent(email) + '/enable', {method:'POST'});
+      } else if (act === 'extend') {
+        r = await window.qaApi('/api/admin/users/' + encodeURIComponent(email) + '/extend', {method:'POST'});
+      } else if (act === 'expiry') {
+        r = await window.qaApi('/api/admin/users/' + encodeURIComponent(email), {
+          method: 'PATCH', headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({expires_at: extra.iso}),
+        });
+      } else if (act === 'never') {
+        r = await window.qaApi('/api/admin/users/' + encodeURIComponent(email), {
+          method: 'PATCH', headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({expires_at: 'never'}),
+        });
+      } else if (act === 'delete') {
+        r = await window.qaApi('/api/admin/users/' + encodeURIComponent(email), {method:'DELETE'});
+      }
+      if (!r.ok) {
+        const detail = await r.json().catch(function () { return {detail:'HTTP ' + r.status}; });
+        showMsg('error', 'Failed: ' + (detail.detail || ('HTTP ' + r.status)));
+      } else {
+        showMsg('success', 'Done.');
+        await refresh();
+      }
+    } catch (e) { showMsg('error', 'Failed: ' + e.message); }
+  }
+  toggleEl.addEventListener('click', function () {
+    root.classList.toggle('qa-um-open');
+    if (root.classList.contains('qa-um-open')) refresh();
+  });
+  addForm.addEventListener('submit', async function () {
+    const email = addEmail.value.trim();
+    const role  = document.querySelector('input[name="qa-um-add-role"]:checked').value;
+    if (!email || email.indexOf('@') === -1) { showMsg('error', 'Enter a valid email.'); return; }
+    addSubmit.disabled = true;
+    try {
+      const r = await window.qaApi('/api/admin/users', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({email: email, role: role}),
+      });
+      if (!r.ok) {
+        const detail = await r.json().catch(function () { return {detail:'HTTP ' + r.status}; });
+        showMsg('error', 'Add failed: ' + (detail.detail || ('HTTP ' + r.status)));
+      } else {
+        showMsg('success', 'Added ' + email + '.');
+        addEmail.value = '';
+        await refresh();
+      }
+    } catch (e) { showMsg('error', 'Add failed: ' + e.message); }
+    finally { addSubmit.disabled = false; }
+  });
+  tbody.addEventListener('click', async function (e) {
+    const btn = e.target.closest('button.qa-um-action-btn');
+    if (!btn) return;
+    const act   = btn.getAttribute('data-act');
+    const email = btn.getAttribute('data-email');
+    if (!act || !email) return;
+    if (act === 'delete') {
+      const ok = await confirmTyping('Delete ' + email + '?',
+        'This permanently removes the user from the allowlist. Their historical audit rows remain, but they lose all access immediately. Type the full email to confirm.',
+        email);
+      if (ok) await doAction('delete', email);
+    } else if (act === 'expiry') {
+      const iso = await chooseDatetime('Set expiry for ' + email,
+        'Pick the date/time after which this account can no longer sign in. Times are local to your browser.', 90);
+      if (iso) await doAction('expiry', email, {iso: iso});
+    } else if (act === 'role') {
+      const newrole = btn.getAttribute('data-newrole');
+      const ok = await confirmTyping('Change ' + email + ' to ' + newrole + '?',
+        (newrole === 'admin'
+          ? 'Admins can add, disable, and delete other operators. Grant sparingly. Type the full email to confirm.'
+          : 'Demoting from admin to operator removes their user-management access. Type the full email to confirm.'),
+        email);
+      if (ok) await doAction('role', email, {newrole: newrole});
+    } else {
+      await doAction(act, email);
+    }
+  });
+  function applyVisibility() {
+    const u = window.qaAuth.user();
+    if (u && u.role === 'admin') { root.style.display = 'block'; }
+    else { root.style.display = 'none'; root.classList.remove('qa-um-open'); }
+  }
+  applyVisibility();
+  window.qaAuth.onChange(applyVisibility);
+})();
+</script>
+
+<!-- ═════════════════════════════════════════════════════════════════════
+     Quake Angel — Recent activity + Exports (CSV, PDF, B1, B2)
+     Replaces the previous stub audit block. Renders inline via /api/audit
+     polling and provides admin/operator export buttons.
+     ═════════════════════════════════════════════════════════════════════ -->
+<style>
+  #qg-audit .qg-export-bar {
+    display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; align-items: center;
+  }
+  #qg-audit .qg-export-btn {
+    padding: 5px 11px; background: #fff; border: 1px solid #cbd0d8; border-radius: 4px;
+    font-size: 12px; font-weight: 600; color: #333; cursor: pointer; font-family: inherit;
+  }
+  #qg-audit .qg-export-btn:hover:not(:disabled) { background:#f0f2f6; border-color:#a8b0bd; }
+  #qg-audit .qg-export-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  #qg-audit .qg-export-range {
+    padding: 4px 8px; border: 1px solid #cbd0d8; border-radius: 4px; font-size: 12px; font-family: inherit;
+  }
+  #qg-audit .qg-export-msg { font-size: 12px; color: #666; margin-left: 6px; }
+  #qg-audit .qg-export-msg.error   { color: #b0141a; }
+  #qg-audit .qg-export-msg.success { color: #1a7f37; }
+</style>
+
+<div id="qg-audit">
+  <div class="qg-audit-header">
+    <h3>Recent activity</h3>
+    <span class="qg-audit-meta" id="qg-audit-meta">Loading…</span>
+  </div>
+
+  <div class="qg-export-bar" id="qg-export-bar" style="display:none">
+    <label style="font-size:12px;color:#555">Export</label>
+    <select class="qg-export-range" id="qg-export-range">
+      <option value="24">Last 24h</option>
+      <option value="168" selected>Last 7 days</option>
+      <option value="720">Last 30 days</option>
+    </select>
+    <button class="qg-export-btn" id="qg-export-csv">Download CSV</button>
+    <button class="qg-export-btn" id="qg-export-pdf">Download PDF</button>
+    <span style="color:#ccc">|</span>
+    <button class="qg-export-btn" id="qg-report-b1" title="Full-detail internal report with names, GPS, notes. NOT for public distribution.">B1 Operational</button>
+    <button class="qg-export-btn" id="qg-report-b2" title="Aggregate counts only — safe to share externally.">B2 Public</button>
+    <span class="qg-export-msg" id="qg-export-msg"></span>
+  </div>
+
+  <div id="qg-audit-body"></div>
+</div>
+
+<script>
+(function () {
+  var QUAKEGUARD_BACKEND = "https://quake-alert-18.emergent.host"; // fallback if window.qaApi not present
+  var LIMIT = 100;
+  var POLL_MS = 10000;
+
+  var body = document.getElementById("qg-audit-body");
+  var meta = document.getElementById("qg-audit-meta");
+  if (!body || !meta) return;
+
+  function esc(s) {
+    return String(s == null ? "" : s)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  }
+  function sevColor(s) {
+    if (s === "red")    return "#C21818";
+    if (s === "yellow") return "#EA9500";
+    if (s === "green")  return "#2E7D32";
+    return "#666";
+  }
+  function renderIdent(e) {
+    var did = esc(e.device_id || "");
+    var code = e.short_code ? esc(e.short_code) : "";
+    var name = e.display_name ? esc(e.display_name) : "";
+    if (name && code) return '<b>' + name + '</b> · <code title="' + did + '">' + code + '</code>';
+    if (code) return '<code title="' + did + '">' + code + '</code>';
+    return '<code>' + did + '</code>';
+  }
+  function formatEvent(e) {
+    if (e.kind === "trigger") {
+      var delivered = !!e.delivered;
+      var badge = '<span class="qg-badge" style="background:' +
+        (delivered ? "#1F8A3A" : "#C21818") + '">' + (delivered ? "delivered" : "FAILED") + "</span>";
+      var mag = e.magnitude != null ? "M" + esc(e.magnitude) : "M?";
+      var counts = "iOS " + (e.ios_count || 0) + " · Android " + (e.android_count || 0);
+      var err = e.error ? '<div style="color:#c21818;font-size:12px;margin-top:4px"><b>Error:</b> ' + esc(e.error) + "</div>" : "";
+      return '<div class="qg-audit-row trigger">' +
+          '<div class="qg-audit-title">⚠️ TRIGGER ' + badge + ' · ' + mag + ' · ' +
+            esc(e.recipients_total || 0) + ' device' + (e.recipients_total === 1 ? '' : 's') +
+            ' (' + counts + ') · by <code>' + esc(e.triggered_by || "dashboard") + '</code></div>' +
+          err + '<div class="qg-audit-at">' + esc(e.at || "") + '</div></div>';
+    }
+    if (e.kind === "rescued") {
+      var priorSev = e.prior_severity ? '<span class="qg-badge" style="background:' + sevColor(e.prior_severity) + '">' + esc(e.prior_severity) + '</span>' : "";
+      var notes = "";
+      if (e.notes) notes = '<div style="color:#555;font-size:12px;margin-top:4px">📝 ' + esc(e.notes) + '</div>';
+      else if (e.notes_present) notes = '<div style="color:#888;font-size:12px;margin-top:4px" title="Notes exist but are only visible to admin-authenticated viewers.">🔒 <i>operator note recorded (admin-only)</i></div>';
+      return '<div class="qg-audit-row rescued">' +
+          '<div class="qg-audit-title">✅ RESCUED · ' + renderIdent(e) +
+            ' was <b>' + esc(e.prior_status || "trapped") + '</b>' + priorSev +
+            ' · closed by <code>' + esc(e.rescued_by || "dashboard") + '</code></div>' +
+          notes + '<div class="qg-audit-at">' + esc(e.at || "") + '</div></div>';
+    }
+    if (e.kind === "rescue_reverted") {
+      var restoredSev = e.restored_severity ? '<span class="qg-badge" style="background:' + sevColor(e.restored_severity) + '">' + esc(e.restored_severity) + '</span>' : "";
+      return '<div class="qg-audit-row rescue_reverted">' +
+          '<div class="qg-audit-title">↩️ RESCUE REVERTED · ' + renderIdent(e) +
+            ' restored to <b>' + esc(e.restored_status || e.status || "trapped") + '</b>' + restoredSev +
+            ' · by <code>' + esc(e.reverted_by || "dashboard") + '</code></div>' +
+          '<div class="qg-audit-at">' + esc(e.at || "") + '</div></div>';
+    }
+    var sev = e.severity ? '<span class="qg-badge" style="background:' + sevColor(e.severity) + '">' + esc(e.severity) + "</span>" : "";
+    var mob = e.mobility ? '<span class="qg-badge" style="background:' + (e.mobility === "trapped" ? "#C21818" : "#2E7D32") + '">' + (e.mobility === "trapped" ? "trapped/pinned" : "can move") + "</span>" : "";
+    var loc = "";
+    if (e.latitude != null && e.longitude != null) {
+      loc = ' · <a href="https://www.google.com/maps/place/' + encodeURIComponent(e.latitude + "," + e.longitude) + '" target="_blank" rel="noopener">📍 map</a>';
+    }
+    var bat = e.battery_pct != null ? " · 🔋 " + esc(e.battery_pct) + "%" : "";
+    return '<div class="qg-audit-row status">' +
+        '<div class="qg-audit-title">📱 STATUS · ' + renderIdent(e) + " → <b>" + esc(e.status || "") + '</b>' + sev + mob + loc + bat + '</div>' +
+        '<div class="qg-audit-at">' + esc(e.at || "") + '</div></div>';
+  }
+
+  async function refresh() {
+    try {
+      var url = "/api/audit?limit=" + LIMIT;
+      var res;
+      if (window.qaApi) { res = await window.qaApi(url, {cache: "no-store"}); }
+      else { res = await fetch(QUAKEGUARD_BACKEND + url, {cache: "no-store"}); }
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      var data = await res.json();
+      var events = (data && data.events) || [];
+      if (events.length === 0) body.innerHTML = '<div class="qg-audit-empty">No activity yet.</div>';
+      else body.innerHTML = events.map(formatEvent).join("");
+      meta.textContent = events.length + " events · updated " + new Date().toLocaleTimeString();
+    } catch (e) {
+      meta.textContent = "load error: " + (e && e.message ? e.message : e);
+    }
+  }
+  refresh();
+  setInterval(refresh, POLL_MS);
+
+  // ─── Export toolbar (CSV + PDF + B1 + B2) ───────────────────────
+  var exportBar = document.getElementById("qg-export-bar");
+  var exportRange = document.getElementById("qg-export-range");
+  var exportCsvBtn = document.getElementById("qg-export-csv");
+  var exportPdfBtn = document.getElementById("qg-export-pdf");
+  var exportMsg = document.getElementById("qg-export-msg");
+  var reportB1Btn = document.getElementById("qg-report-b1");
+  var reportB2Btn = document.getElementById("qg-report-b2");
+
+  function showExportMsg(kind, text) {
+    if (!exportMsg) return;
+    exportMsg.className = "qg-export-msg " + kind;
+    exportMsg.textContent = text;
+    if (kind === "success") setTimeout(function () {
+      if (exportMsg.className.indexOf("success") !== -1) exportMsg.textContent = "";
+    }, 4000);
+  }
+  function applyExportVisibility() {
+    if (typeof window.qaApi !== "function" || typeof window.qaAuth !== "object") {
+      exportBar.style.display = "none"; return;
+    }
+    var u = window.qaAuth.user();
+    if (u && (u.role === "admin" || u.role === "operator")) exportBar.style.display = "flex";
+    else exportBar.style.display = "none";
+  }
+  async function doExport(kind /* "csv" | "pdf" */) {
+    if (typeof window.qaApi !== "function") return;
+    var hours = parseInt(exportRange.value, 10) || 168;
+    var since = new Date(Date.now() - hours * 3600 * 1000).toISOString();
+    var path = "/api/admin/audit-log/export." + kind + "?since=" + encodeURIComponent(since);
+    var btn = kind === "csv" ? exportCsvBtn : exportPdfBtn;
+    btn.disabled = true;
+    showExportMsg("", "Preparing…");
+    try {
+      var r = await window.qaApi(path);
+      if (!r.ok) {
+        var detail = "HTTP " + r.status;
+        try { var b = await r.json(); detail = b.detail || detail; } catch (_) {}
+        showExportMsg("error", "Export failed: " + detail); return;
+      }
+      var rowCount = r.headers.get("X-Row-Count") || "?";
+      var blob = await r.blob();
+      var url = URL.createObjectURL(blob);
+      var cd = r.headers.get("Content-Disposition") || "";
+      var m = /filename="([^"]+)"/.exec(cd);
+      var stamp = new Date().toISOString().replace(/[-:]/g,"").replace(/\.\d+/,"");
+      var filename = m ? m[1] : ("quakeangel-audit-" + stamp + "." + kind);
+      var a = document.createElement("a");
+      a.href = url; a.download = filename;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      setTimeout(function () { URL.revokeObjectURL(url); }, 5000);
+      showExportMsg("success", "Downloaded " + rowCount + " row(s).");
+    } catch (e) {
+      showExportMsg("error", "Export failed: " + (e && e.message ? e.message : e));
+    } finally { btn.disabled = false; }
+  }
+  async function doCasualtyReport(kind /* "operational" | "public" */) {
+    if (typeof window.qaApi !== "function") return;
+    var hours = parseInt(exportRange.value, 10) || 168;
+    var since = new Date(Date.now() - hours * 3600 * 1000).toISOString();
+    var path = "/api/admin/casualty-report/" + kind + ".pdf" + "?since=" + encodeURIComponent(since);
+    var btn = kind === "operational" ? reportB1Btn : reportB2Btn;
+    btn.disabled = true;
+    showExportMsg("", "Preparing " + (kind === "operational" ? "B1 Operational" : "B2 Public") + "…");
+    try {
+      var r = await window.qaApi(path);
+      if (!r.ok) {
+        var detail = "HTTP " + r.status;
+        try { var b = await r.json(); detail = b.detail || detail; } catch (_) {}
+        showExportMsg("error", "Report failed: " + detail); return;
+      }
+      var kindHeader = (r.headers.get("X-Report-Kind") || "").toLowerCase();
+      var expectedKind = kind === "operational" ? "b1-operational" : "b2-public";
+      if (kindHeader !== expectedKind) {
+        showExportMsg("error",
+          "Report kind mismatch. Server returned '" + kindHeader + "' but we asked for '" +
+          expectedKind + "'. Not downloading — this could be a routing bug. Contact support.");
+        return;
+      }
+      var blob = await r.blob();
+      var url = URL.createObjectURL(blob);
+      var cd = r.headers.get("Content-Disposition") || "";
+      var m = /filename="([^"]+)"/.exec(cd);
+      var stamp = new Date().toISOString().replace(/[-:]/g,"").replace(/\.\d+/,"");
+      var filename = m ? m[1] : ("quakeangel-" + kind + "-" + stamp + ".pdf");
+      var a = document.createElement("a");
+      a.href = url; a.download = filename;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      setTimeout(function () { URL.revokeObjectURL(url); }, 5000);
+      showExportMsg("success", (kind === "operational" ? "B1 downloaded" : "B2 downloaded (safe to share externally)") + ".");
+    } catch (e) {
+      showExportMsg("error", "Report failed: " + (e && e.message ? e.message : e));
+    } finally { btn.disabled = false; }
+  }
+
+  if (exportCsvBtn) exportCsvBtn.addEventListener("click", function () { doExport("csv"); });
+  if (exportPdfBtn) exportPdfBtn.addEventListener("click", function () { doExport("pdf"); });
+  if (reportB1Btn) reportB1Btn.addEventListener("click", function () { doCasualtyReport("operational"); });
+  if (reportB2Btn) reportB2Btn.addEventListener("click", function () { doCasualtyReport("public"); });
+
+  applyExportVisibility();
+  if (window.qaAuth && typeof window.qaAuth.onChange === "function") {
+    window.qaAuth.onChange(applyExportVisibility);
+  }
+})();
+</script>
+
+<style>
+  /* ── Mark-Rescued button (renders inline in map popups + sidebar rows) ── */
+  .qg-rescue-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 14px;
+    border: 0;
+    border-radius: 8px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+    cursor: pointer;
+    transition: transform .08s ease, opacity .15s ease, background .15s ease;
+  }
+  .qg-rescue-btn:hover  { transform: translateY(-1px); }
+  .qg-rescue-btn:active { transform: translateY(0); opacity: .9; }
+  .qg-rescue-btn[disabled] { opacity: .55; cursor: not-allowed; }
+
+  .qg-rescue-btn.mark {
+    background: #1F8A3A;
+    color: #fff;
+    box-shadow: 0 3px 10px rgba(31, 138, 58, 0.28);
+  }
+  .qg-rescue-btn.mark:hover { background: #187030; }
+
+  .qg-rescue-btn.undo {
+    background: #F5E9C8;
+    color: #7A5300;
+    border: 1px solid #E9C97E;
+  }
+  .qg-rescue-btn.undo:hover { background: #EFDFA8; }
+
+  /* ── Confirm modal ── */
+  #qg-rescue-modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.72);
+    z-index: 99999;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+  }
+  #qg-rescue-modal-backdrop.show { display: flex; }
+  #qg-rescue-modal {
+    background: #fff;
+    border-radius: 16px;
+    padding: 28px 28px 22px;
+    max-width: 460px;
+    width: 100%;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.4);
+    text-align: center;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    border-top: 8px solid #1F8A3A;
+  }
+  #qg-rescue-modal.undo { border-top-color: #EA9500; }
+  #qg-rescue-modal .qg-rescue-modal-icon {
+    font-size: 48px;
+    line-height: 1;
+    margin-bottom: 10px;
+  }
+  #qg-rescue-modal .qg-rescue-modal-title {
+    font-size: 22px;
+    font-weight: 900;
+    color: #222;
+    margin-bottom: 8px;
+  }
+  #qg-rescue-modal .qg-rescue-modal-body {
+    font-size: 15px;
+    color: #444;
+    line-height: 1.5;
+    margin-bottom: 18px;
+  }
+  #qg-rescue-modal .qg-rescue-modal-error {
+    display: none;
+    background: #FDECEA;
+    color: #C21818;
+    border: 1px solid #F5C6C6;
+    border-radius: 8px;
+    padding: 10px 12px;
+    font-size: 13px;
+    margin-bottom: 14px;
+    text-align: left;
+  }
+  #qg-rescue-modal .qg-rescue-modal-body code {
+    background: #f4f4f6;
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 13px;
+  }
+  #qg-rescue-modal textarea {
+    width: 100%;
+    min-height: 60px;
+    max-height: 160px;
+    padding: 8px 10px;
+    border: 1px solid #d0d0d5;
+    border-radius: 8px;
+    font-family: inherit;
+    font-size: 14px;
+    resize: vertical;
+    margin-bottom: 18px;
+    box-sizing: border-box;
+  }
+  #qg-rescue-modal .qg-rescue-modal-password {
+    width: 100%;
+    padding: 10px 12px;
+    border: 1px solid #d0d0d5;
+    border-radius: 8px;
+    font-family: inherit;
+    font-size: 14px;
+    margin-bottom: 14px;
+    box-sizing: border-box;
+  }
+  #qg-rescue-modal .qg-rescue-modal-password:focus {
+    outline: none;
+    border-color: #1F8A3A;
+    box-shadow: 0 0 0 3px rgba(31,138,58,0.15);
+  }
+  #qg-rescue-modal .qg-rescue-modal-password-label {
+    display: block;
+    font-size: 12px;
+    font-weight: 700;
+    color: #555;
+    margin-bottom: 6px;
+    text-align: left;
+  }
+  #qg-rescue-modal .qg-rescue-modal-authed {
+    background: #EAF6EC;
+    color: #1F8A3A;
+    border: 1px solid #C9E9CE;
+    border-radius: 8px;
+    padding: 8px 12px;
+    font-size: 12px;
+    font-weight: 700;
+    margin-bottom: 14px;
+    text-align: left;
+  }
+  #qg-rescue-modal .qg-rescue-modal-btns {
+    display: flex;
+    gap: 10px;
+    justify-content: center;
+  }
+  #qg-rescue-modal .qg-rescue-modal-btn {
+    flex: 1;
+    padding: 12px 20px;
+    border-radius: 10px;
+    font-size: 14px;
+    font-weight: 800;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    cursor: pointer;
+    border: 0;
+  }
+  #qg-rescue-modal .qg-rescue-modal-btn.primary {
+    background: #1F8A3A; color: #fff;
+  }
+  #qg-rescue-modal.undo .qg-rescue-modal-btn.primary {
+    background: #EA9500; color: #1B1005;
+  }
+  #qg-rescue-modal .qg-rescue-modal-btn.primary:hover  { opacity: 0.9; }
+  #qg-rescue-modal .qg-rescue-modal-btn.cancel {
+    background: #eee; color: #333;
+  }
+  #qg-rescue-modal .qg-rescue-modal-btn.cancel:hover { background: #ddd; }
+
+  /* ── Toast banner (fixed top, mirrors trigger button pattern) ── */
+  #qg-rescue-toast {
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    min-height: 56px;
+    padding: 12px 22px;
+    z-index: 99998;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    font-size: 16px;
+    font-weight: 700;
+    color: #fff;
+    text-align: center;
+    transform: translateY(-100%);
+    transition: transform .35s cubic-bezier(.2,.9,.3,1);
+    box-shadow: 0 4px 24px rgba(0,0,0,0.25);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  #qg-rescue-toast.show { transform: translateY(0); }
+  #qg-rescue-toast.ok    { background: #1F8A3A; }
+  #qg-rescue-toast.err   { background: #C21818; }
+  #qg-rescue-toast.warn  { background: #EA9500; color: #1B1005; }
+  #qg-rescue-toast .close {
+    background: rgba(255,255,255,0.2);
+    border: 0; color: inherit;
+    border-radius: 999px;
+    width: 28px; height: 28px;
+    font-size: 18px; font-weight: 900;
+    cursor: pointer; padding: 0;
+  }
+
+  /* ── Group-rescue: select multiple, mark together ── */
+  .qg-bulk-check {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: #555;
+    margin-bottom: 6px;
+    cursor: pointer;
+    user-select: none;
+  }
+  .qg-bulk-check input { cursor: pointer; }
+
+  #qg-bulk-bar {
+    position: fixed;
+    left: 50%;
+    bottom: 22px;
+    transform: translateX(-50%) translateY(140%);
+    z-index: 99997;
+    background: #1c2b36;
+    color: #fff;
+    border-radius: 14px;
+    padding: 12px 16px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    box-shadow: 0 10px 34px rgba(0,0,0,0.35);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    transition: transform .25s ease;
+  }
+  #qg-bulk-bar.show { transform: translateX(-50%) translateY(0); }
+  #qg-bulk-bar #qg-bulk-count { font-weight: 700; font-size: 14px; white-space: nowrap; }
+  #qg-bulk-bar button {
+    border: 0;
+    border-radius: 8px;
+    padding: 9px 14px;
+    font-size: 13px;
+    font-weight: 700;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  #qg-bulk-mark-btn { background: #1F8A3A; color: #fff; }
+  #qg-bulk-mark-btn:hover { background: #187030; }
+  #qg-bulk-clear-btn { background: rgba(255,255,255,0.15); color: #fff; }
+  #qg-bulk-clear-btn:hover { background: rgba(255,255,255,0.26); }
+</style>
+
+<!-- Modal (single instance reused for both mark + undo flows) -->
+<div id="qg-rescue-modal-backdrop" role="alertdialog" aria-modal="true">
+  <div id="qg-rescue-modal">
+    <div class="qg-rescue-modal-icon" aria-hidden="true">✅</div>
+    <div class="qg-rescue-modal-title">Mark as Rescued?</div>
+    <div class="qg-rescue-modal-body"></div>
+    <div class="qg-rescue-modal-error"></div>
+    <!-- Password field retained but permanently hidden: auth is now per-user
+         Google sign-in via the dashboard auth guard. Kept (rather than
+         deleted) so the widget still degrades safely if an older build of
+         the auth snippet is ever served. -->
+    <div class="qg-rescue-modal-password-wrap" style="display:none">
+      <label class="qg-rescue-modal-password-label" for="qg-rescue-modal-password">Emergency personnel password</label>
+      <input type="password" class="qg-rescue-modal-password" id="qg-rescue-modal-password" autocomplete="off" placeholder="Enter password">
+    </div>
+    <div class="qg-rescue-modal-authed" style="display:none">🔓 Signed in — no password needed.</div>
+    <textarea placeholder="Optional notes (location found, condition, etc.)" style="display:none"></textarea>
+    <div class="qg-rescue-modal-btns">
+      <button class="qg-rescue-modal-btn cancel" type="button">Cancel</button>
+      <button class="qg-rescue-modal-btn primary" type="button">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toast -->
+<div id="qg-rescue-toast" role="status" aria-live="polite">
+  <span class="msg">Ready.</span>
+  <button class="close" type="button" aria-label="Dismiss">×</button>
+</div>
+
+<!-- Group-rescue floating bar -->
+<div id="qg-bulk-bar">
+  <span id="qg-bulk-count">0 selected</span>
+  <button id="qg-bulk-mark-btn" type="button">✅ Mark Selected as Rescued</button>
+  <button id="qg-bulk-clear-btn" type="button">Clear</button>
+</div>
+
+<script>
+window.QuakeAngelRescue = (function () {
+  // === EDIT THIS ==========================================================
+  var QUAKEGUARD_BACKEND = "https://quake-alert-18.emergent.host"; // no trailing /
+  // ========================================================================
+
+  // Cached admin token — held in memory only for the current tab session.
+  // Reset when the operator refreshes / closes the tab.
+  var cachedToken = null;
+
+  var toast = document.getElementById("qg-rescue-toast");
+  var toastMsg = toast && toast.querySelector(".msg");
+  var toastX = toast && toast.querySelector(".close");
+  var toastTimer = null;
+  function showToast(kind, text, autoDismissMs) {
+    if (!toast) return;
+    if (toastTimer) { clearTimeout(toastTimer); toastTimer = null; }
+    toast.classList.remove("ok", "err", "warn");
+    toast.classList.add(kind);
+    toastMsg.textContent = text;
+    void toast.offsetWidth;
+    toast.classList.add("show");
+    if (autoDismissMs && autoDismissMs > 0) {
+      toastTimer = setTimeout(hideToast, autoDismissMs);
+    }
+  }
+  function hideToast() { toast && toast.classList.remove("show"); }
+  toastX && toastX.addEventListener("click", hideToast);
+
+  var backdrop = document.getElementById("qg-rescue-modal-backdrop");
+  var modal    = document.getElementById("qg-rescue-modal");
+  var titleEl  = modal.querySelector(".qg-rescue-modal-title");
+  var bodyEl   = modal.querySelector(".qg-rescue-modal-body");
+  var errorEl  = modal.querySelector(".qg-rescue-modal-error");
+  var iconEl   = modal.querySelector(".qg-rescue-modal-icon");
+  var textEl   = modal.querySelector("textarea");
+  var pwdWrap  = modal.querySelector(".qg-rescue-modal-password-wrap");
+  var pwdEl    = modal.querySelector(".qg-rescue-modal-password");
+  var authedEl = modal.querySelector(".qg-rescue-modal-authed");
+  var okBtn    = modal.querySelector(".qg-rescue-modal-btn.primary");
+  var cancelBtn = modal.querySelector(".qg-rescue-modal-btn.cancel");
+
+  function showPasswordField(focus) {
+    pwdWrap.style.display = "block";
+    authedEl.style.display = "none";
+    pwdEl.value = "";
+    if (focus) setTimeout(function () { pwdEl.focus(); }, 40);
+  }
+  function hidePasswordField() {
+    // Hidden because we already have a valid session token — make that
+    // explicit so the operator never mistakes the notes box for a place
+    // to type the password (this is exactly how the password ended up
+    // saved into a notes field previously).
+    pwdWrap.style.display = "none";
+    authedEl.style.display = "block";
+    pwdEl.value = "";
+  }
+  function resetPasswordArea() {
+    pwdWrap.style.display = "none";
+    authedEl.style.display = "none";
+    pwdEl.value = "";
+  }
+
+  function showModalError(msg) {
+    errorEl.textContent = msg;
+    errorEl.style.display = "block";
+  }
+  function clearModalError() {
+    errorEl.style.display = "none";
+    errorEl.textContent = "";
+  }
+
+  function closeModal() {
+    backdrop.classList.remove("show");
+    modal.classList.remove("undo");
+    textEl.style.display = "none";
+    textEl.value = "";
+    clearModalError();
+    resetPasswordArea();
+  }
+  cancelBtn.addEventListener("click", closeModal);
+  backdrop.addEventListener("click", function (e) {
+    if (e.target === backdrop) closeModal();
+  });
+  pwdEl.addEventListener("keydown", function (e) {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      okBtn.click();
+    }
+  });
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape" && backdrop.classList.contains("show")) closeModal();
+  });
+
+  function openConfirm(opts) {
+    // opts: { icon, title, bodyHtml, ctaLabel, undo?: bool, showNotes?: bool, onConfirm }
+    iconEl.textContent = opts.icon;
+    titleEl.textContent = opts.title;
+    bodyEl.innerHTML = opts.bodyHtml;
+    clearModalError();
+    textEl.style.display = opts.showNotes ? "block" : "none";
+    textEl.value = "";
+    okBtn.textContent = opts.ctaLabel;
+    modal.classList.toggle("undo", !!opts.undo);
+
+    // Auth is now per-user Google sign-in — there is no password to type,
+    // so the inline password field is never shown. Accountability comes
+    // from the JWT identifying the operator in the audit trail, which is
+    // what the old forced re-auth on Undo was trying to achieve.
+    resetPasswordArea();
+
+    // Rebind onClick freshly each time so we don't stack listeners.
+    okBtn.onclick = async function () {
+      okBtn.disabled = true;
+      try {
+        await opts.onConfirm(textEl.value.trim() || null);
+      } finally {
+        okBtn.disabled = false;
+      }
+    };
+    backdrop.classList.add("show");
+    setTimeout(function () { okBtn.focus(); }, 40);
+  }
+
+  async function postJson(path, body) {
+    // Auth delegated to dashboard-auth.snippet — window.qaApi() attaches the
+    // operator's JWT and clears the local session on 401.
+    if (!window.qaApi) {
+      throw new Error("dashboard auth snippet must load before this widget");
+    }
+    if (!window.qaAuth || !window.qaAuth.jwt()) {
+      var errAuth = new Error("not signed in");
+      errAuth.status = 401;
+      throw errAuth;
+    }
+    var res = await window.qaApi(path, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    if (res.status === 401) {
+      var err = new Error("session expired");
+      err.status = 401;
+      throw err;
+    }
+    if (res.status === 403) {
+      var err403 = new Error("not permitted");
+      err403.status = 403;
+      throw err403;
+    }
+    if (!res.ok) {
+      var err2 = new Error("HTTP " + res.status);
+      err2.status = res.status;
+      throw err2;
+    }
+    return await res.json();
+  }
+
+  function mark(deviceId, opts) {
+    opts = opts || {};
+    openConfirm({
+      icon: "✅",
+      title: "Mark as Rescued?",
+      bodyHtml:
+        'Confirm <code>' + escapeHtml(deviceId) + '</code> has been ' +
+        'physically found and is safe. This will move the pin out of the ' +
+        'trapped groups into <b>Rescued</b>.',
+      ctaLabel: "Confirm",
+      showNotes: true,
+      onConfirm: async function (notes) {
+        clearModalError();
+        try {
+          var data = await postJson("/api/mark-rescued", {
+            deviceId: deviceId,
+            notes: notes,
+          });
+          closeModal();
+          showToast(
+            "ok",
+            data.already_rescued
+              ? "Already marked rescued."
+              : "Marked rescued — " + deviceId,
+            5000,
+          );
+          if (opts.onDone) opts.onDone(data);
+        } catch (e) {
+          // Keep the modal open (with notes intact) so the operator doesn't
+          // have to go find this device in the list a second time.
+          if (e.status === 401) {
+            showModalError("Your session has expired. Sign in again, then click Confirm — your notes are still here.");
+            if (window.qaAuth) window.qaAuth.signIn();
+          } else if (e.status === 403) {
+            showModalError("Your account isn't allowed to mark people as rescued.");
+          } else if (e.status === 404) {
+            showModalError("Device not found: " + deviceId + ". This case may have already been handled elsewhere.");
+          } else {
+            showModalError("Failed: " + e.message + " — click Confirm to try again.");
+          }
+        }
+      },
+    });
+  }
+
+  function unmark(deviceId, opts) {
+    opts = opts || {};
+    openConfirm({
+      icon: "↩️",
+      title: "Undo rescue?",
+      bodyHtml:
+        'Revert <code>' + escapeHtml(deviceId) + '</code> back to its ' +
+        'previous trapped state. Use this only if the rescued mark was a ' +
+        'mis-click. This is logged in the audit trail.',
+      ctaLabel: "Revert",
+      undo: true,
+      onConfirm: async function () {
+        clearModalError();
+        // No password re-entry: every revert is attributable to a named
+        // account in the audit trail via the JWT, which is what the old
+        // forced re-auth was trying to achieve. The two-step confirm in
+        // this modal is the deliberate friction.
+        try {
+          var data = await postJson("/api/unmark-rescued", { deviceId: deviceId });
+          closeModal();
+          showToast(
+            "ok",
+            "Reverted — restored to " + (data.restored_status || "trapped"),
+            5000,
+          );
+          if (opts.onDone) opts.onDone(data);
+        } catch (e) {
+          if (e.status === 401) {
+            showModalError("Your session has expired. Sign in again, then click Revert.");
+            if (window.qaAuth) window.qaAuth.signIn();
+          } else if (e.status === 403) {
+            showModalError("Your account isn't allowed to revert a rescue.");
+          } else if (e.status === 409) {
+            showModalError("Device is not currently rescued — it may have already been reverted.");
+          } else {
+            showModalError("Failed: " + e.message + " — click Revert to try again.");
+          }
+        }
+      },
+    });
+  }
+
+  function markBulk(deviceIds, opts) {
+    opts = opts || {};
+    deviceIds = (deviceIds || []).slice();
+    if (deviceIds.length === 0) return;
+    openConfirm({
+      icon: "✅",
+      title: "Mark " + deviceIds.length + " as Rescued?",
+      bodyHtml:
+        'Confirm all <b>' + deviceIds.length + '</b> selected people have ' +
+        'been physically found and are safe — for example, a group found ' +
+        'together at the same location. Each will move out of the trapped ' +
+        'groups into <b>Rescued</b>.',
+      ctaLabel: "Confirm All",
+      showNotes: true,
+      onConfirm: async function (notes) {
+        clearModalError();
+        showToast("warn", "Marking " + deviceIds.length + " rescued…", 0);
+        var okCount = 0;
+        var results = [];
+        for (var i = 0; i < deviceIds.length; i++) {
+          try {
+            var data = await postJson("/api/mark-rescued", {
+              deviceId: deviceIds[i],
+              notes: notes,
+            });
+            okCount++;
+            results.push({ deviceId: deviceIds[i], ok: true, data: data });
+          } catch (e) {
+            // Devices already successfully marked in this same run are safe
+            // (the backend call is idempotent) — clicking Confirm All again
+            // simply re-confirms them at no cost, so we just stop here and
+            // let the operator retry the whole batch.
+            hideToast();
+            if (e.status === 401) {
+              showModalError(
+                "Session expired — stopped after " + okCount + " of " + deviceIds.length +
+                ". Sign in again, then click Confirm All to retry the rest."
+              );
+              if (window.qaAuth) window.qaAuth.signIn();
+            } else if (e.status === 403) {
+              showModalError(
+                "Your account isn't allowed to mark people as rescued — stopped after " +
+                okCount + " of " + deviceIds.length + "."
+              );
+            } else {
+              showModalError(
+                "Failed on one device (" + deviceIds[i] + "): " + e.message +
+                ". " + okCount + " succeeded so far — click Confirm All to retry the rest."
+              );
+            }
+            if (opts.onPartialDone) opts.onPartialDone(results);
+            return;
+          }
+        }
+        closeModal();
+        showToast("ok", okCount + " marked rescued.", 6000);
+        if (opts.onDone) opts.onDone(results);
+      },
+    });
+  }
+
+  function renderButton(container, device) {
+    // container: DOM element to render into (we replace its contents)
+    // device: { device_id, status, ... } from GET /api/devices
+    if (!container || !device) return;
+    var isRescued = device.status === "rescued";
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "qg-rescue-btn " + (isRescued ? "undo" : "mark");
+    btn.textContent = isRescued ? "↩️ Undo Rescued" : "✅ Mark as Rescued";
+    btn.addEventListener("click", function () {
+      if (isRescued) {
+        unmark(device.device_id, {
+          onDone: function (updated) {
+            // Rebuild button in-place with restored device shape.
+            device.status = updated.restored_status || "trapped";
+            device.severity = updated.restored_severity || device.severity;
+            device.mobility = updated.restored_mobility || device.mobility;
+            device.rescued_at = null;
+            device.rescued_by = null;
+            renderButton(container, device);
+          },
+        });
+      } else {
+        mark(device.device_id, {
+          onDone: function (updated) {
+            device.status = "rescued";
+            device.rescued_at = updated.rescued_at;
+            device.rescued_by = updated.rescued_by;
+            device.pre_rescue_status = updated.prior_status;
+            device.pre_rescue_severity = updated.prior_severity;
+            device.pre_rescue_mobility = updated.prior_mobility;
+            renderButton(container, device);
+          },
+        });
+      }
+    });
+    container.innerHTML = "";
+    container.appendChild(btn);
+  }
+
+  function escapeHtml(s) {
+    return String(s == null ? "" : s)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  }
+
+  return { mark: mark, unmark: unmark, renderButton: renderButton, markBulk: markBulk };
+})();
+</script>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="dashboard-v3.js"></script>
+</body>
+</html>
