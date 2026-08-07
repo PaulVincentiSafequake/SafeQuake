@@ -205,6 +205,39 @@ async def dispatch_preview_if_needed(
 
     poll_radius_km = country_config.get("poll_radius_km")
 
+    # ── Preview-only radius override (2026-08-07) ────────────────────────
+    # An operator may temporarily widen the preview radius to test with
+    # more events (e.g., 2000 km from Malta to catch Greek/Turkish quakes).
+    # The override applies ONLY to the preview path — the real-alert path
+    # (evaluator's critical branch) continues to use poll_radius_km. If
+    # the override has expired (auto-clears after 7 days), we ignore it
+    # silently and log a diagnostic skip once so operators know why they
+    # stopped seeing wide-radius previews.
+    #
+    # `effective_radius_km` is what gets fed into should_send_preview.
+    # `override_active` tells us later whether to prefix the body text
+    # with the "beyond alert zone" warning.
+    preview_cfg_snapshot = preview_cfg  # already isolated above; alias for clarity
+    override_km = preview_cfg_snapshot.get("preview_radius_km_override")
+    override_expires = preview_cfg_snapshot.get("preview_radius_km_override_expires_at")
+    now_for_expiry = datetime.now(timezone.utc)
+    override_active = False
+    override_expired = False
+    if override_km is not None:
+        # Coerce override_expires to timezone-aware if it came back naive
+        # from Mongo (older documents may not have tzinfo attached).
+        if override_expires is not None and override_expires.tzinfo is None:
+            override_expires = override_expires.replace(tzinfo=timezone.utc)
+        if override_expires is None or override_expires > now_for_expiry:
+            override_active = True
+        else:
+            override_expired = True
+
+    if override_active:
+        effective_radius_km = float(override_km)
+    else:
+        effective_radius_km = poll_radius_km
+
     # Evaluate whether the tier's rule matched — INCLUDING the hard
     # radius gate that applies to every tier, all_ingested included.
     # Fix for BUG-2026-08-06-preview-worldwide: previously all_ingested
@@ -215,8 +248,13 @@ async def dispatch_preview_if_needed(
         country_code=country_code,
         trigger_tier=trigger_tier,
         distance_km=distance_km,
-        poll_radius_km=poll_radius_km,
+        poll_radius_km=effective_radius_km,
     )
+    if override_expired and skip_reason:
+        # Attach diagnostic so the operator can spot "why did previews
+        # stop 7 days after I set 2000 km" without digging through
+        # audit history.
+        skip_reason = f"{skip_reason} [override_expired_at={override_expires.isoformat() if override_expires else 'unknown'}]"
     if not should_fire:
         # Log every skip so operators can audit "why didn't I get it"
         # and — critically — spot false negatives during Day-14 review.
@@ -290,6 +328,15 @@ async def dispatch_preview_if_needed(
         bearing_from_country=bearing if bearing is not None else 0.0,
         country_name=country_config.get("country_name") or country_code,
     )
+    # When the operator's radius override is what allowed this preview
+    # through (event is beyond the real 600 km data boundary), prepend a
+    # visible marker so a preview at 1800 km can never be mistaken for a
+    # real 600 km-boundary alert. Real users never see previews at all,
+    # but this defends the calibration channel for the operator too —
+    # "PREVIEW ·" alone starts to blur if you get twenty a day.
+    if (override_active and poll_radius_km is not None
+            and distance_km is not None and distance_km > poll_radius_km):
+        body = f"⚠️ Beyond alert zone — {body}"
 
     # Rate-limit filter + notification-preset filter. Two separate gates
     # applied per device:
@@ -397,6 +444,11 @@ async def dispatch_preview_if_needed(
         ]}
 
     # Log every send attempt outcome into the audit-distinct collection.
+    # Tag whether the operator's radius override was in effect for this
+    # dispatch — makes it trivial to answer "which of these previews rode
+    # the wider test radius?" during audit review. `radius_override_active`
+    # is True only when the override was BOTH set AND non-expired at the
+    # time the dispatch decision was made.
     for evt in (result.get("events") or []):
         await db.emsc_preview_notifications.insert_one({
             "sent_at": now,
@@ -415,6 +467,9 @@ async def dispatch_preview_if_needed(
             "title": title,
             "body": body,
             "idempotency_key": idem,
+            "radius_override_active": override_active,
+            "effective_radius_km": effective_radius_km,
+            "poll_radius_km": poll_radius_km,
         })
 
     delivered_count = sum(1 for e in (result.get("events") or []) if e.get("delivered"))

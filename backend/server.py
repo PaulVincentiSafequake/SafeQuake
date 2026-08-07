@@ -3901,6 +3901,16 @@ class PreviewConfigBody(BaseModel):
     device_ids: Optional[List[str]] = None
     trigger_tier: Optional[str] = None    # "all_ingested" | threshold_set name
     rate_limit_minutes: Optional[int] = Field(default=None, ge=1, le=1440)
+    # ── Preview-only radius override (2026-08-07) ─────────────────────
+    # Widens the preview radius for enrolled test devices ONLY. The real-
+    # alert path is physically untouchable by this field — see
+    # emsc/preview.py::dispatch_preview_if_needed. Bounded 100..5000km:
+    #   - lower bound prevents accidentally disabling previews entirely
+    #   - upper bound prevents regressing to the "worldwide previews" bug
+    # Auto-clears server-side 7 days after being set (see set endpoint).
+    # To CLEAR explicitly, send clear_preview_radius_override=true.
+    preview_radius_km_override: Optional[float] = Field(default=None, ge=100, le=5000)
+    clear_preview_radius_override: Optional[bool] = None
 
 
 class PreviewAddDeviceBody(BaseModel):
@@ -4002,6 +4012,7 @@ async def emsc_preview_set_config(
     require_role(principal, "admin")
 
     updates: dict = {}
+    unsets: dict = {}
     if body.enabled is not None:
         updates["preview_mode.enabled"] = body.enabled
     if body.device_ids is not None:
@@ -4019,18 +4030,65 @@ async def emsc_preview_set_config(
     if body.rate_limit_minutes is not None:
         updates["preview_mode.rate_limit_minutes"] = body.rate_limit_minutes
 
-    if not updates:
+    # ── Preview radius override with 7-day auto-expiry ────────────────
+    # Server-stamps the expiry — client CAN'T extend it by sending a
+    # longer expiry. Every set/clear is logged in emsc_audit_log so
+    # "why did the override disappear?" is answerable from history alone.
+    if body.clear_preview_radius_override:
+        unsets["preview_mode.preview_radius_km_override"] = ""
+        unsets["preview_mode.preview_radius_km_override_expires_at"] = ""
+        unsets["preview_mode.preview_radius_km_override_set_by"] = ""
+        unsets["preview_mode.preview_radius_km_override_set_at"] = ""
+    elif body.preview_radius_km_override is not None:
+        now_utc = datetime.now(timezone.utc)
+        expires_at = now_utc + timedelta(days=7)
+        updates["preview_mode.preview_radius_km_override"] = float(body.preview_radius_km_override)
+        updates["preview_mode.preview_radius_km_override_expires_at"] = expires_at
+        updates["preview_mode.preview_radius_km_override_set_by"] = principal.get("email", "unknown")
+        updates["preview_mode.preview_radius_km_override_set_at"] = now_utc
+
+    if not updates and not unsets:
         raise HTTPException(400, "No fields to update — provide at least one.")
 
     updates["preview_mode.updated_at"] = datetime.now(timezone.utc)
     updates["preview_mode.updated_by"] = principal.get("email", "unknown")
 
+    # Snapshot BEFORE so we can compute a from→to audit entry.
+    before = await db.country_configs.find_one(
+        {"country_code": country_code.upper()},
+        {"_id": 0, "preview_mode": 1},
+    ) or {}
+    before_pm = before.get("preview_mode") or {}
+
+    mongo_op: dict = {"$set": updates} if updates else {}
+    if unsets:
+        mongo_op["$unset"] = unsets
+
     res = await db.country_configs.update_one(
         {"country_code": country_code.upper()},
-        {"$set": updates},
+        mongo_op,
     )
     if res.matched_count == 0:
         raise HTTPException(404, f"No country_config for {country_code}")
+
+    # Audit-log override changes specifically — these are the highest-
+    # blast-radius edits an operator can make to the preview pipeline
+    # ("your notifications will now include a 1500km ring around Malta")
+    # and deserve a dedicated log line beyond the generic updated_by stamp.
+    if body.clear_preview_radius_override or body.preview_radius_km_override is not None:
+        await db.emsc_audit_log.insert_one({
+            "at": datetime.now(timezone.utc),
+            "kind": "preview_radius_override_change",
+            "actor": principal.get("email", "unknown"),
+            "country_code": country_code.upper(),
+            "from_km": before_pm.get("preview_radius_km_override"),
+            "from_expires_at": before_pm.get("preview_radius_km_override_expires_at"),
+            "to_km": (None if body.clear_preview_radius_override
+                      else float(body.preview_radius_km_override)),
+            "to_expires_at": (None if body.clear_preview_radius_override
+                              else updates.get("preview_mode.preview_radius_km_override_expires_at")),
+            "cleared": bool(body.clear_preview_radius_override),
+        })
 
     doc = await db.country_configs.find_one(
         {"country_code": country_code.upper()},
