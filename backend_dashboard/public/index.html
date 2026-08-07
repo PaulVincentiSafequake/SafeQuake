@@ -51,9 +51,16 @@
   }
   header h1 { font-size: 18px; margin: 0; font-weight: 700; letter-spacing: .2px; }
   header p { margin: 2px 0 0; font-size: 12px; color: #b7c2cc; }
-  /* flex:1 makes the map/sidebar row absorb the remaining height, so the
-     controls above it always stay on screen no matter how many we add. */
-  .layout { display: flex; flex: 1 1 auto; min-height: 420px; flex-wrap: wrap; }
+  /* Bounded height so content BELOW the map (User Management, Recent
+     activity) is reachable via normal page scroll. The old `flex: 1 1 auto`
+     made the map+sidebar absorb the entire remaining viewport, and combined
+     with `.sidebar { overflow-y: auto }` and Leaflet catching wheel events
+     on the map, the admin panels below became unreachable — scrolling on
+     the map zoomed instead of paged, scrolling on the sidebar hit its own
+     internal cap, and the body never saw the wheel events. Fixed height
+     range gives us a big map on tall screens without eating the whole
+     viewport on short ones. Mobile override below keeps stacking behaviour. */
+  .layout { display: flex; height: 70vh; min-height: 480px; max-height: 720px; flex-wrap: wrap; }
   #map-wrap { position: relative; flex: 1 1 60%; min-height: 400px; }
   #map { position: absolute; inset: 0; }
   .map-filters {
@@ -985,6 +992,50 @@
     #${CONTAINER_ID} .qa-pv-controls select, #${CONTAINER_ID} .qa-pv-controls input {
       padding: 8px; border: 1px solid #ccc; border-radius: 6px; font-size: 13px;
     }
+    /* ── TEST-ONLY radius override card ────────────────────────────
+       Deliberately styled yellow/amber and offset from the other
+       controls so nobody mistakes it for a normal setting. The label
+       hammers home that this DOES NOT affect real users. */
+    #${CONTAINER_ID} .qa-pv-radius {
+      margin-top: 16px;
+      padding: 14px;
+      background: #FFF8E1;
+      border: 1px solid #E9C97E;
+      border-left: 4px solid #EA9500;
+      border-radius: 8px;
+    }
+    #${CONTAINER_ID} .qa-pv-radius-title {
+      font-size: 12px; font-weight: 800; color: #7A5300;
+      text-transform: uppercase; letter-spacing: 0.6px;
+      margin-bottom: 4px;
+    }
+    #${CONTAINER_ID} .qa-pv-radius-sub {
+      font-size: 12px; color: #7A5300; line-height: 1.4; margin-bottom: 10px;
+    }
+    #${CONTAINER_ID} .qa-pv-radius-row {
+      display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    }
+    #${CONTAINER_ID} .qa-pv-radius-row input[type="number"] {
+      width: 90px; padding: 7px; border: 1px solid #cbb060;
+      border-radius: 6px; font-size: 13px; background: #fffdf5;
+    }
+    #${CONTAINER_ID} .qa-pv-radius-row .qa-pv-btn-save {
+      background: #EA9500; color: #1B1005; padding: 8px 14px;
+      border-radius: 6px; font-size: 13px; font-weight: 700; border: 0; cursor: pointer;
+    }
+    #${CONTAINER_ID} .qa-pv-radius-row .qa-pv-btn-save:hover { opacity: 0.92; }
+    #${CONTAINER_ID} .qa-pv-radius-row .qa-pv-btn-clear {
+      background: transparent; color: #7A5300; padding: 8px 12px;
+      border: 1px solid #cbb060; border-radius: 6px; font-size: 12px; font-weight: 700;
+      cursor: pointer;
+    }
+    #${CONTAINER_ID} .qa-pv-radius-row .qa-pv-btn-clear:hover { background: #fff3cd; }
+    #${CONTAINER_ID} .qa-pv-radius-status { font-size: 12px; color: #7A5300; margin-top: 6px; }
+    #${CONTAINER_ID} .qa-pv-radius-status.active { color: #6A2C00; font-weight: 700; }
+    #${CONTAINER_ID} .qa-pv-radius-status .qa-pv-radius-expires {
+      display: inline-block; margin-left: 8px; padding: 1px 6px;
+      background: #EA9500; color: #fff; border-radius: 3px; font-size: 11px; font-weight: 700;
+    }
     #${CONTAINER_ID} .qa-pv-toggle {
       display: inline-flex; align-items: center; gap: 8px;
       padding: 8px 14px; border-radius: 999px; background: #fee; color: #a11;
@@ -1062,6 +1113,68 @@
     }[c]));
   }
 
+  // ── TEST-ONLY radius override renderer ─────────────────────────────
+  // Renders the yellow "widen preview radius" card. Deliberately kept as
+  // its own helper (not inlined in render()) so the visual boundary
+  // between normal preview controls and this test-only affordance is
+  // obvious in the source too. Reads three fields off preview_mode:
+  //   preview_radius_km_override            (number | undefined)
+  //   preview_radius_km_override_expires_at (ISO string | undefined)
+  //   preview_radius_km_override_set_by     (email | undefined)
+  // Server auto-clears the override 7 days after set_at — the countdown
+  // shown here is display-only, not a client-side timer.
+  function renderRadiusOverride(cfg) {
+    const cur = cfg && cfg.preview_radius_km_override;
+    const expiresIso = cfg && cfg.preview_radius_km_override_expires_at;
+    let statusHtml = '';
+    let hasActive = false;
+    if (cur != null) {
+      const expiresAt = expiresIso ? new Date(expiresIso) : null;
+      const now = new Date();
+      const expired = expiresAt && expiresAt <= now;
+      if (expired) {
+        statusHtml = '<div class="qa-pv-radius-status">Currently: <b>' + escapeHtml(cur) +
+          ' km</b> — EXPIRED ' + timeAgo(expiresIso) + '. Real 600 km boundary is back in effect. ' +
+          'Clear this to tidy up, or Save a new value to re-enable.</div>';
+      } else if (expiresAt) {
+        hasActive = true;
+        const daysLeft = Math.max(0, Math.round((expiresAt - now) / 86400000));
+        statusHtml = '<div class="qa-pv-radius-status active">Active: <b>' +
+          escapeHtml(cur) + ' km</b> for preview only ' +
+          '<span class="qa-pv-radius-expires">auto-clears in ' + daysLeft + 'd</span></div>';
+      } else {
+        // No expiry timestamp — legacy row, treat as active with no known clock.
+        hasActive = true;
+        statusHtml = '<div class="qa-pv-radius-status active">Active: <b>' + escapeHtml(cur) +
+          ' km</b> for preview only</div>';
+      }
+    } else {
+      statusHtml = '<div class="qa-pv-radius-status">No override active — previews use the real 600 km boundary.</div>';
+    }
+    const defaultVal = cur != null ? cur : 2000;
+    const clearBtn = hasActive
+      ? '<button type="button" class="qa-pv-btn-clear" data-action="clear-radius">Clear override</button>'
+      : '';
+    return `
+      <div class="qa-pv-radius" role="region" aria-label="Test-only radius override">
+        <div class="qa-pv-radius-title">⚠️ TEST-ONLY radius override</div>
+        <div class="qa-pv-radius-sub">
+          Real users ALWAYS use the 600 km data boundary — this widens the preview radius
+          for enrolled test devices only, then auto-clears server-side after 7 days so it
+          can never be silently left on.
+        </div>
+        <div class="qa-pv-radius-row">
+          <input type="number" min="100" max="5000" step="50" value="${escapeHtml(defaultVal)}"
+                 data-action="set-radius-input" aria-label="Override radius in kilometres">
+          <span style="font-size:12px;color:#7A5300">km (100–5000)</span>
+          <button type="button" class="qa-pv-btn-save" data-action="save-radius">Save</button>
+          ${clearBtn}
+        </div>
+        ${statusHtml}
+      </div>
+    `;
+  }
+
   function render() {
     const cfg = (state.config && state.config.preview_mode) || {};
     const enabled = !!cfg.enabled;
@@ -1098,6 +1211,7 @@
         </label>
         <button class="qa-pv-btn-primary" data-action="save-tier-rate">Save</button>
       </div>
+      ${renderRadiusOverride(cfg)}
       <div class="qa-pv-grid">
         <div class="qa-pv-card">
           <h3>Enrolled devices (${enrolled.size})</h3>
@@ -1175,6 +1289,37 @@
         const rate = parseInt(container.querySelector("[data-action=set-rate]").value, 10);
         await apiPost("/api/admin/emsc/preview/config", {trigger_tier: tier, rate_limit_minutes: rate});
         showBanner("ok", `Tier=${tier}, rate=${rate}min saved.`);
+      } else if (action === "save-radius") {
+        // TEST-ONLY radius override. Server enforces 100..5000 and
+        // stamps its own 7-day auto-expiry — we just send the number.
+        const inputEl = container.querySelector("[data-action=set-radius-input]");
+        const km = parseInt(inputEl && inputEl.value, 10);
+        if (!km || km < 100 || km > 5000) {
+          showBanner("err", "Radius must be between 100 and 5000 km.");
+          return;
+        }
+        if (km > 1500) {
+          // Bigger than typical (Athens ≈ 830 km, Turkey ≈ 1500 km) —
+          // pause for confirmation so a stray finger on the number
+          // spinner doesn't push us to 5000 km previews silently.
+          if (!confirm("Set preview radius to " + km + " km?\n\n" +
+              "This will fire previews for events much further than Malta's real 600 km alert zone " +
+              "(e.g., " + km + " km covers " +
+              (km >= 3000 ? "much of Europe and the Middle East" :
+               km >= 2000 ? "Greece, Turkey, and parts of North Africa" :
+               "Sicily, southern Italy, and parts of Greece") + "). Continue?")) {
+            return;
+          }
+        }
+        await apiPost("/api/admin/emsc/preview/config", {preview_radius_km_override: km});
+        showBanner("ok", "Override set to " + km + " km — auto-clears in 7 days.");
+      } else if (action === "clear-radius") {
+        if (!confirm("Clear the test-only radius override?\n\n" +
+            "Previews will immediately revert to Malta's real 600 km boundary.")) return;
+        await apiPost("/api/admin/emsc/preview/config", {clear_preview_radius_override: true});
+        showBanner("ok", "Override cleared — back to 600 km.");
+      } else if (action === "set-radius-input") {
+        return;   // no-op: number spinner change is picked up on Save click
       } else if (action === "kill") {
         if (!confirm("Disable preview mode across ALL countries immediately?")) return;
         const r = await apiPost("/api/admin/emsc/preview/kill", {});
