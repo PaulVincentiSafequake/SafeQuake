@@ -2528,6 +2528,12 @@ async def create_user(payload: UserCreatePayload, request: Request):
     email_norm = payload.email.strip().lower()
     if "@" not in email_norm or " " in email_norm:
         raise HTTPException(400, "Invalid email")
+    # Prevent creation of a user whose email collides with the sentinel
+    # principal used by the legacy X-Admin-Token path. A real user with
+    # that email would let self-* guards misattribute legacy-token
+    # actions as "self", producing subtly wrong lockout behavior.
+    if email_norm == "legacy@dashboard":
+        raise HTTPException(400, "Reserved email address")
 
     existing = await db.users.find_one({"email_normalized": email_norm})
     if existing:
@@ -2682,8 +2688,11 @@ async def patch_user(email: str, body: UserPatchBody, request: Request):
                     new_exp = new_exp.replace(tzinfo=timezone.utc)
             except ValueError:
                 raise HTTPException(400, f"expires_at is not a valid ISO 8601 datetime: {raw!r}")
-            if is_self and new_exp < datetime.now(timezone.utc):
-                # Self-expire lockout guard.
+            if is_self and new_exp <= datetime.now(timezone.utc):
+                # Self-expire lockout guard. Using <= (not <) so setting
+                # expiry to exactly-now still counts as "self-brick" —
+                # otherwise the guard passes and the account expires
+                # one tick later, defeating the purpose.
                 raise HTTPException(400, "Cannot set your own expiry to a past date")
             set_fields["expires_at"] = new_exp
 
@@ -2764,12 +2773,20 @@ async def delete_user(email: str, request: Request):
     if not target:
         raise HTTPException(404, f"User {email_norm} not found")
 
-    # Last-admin guard.
+    # Last-admin guard. Exclude disabled AND expired admins from the
+    # count — an expired admin can't sign in either, so they can't
+    # replace the one being deleted.
     if target.get("role") == "admin":
+        now = datetime.now(timezone.utc)
         remaining_admins = await db.users.count_documents({
             "role": "admin",
             "email_normalized": {"$ne": email_norm},
             "disabled": {"$ne": True},
+            # `expires_at` null OR in the future
+            "$or": [
+                {"expires_at": None},
+                {"expires_at": {"$gt": now}},
+            ],
         })
         if remaining_admins == 0:
             raise HTTPException(400, "Cannot delete the last remaining admin")
