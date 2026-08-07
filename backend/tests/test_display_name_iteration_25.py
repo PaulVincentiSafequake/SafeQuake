@@ -21,7 +21,7 @@ import pytest
 import requests
 
 BASE_URL = "http://localhost:8001"
-ADMIN_TOKEN = "Pt3481pt"
+ADMIN_TOKEN = "REDACTED_SEE_ENV"
 
 
 # ----------------------- fixtures -----------------------

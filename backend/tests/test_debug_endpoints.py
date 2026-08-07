@@ -10,7 +10,7 @@ Spec:
      admin_password_configured:true, devices:[...]}. Each device has
      device_token_preview (NOT full token), user_id, platform, updated_at.
   b) POST /api/debug/test-push with NO header → 401.
-  c) POST /api/debug/test-push with X-Admin-Token: Pt3481pt → 200 with
+  c) POST /api/debug/test-push with X-Admin-Token: REDACTED_SEE_ENV → 200 with
      {recipients, push_delivered:false, push_error:'EMERGENT_PUSH_KEY missing or invalid'}.
   d) POST /api/register-push still upserts to db.push_devices (visible in
      follow-up GET /api/debug/devices).
@@ -20,7 +20,7 @@ import pytest
 import requests
 
 BASE_URL = "http://localhost:8001"
-ADMIN_PWD = "Pt3481pt"
+ADMIN_PWD = "REDACTED_SEE_ENV"
 
 
 @pytest.fixture(scope="module")

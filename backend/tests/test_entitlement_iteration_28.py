@@ -16,17 +16,29 @@ import pytest
 import requests
 from pymongo import MongoClient
 
-BASE_URL = os.environ.get("EXPO_PUBLIC_BACKEND_URL", "").rstrip("/") or "https://quake-alert-18.preview.emergentagent.com"
+BASE_URL = os.environ.get("EXPO_PUBLIC_BACKEND_URL", "").rstrip("/") or "http://localhost:8001"
 API = f"{BASE_URL}/api"
 
-ADMIN_TOKEN = "m11vRwfDoxnHvIMLkKzjUwQy"
+# ADMIN_TOKEN comes from the ADMIN_TRIGGER_PASSWORD env var (same as the
+# backend reads). Never hardcoded — hardcoding would put a live admin
+# credential into git history the moment this file is pushed.
+ADMIN_TOKEN = os.environ.get("ADMIN_TRIGGER_PASSWORD", "")
+if not ADMIN_TOKEN:
+    # Try loading from backend/.env for local dev convenience.
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
+        ADMIN_TOKEN = os.environ.get("ADMIN_TRIGGER_PASSWORD", "")
+    except Exception:
+        pass
 ADMIN_HEADERS = {"X-Admin-Token": ADMIN_TOKEN, "Content-Type": "application/json"}
 
-MONGO_URL = "mongodb://localhost:27017"
-DB_NAME = "test_database"
+MONGO_URL = os.environ.get("MONGO_URL", "mongodb://localhost:27017")
+DB_NAME = os.environ.get("DB_NAME", "test_database")
 
 TEST_PREFIX = "TEST_ENTL_"
 CRITICAL_PHRASE = "Critical alerts still work."
+
 
 
 @pytest.fixture(scope="module")

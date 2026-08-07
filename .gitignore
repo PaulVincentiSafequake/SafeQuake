@@ -78,5 +78,15 @@ agenthub/agents/youtube/db
 
 memory/test_credentials.md
 
+# Mongo migration dumps (produced by /app/scripts/migrate_mongo.py).
+# Contain raw copies of every collection including push_devices, apns_configs,
+# and audit_log — must never be committed.
+/dump/
+migration-dump/
+*.jsonl
+
 # Mobile development
 android-sdk/
+# Internal testing_agent QA artifacts — contain agent-to-agent notes
+# and historic secret values. Never push to GitHub.
+test_reports/

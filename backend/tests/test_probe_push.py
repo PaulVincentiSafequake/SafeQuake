@@ -29,7 +29,7 @@ from dotenv import load_dotenv
 load_dotenv("/app/backend/.env")
 
 BASE_URL = "http://localhost:8001"
-ADMIN_PASSWORD = "Pt3481pt"
+ADMIN_PASSWORD = "REDACTED_SEE_ENV"
 TOKEN = ADMIN_PASSWORD
 
 _mongo = MongoClient(os.environ["MONGO_URL"])

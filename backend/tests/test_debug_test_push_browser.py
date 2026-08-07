@@ -22,7 +22,7 @@ import pytest
 import requests
 
 BASE_URL = "http://localhost:8001"
-ADMIN_PWD = "Pt3481pt"
+ADMIN_PWD = "REDACTED_SEE_ENV"
 SERVER_PY = Path("/app/backend/server.py")
 
 

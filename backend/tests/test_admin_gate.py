@@ -13,7 +13,7 @@ import requests
 
 # Per problem statement: curl against local backend.
 BASE_URL = "http://localhost:8001"
-ADMIN_PWD = "Pt3481pt"
+ADMIN_PWD = "REDACTED_SEE_ENV"
 
 
 @pytest.fixture(scope="module")

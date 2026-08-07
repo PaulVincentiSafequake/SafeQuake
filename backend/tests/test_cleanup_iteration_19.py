@@ -18,7 +18,7 @@ import pytest
 import requests
 
 BASE_URL = os.environ["EXPO_PUBLIC_BACKEND_URL"].rstrip("/")
-ADMIN_TOKEN = "Pt3481pt"
+ADMIN_TOKEN = "REDACTED_SEE_ENV"
 
 
 @pytest.fixture(scope="module")

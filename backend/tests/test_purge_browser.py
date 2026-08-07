@@ -6,7 +6,7 @@ import pytest
 import requests
 
 BASE_URL = os.environ.get("BACKEND_URL_OVERRIDE") or "http://localhost:8001"
-ADMIN_PWD = os.environ.get("ADMIN_TRIGGER_PASSWORD", "Pt3481pt")
+ADMIN_PWD = os.environ.get("ADMIN_TRIGGER_PASSWORD", "REDACTED_SEE_ENV")
 
 TEST_ROWS = [
     ("TEST_a1", "android"),

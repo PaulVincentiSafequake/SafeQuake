@@ -25,7 +25,7 @@ import pytest
 import requests
 
 BASE_URL = os.environ.get("BACKEND_URL", "http://localhost:8001")
-ADMIN_PWD = "Pt3481pt"
+ADMIN_PWD = "REDACTED_SEE_ENV"
 EVENTS_URL = f"{BASE_URL}/api/debug/last-push-events"
 
 

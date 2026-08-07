@@ -177,9 +177,9 @@ agent_communication:
       7. GET /api/audit → every event of kind status/rescued/rescue_reverted has short_code and display_name fields.
       8. POST /api/mark-rescued for a device with display_name="X" → status_events row for that rescue has display_name="X" and /api/audit returns display_name="X" on the rescued event.
       9. Regression: /api/cors-debug still returns the right shape (allowed_origins, allow_reason, deploy_fingerprint).
-      10. Regression: /api/trigger-alert admin auth still 401s wrong token and 200s correct one (ADMIN_TRIGGER_PASSWORD=Pt3481pt).
+      10. Regression: /api/trigger-alert admin auth still 401s wrong token and 200s correct one (ADMIN_TRIGGER_PASSWORD=REDACTED_SEE_ENV).
 
-      Credentials: ADMIN_TRIGGER_PASSWORD = "Pt3481pt" (from backend/.env).
+      Credentials: ADMIN_TRIGGER_PASSWORD = "REDACTED_SEE_ENV" (from backend/.env).
       Backend URL for testing: http://localhost:8001
       No frontend testing needed this pass — I already verified the pill,
       first-launch modal, tap-to-edit, and end-to-end name persistence via
