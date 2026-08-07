@@ -1152,6 +1152,443 @@ async def set_notification_preset(body: NotificationPresetBody):
     )
     return {"ok": True, "device_id": body.device_id, "preset": preset}
 
+# ---------- Dual casualty reports: B1 Operational / B2 Public -----------
+#
+# Two PDF endpoints producing reports of who checked in with what status
+# during a report window. They exist as a PAIR — building them
+# separately would risk drift where the same real-world event produces
+# inconsistent counts on operational vs public reports.
+#
+# B1 (Operational) — internal dispatch document. Contains everything
+#   the Civil Protection team needs to allocate resources: names,
+#   short codes, exact GPS + accuracy, battery, platform, notes,
+#   status timeline.
+#
+# B2 (Public) — external comms document. **Aggregate numbers only. No
+#   names, no initials, no short codes, no per-person location, no
+#   per-person status — not even for rescued people.** See
+#   `/app/memory/PRD.md` "Legal / privacy locks" section: this is a
+#   GDPR + next-of-kin policy, not a UI preference. Any change that
+#   would make B2 identifiable requires legal review before merge.
+#
+# Both reports use the same underlying data query so the counts on
+# B2 are always internally consistent with the detail in B1. That's
+# enforced by `_gather_devices_in_report_window()` — both endpoints
+# call it, neither queries the DB independently.
+
+async def _gather_devices_in_report_window(
+    since_iso: Optional[str],
+    until_iso: Optional[str],
+) -> tuple[list[dict], datetime, datetime]:
+    """Fetch every device with any status_event in [since, until], collapsed
+    to the LATEST event per device (which is what the report describes).
+
+    Returns:
+      (list_of_latest_events, resolved_since_dt, resolved_until_dt)
+
+    Each list item has extra fields:
+      - `first_event_at`: when THIS device first reported in the window
+      - `event_count`: how many status_events they logged in the window
+    So B1 can show "checked in N times, latest at X" per row.
+    """
+    since_dt = _parse_iso_or_none(since_iso)
+    until_dt = _parse_iso_or_none(until_iso)
+    if since_dt is None:
+        since_dt = datetime.now(timezone.utc) - timedelta(hours=24)
+    if until_dt is None:
+        until_dt = datetime.now(timezone.utc)
+    if until_dt < since_dt:
+        raise HTTPException(400, "until must be >= since")
+    if (until_dt - since_dt).days > MAX_EXPORT_WINDOW_DAYS:
+        raise HTTPException(
+            400,
+            f"Window too wide (max {MAX_EXPORT_WINDOW_DAYS} days).",
+        )
+
+    # `recorded_at` is stored as an ISO string in status_events (see the
+    # sample rows in mongo) so we compare against ISO strings, not
+    # datetime objects. String comparison of ISO-8601 UTC values is
+    # lexicographically correct.
+    q = {"recorded_at": {"$gte": since_dt.isoformat(), "$lte": until_dt.isoformat()}}
+    rows = await db.status_events.find(q, {"_id": 0}).sort("recorded_at", -1).to_list(5000)
+
+    # Collapse to latest-per-device.
+    by_device: dict[str, dict] = {}
+    for r in rows:
+        did = r.get("device_id")
+        if not did:
+            continue
+        if did not in by_device:
+            by_device[did] = {**r, "event_count": 1, "first_event_at": r.get("recorded_at")}
+        else:
+            by_device[did]["event_count"] += 1
+            # `first_event_at` tracks the oldest event; since we're
+            # sorted newest-first, every subsequent hit is older.
+            by_device[did]["first_event_at"] = r.get("recorded_at")
+
+    # Reverted rescues are marked with `rescue_reverted=True` on a
+    # follow-up event. For the report we want the *effective current
+    # status* — which is exactly what the latest event says, since
+    # a revert reinstates the prior_status on that same event row.
+    return list(by_device.values()), since_dt, until_dt
+
+
+def _bucket_by_status(events: list[dict]) -> dict:
+    """Aggregate counts by status/severity for both reports.
+
+    B2 exposes only the totals from here; B1 shows totals AND names.
+    """
+    total = len(events)
+    safe = trapped = rescued = 0
+    trapped_red = trapped_yellow = trapped_green = trapped_unknown = 0
+    for e in events:
+        st = e.get("status")
+        if st == "safe":
+            safe += 1
+        elif st == "rescued":
+            rescued += 1
+        elif st == "trapped":
+            trapped += 1
+            sev = (e.get("severity") or "").lower()
+            if sev == "red":
+                trapped_red += 1
+            elif sev == "yellow":
+                trapped_yellow += 1
+            elif sev == "green":
+                trapped_green += 1
+            else:
+                trapped_unknown += 1
+    return {
+        "total_devices": total,
+        "safe": safe,
+        "trapped": trapped,
+        "rescued": rescued,
+        "trapped_red": trapped_red,
+        "trapped_yellow": trapped_yellow,
+        "trapped_green": trapped_green,
+        "trapped_unknown": trapped_unknown,
+        "awaiting_rescue": trapped,   # semantic alias — "trapped" == "needs help / awaiting rescue"
+    }
+
+
+def _pdf_common_setup():
+    """Import ReportLab + build shared paragraph styles. Called by both
+    B1 and B2 so styling stays consistent (a subtle wording gap between
+    the two reports would be more suspicious than obvious)."""
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.platypus import (
+        SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
+    )
+    styles = getSampleStyleSheet()
+    return {
+        "colors": colors, "A4": A4, "landscape": landscape,
+        "styles": styles, "ParagraphStyle": ParagraphStyle, "mm": mm,
+        "SimpleDocTemplate": SimpleDocTemplate, "Paragraph": Paragraph,
+        "Spacer": Spacer, "Table": Table, "TableStyle": TableStyle,
+    }
+
+
+@api_router.get("/admin/casualty-report/operational.pdf")
+async def casualty_report_operational_pdf(
+    request: Request,
+    since: Optional[str] = Query(default=None, description="ISO 8601 start; default 24h ago."),
+    until: Optional[str] = Query(default=None, description="ISO 8601 end; default now."),
+):
+    """B1 — Operational casualty report. Admin+operator gated.
+
+    Full-detail internal document. Contains names, short codes, exact
+    GPS, notes, timeline. Suitable for Civil Protection dispatch.
+    """
+    principal = await resolve_principal(
+        request,
+        request.headers.get("x-admin-token"),
+        ADMIN_TRIGGER_PASSWORD,
+        db,
+    )
+    require_role(principal, "admin", "operator")
+
+    events, since_dt, until_dt = await _gather_devices_in_report_window(since, until)
+    counts = _bucket_by_status(events)
+
+    r = _pdf_common_setup()
+    colors, mm = r["colors"], r["mm"]
+    Paragraph, Spacer, Table, TableStyle = r["Paragraph"], r["Spacer"], r["Table"], r["TableStyle"]
+    styles, PS = r["styles"], r["ParagraphStyle"]
+
+    title_style = PS("T", parent=styles["Heading1"], fontSize=14, spaceAfter=6, textColor=colors.HexColor("#111"))
+    meta_style  = PS("M", parent=styles["Normal"], fontSize=8, textColor=colors.HexColor("#555"), spaceAfter=8)
+    h2_style    = PS("H2", parent=styles["Heading2"], fontSize=11, spaceAfter=4, textColor=colors.HexColor("#111"))
+    cell_style  = PS("C", parent=styles["Normal"], fontSize=7, leading=9, wordWrap="CJK")
+    cell_bold   = PS("CB", parent=cell_style, fontName="Helvetica-Bold")
+    footer_style = PS("F", parent=styles["Normal"], fontSize=7, textColor=colors.HexColor("#8a1a1a"), spaceBefore=10)
+
+    def cell(s, style=cell_style):
+        if s is None or s == "":
+            return Paragraph("&nbsp;", style)
+        return Paragraph(_html.escape(str(s)), style)
+
+    story = [
+        Paragraph("B1 — Operational casualty report", title_style),
+        Paragraph(
+            f"CONFIDENTIAL — INTERNAL USE ONLY. Contains personally identifiable information. "
+            f"Not for public distribution.",
+            PS("CI", parent=meta_style, textColor=colors.HexColor("#8a1a1a"), fontName="Helvetica-Bold"),
+        ),
+        Paragraph(
+            f"Window: {since_dt.isoformat()} → {until_dt.isoformat()} (UTC) &nbsp;·&nbsp; "
+            f"Total devices reporting: {counts['total_devices']} &nbsp;·&nbsp; "
+            f"Generated: {datetime.now(timezone.utc).isoformat()} &nbsp;·&nbsp; "
+            f"By: {principal.get('email', '?')}",
+            meta_style,
+        ),
+        Paragraph("Aggregate", h2_style),
+    ]
+
+    summary_data = [
+        ["", "Count"],
+        ["Safe", str(counts["safe"])],
+        ["Trapped / needs help (red)",    str(counts["trapped_red"])],
+        ["Trapped / needs help (yellow)", str(counts["trapped_yellow"])],
+        ["Trapped / needs help (green)",  str(counts["trapped_green"])],
+        ["Trapped — severity not set",    str(counts["trapped_unknown"])],
+        ["Rescued",                       str(counts["rescued"])],
+        ["Total",                         str(counts["total_devices"])],
+    ]
+    summary_tbl = Table(summary_data, colWidths=[70*mm, 30*mm])
+    summary_tbl.setStyle(TableStyle([
+        ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#e6e6ea")),
+        ("FONTNAME",   (0,0), (-1,0), "Helvetica-Bold"),
+        ("FONTSIZE",   (0,0), (-1,-1), 8),
+        ("GRID",       (0,0), (-1,-1), 0.3, colors.HexColor("#c9ccd2")),
+        ("BACKGROUND", (0,-1), (-1,-1), colors.HexColor("#f0f2f6")),
+        ("FONTNAME",   (0,-1), (-1,-1), "Helvetica-Bold"),
+    ]))
+    story.append(summary_tbl)
+    story.append(Spacer(0, 10))
+
+    story.append(Paragraph("Per-device detail", h2_style))
+    header = ["Latest status", "Sev", "Name / code", "Latest at (UTC)", "Location", "Battery", "Platform", "Notes"]
+
+    def _sort_key(e):
+        # Sort: trapped > rescued > safe; within status, red > yellow > green > unknown; then newest first.
+        rank_status = {"trapped": 0, "rescued": 1, "safe": 2}.get(e.get("status"), 3)
+        rank_sev = {"red": 0, "yellow": 1, "green": 2}.get((e.get("severity") or "").lower(), 3)
+        return (rank_status, rank_sev, -1 * (e.get("recorded_at") or "" and 1))
+
+    events_sorted = sorted(events, key=_sort_key)
+    data = [header]
+    for e in events_sorted:
+        lat = e.get("latitude"); lon = e.get("longitude")
+        loc = "—"
+        if lat is not None and lon is not None:
+            loc = f"{lat:.4f}, {lon:.4f}"
+            if e.get("accuracy_m"):
+                loc += f" ±{e.get('accuracy_m'):.0f}m"
+        batt = "—"
+        if e.get("battery_pct") is not None:
+            batt = f"{e.get('battery_pct')}%"
+            if e.get("battery_state"):
+                batt += f" ({e.get('battery_state')})"
+        name = e.get("display_name") or "(anonymous)"
+        code = _short_code(e.get("device_id"))
+        name_block = f"{name}<br/><font size=6 color='#666'>{code}</font>"
+
+        status_display = e.get("status") or "?"
+        if e.get("rescue_reverted"):
+            status_display = f"{status_display} (reverted)"
+
+        data.append([
+            cell(status_display, cell_bold),
+            cell((e.get("severity") or "—")),
+            cell(name_block),
+            cell(e.get("recorded_at") or ""),
+            cell(loc),
+            cell(batt),
+            cell(e.get("platform") or "—"),
+            cell(e.get("notes") or "—"),
+        ])
+
+    col_widths = [22*mm, 12*mm, 40*mm, 40*mm, 45*mm, 22*mm, 20*mm, 70*mm]
+    tbl = Table(data, colWidths=col_widths, repeatRows=1)
+    tbl.setStyle(TableStyle([
+        ("BACKGROUND",   (0,0), (-1,0), colors.HexColor("#e6e6ea")),
+        ("FONTNAME",     (0,0), (-1,0), "Helvetica-Bold"),
+        ("FONTSIZE",     (0,0), (-1,0), 8),
+        ("GRID",         (0,0), (-1,-1), 0.3, colors.HexColor("#c9ccd2")),
+        ("VALIGN",       (0,0), (-1,-1), "TOP"),
+        ("LEFTPADDING",  (0,0), (-1,-1), 4),
+        ("RIGHTPADDING", (0,0), (-1,-1), 4),
+    ]))
+    story.append(tbl)
+
+    if counts["total_devices"] == 0:
+        story.append(Spacer(0, 20))
+        story.append(Paragraph("No devices reported in the specified window.", meta_style))
+
+    story.append(Paragraph(
+        "END OF B1 OPERATIONAL REPORT — For public communications, use the B2 Public report which "
+        "exposes aggregate numbers only. Do NOT share this document publicly, with press, or with "
+        "next-of-kin before Civil Protection has completed formal notification.",
+        footer_style,
+    ))
+
+    buf = _io.BytesIO()
+    doc = r["SimpleDocTemplate"](
+        buf,
+        pagesize=r["landscape"](r["A4"]),
+        leftMargin=12*mm, rightMargin=12*mm,
+        topMargin=12*mm, bottomMargin=12*mm,
+        title="Quake Angel B1 Operational Report",
+        author=principal.get("email", ""),
+    )
+    doc.build(story)
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="quakeangel-B1-operational-{datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")}.pdf"',
+            "X-Row-Count": str(counts["total_devices"]),
+            # X-Report-Kind lets the dashboard sanity-check that clicking "B1"
+            # actually returned a B1 (defense-in-depth against endpoint mixup).
+            "X-Report-Kind": "B1-operational",
+        },
+    )
+
+
+@api_router.get("/admin/casualty-report/public.pdf")
+async def casualty_report_public_pdf(
+    request: Request,
+    since: Optional[str] = Query(default=None, description="ISO 8601 start; default 24h ago."),
+    until: Optional[str] = Query(default=None, description="ISO 8601 end; default now."),
+):
+    """B2 — Public casualty report. Admin+operator gated.
+
+    **Aggregate counts only.** This PDF is safe to share externally
+    (press briefings, family info line, public dashboards). It contains:
+        - How many people checked in safe
+        - How many people are awaiting rescue (with severity breakdown)
+        - How many people have been rescued
+        - No names, no initials, no codes, no per-person location, no
+          per-person status. Not for rescued people either.
+
+    Legal + next-of-kin policy locked with Paul 2026-08-07 (see PRD
+    "Legal / privacy locks" section). Any change to identifiability
+    requires legal review, in writing, before merge.
+    """
+    principal = await resolve_principal(
+        request,
+        request.headers.get("x-admin-token"),
+        ADMIN_TRIGGER_PASSWORD,
+        db,
+    )
+    require_role(principal, "admin", "operator")
+
+    events, since_dt, until_dt = await _gather_devices_in_report_window(since, until)
+    counts = _bucket_by_status(events)
+
+    # Belt-and-braces assertion. If a future refactor accidentally left
+    # a per-person field in `counts`, this assertion refuses to render
+    # the report. Fail-loud is the correct behavior — the legal lock
+    # matters more than uptime of this specific endpoint.
+    # Whitelist of keys expected to be safe (all integer counts):
+    _B2_SAFE_KEYS = {
+        "total_devices", "safe", "trapped", "rescued",
+        "trapped_red", "trapped_yellow", "trapped_green", "trapped_unknown",
+        "awaiting_rescue",
+    }
+    _leaked = [k for k in counts if k not in _B2_SAFE_KEYS]
+    if _leaked:
+        raise HTTPException(
+            500,
+            "B2 aggregate structure changed unexpectedly. Refusing to render "
+            "for privacy safety. See PRD 'Legal / privacy locks' section. "
+            f"Unexpected keys: {_leaked}",
+        )
+
+    r = _pdf_common_setup()
+    colors, mm = r["colors"], r["mm"]
+    Paragraph, Spacer, Table, TableStyle = r["Paragraph"], r["Spacer"], r["Table"], r["TableStyle"]
+    styles, PS = r["styles"], r["ParagraphStyle"]
+
+    title_style = PS("T", parent=styles["Heading1"], fontSize=16, spaceAfter=8, textColor=colors.HexColor("#111"))
+    meta_style  = PS("M", parent=styles["Normal"], fontSize=9, textColor=colors.HexColor("#444"), spaceAfter=12)
+    h2_style    = PS("H2", parent=styles["Heading2"], fontSize=12, spaceAfter=6, textColor=colors.HexColor("#111"))
+    body_style  = PS("B", parent=styles["Normal"], fontSize=10, leading=14, spaceAfter=6)
+    footer_style = PS("F", parent=styles["Normal"], fontSize=8, textColor=colors.HexColor("#666"), spaceBefore=14)
+
+    story = [
+        Paragraph("Public status report", title_style),
+        Paragraph(
+            f"Window: {since_dt.strftime('%Y-%m-%d %H:%M')} to "
+            f"{until_dt.strftime('%Y-%m-%d %H:%M')} UTC &nbsp;·&nbsp; "
+            f"Issued: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC",
+            meta_style,
+        ),
+        Paragraph("Current status of people using the Quake Angel app in the affected area:", body_style),
+    ]
+
+    # Aggregate table — ONLY counts. Deliberately no "who" column, no
+    # region column, no timestamp-of-latest-event column.
+    summary_data = [
+        ["", ""],
+        ["People checked in as safe",                str(counts["safe"])],
+        ["People rescued",                           str(counts["rescued"])],
+        ["People awaiting rescue",                   str(counts["awaiting_rescue"])],
+        ["  — of which reporting critical injury",   str(counts["trapped_red"])],
+        ["  — of which reporting moderate injury",   str(counts["trapped_yellow"])],
+        ["  — of which reporting minor injury",      str(counts["trapped_green"])],
+        ["Total people accounted for",               str(counts["total_devices"])],
+    ]
+    summary_tbl = Table(summary_data, colWidths=[110*mm, 30*mm])
+    summary_tbl.setStyle(TableStyle([
+        ("FONTNAME",   (0,0), (-1,-1), "Helvetica"),
+        ("FONTSIZE",   (0,0), (-1,-1), 10),
+        ("BACKGROUND", (0,-1), (-1,-1), colors.HexColor("#f0f2f6")),
+        ("FONTNAME",   (0,-1), (-1,-1), "Helvetica-Bold"),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 5),
+        ("TOPPADDING",    (0,0), (-1,-1), 5),
+        ("LINEABOVE",  (0,1), (-1,1), 0.5, colors.HexColor("#666")),
+        ("LINEABOVE",  (0,-1), (-1,-1), 0.5, colors.HexColor("#666")),
+        ("ALIGN",      (1,0), (1,-1), "RIGHT"),
+    ]))
+    story.append(summary_tbl)
+
+    story.append(Spacer(0, 14))
+    story.append(Paragraph(
+        "Notes: These counts reflect app users who have checked in via Quake Angel during the "
+        "window shown. They do not represent the total affected population. Individual "
+        "identities are not disclosed in this report to protect privacy and to preserve formal "
+        "next-of-kin notification procedures conducted by Malta Civil Protection.",
+        footer_style,
+    ))
+
+    buf = _io.BytesIO()
+    doc = r["SimpleDocTemplate"](
+        buf,
+        pagesize=r["landscape"](r["A4"]),
+        leftMargin=18*mm, rightMargin=18*mm,
+        topMargin=15*mm, bottomMargin=15*mm,
+        title="Quake Angel Public Status Report",
+        author=principal.get("email", ""),
+    )
+    doc.build(story)
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="quakeangel-B2-public-{datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")}.pdf"',
+            # No X-Row-Count on B2 — the aggregate table IS the counts, and
+            # exposing "N devices" in a header could be considered
+            # identifiability-adjacent for very small N. Erring cautiously.
+            "X-Report-Kind": "B2-public",
+        },
+    )
+
+
+
 
 # ---------- Subscription entitlement (Phase A of subscription-lapse work) ----
 #
