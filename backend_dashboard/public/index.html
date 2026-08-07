@@ -1296,13 +1296,656 @@
   </div>
 </div>
 
+<!-- ═════════════════════════════════════════════════════════════════════
+     Quake Angel dashboard — User Management panel (admin-only, collapsible)
+     Requires dashboard-auth guard above (uses window.qaApi + window.qaAuth).
+     ═════════════════════════════════════════════════════════════════════ -->
+<style>
+  .qa-um-panel {
+    margin: 24px 12px;
+    padding: 16px;
+    background: #f8f9fb;
+    border: 1px solid #d9dde3;
+    border-radius: 8px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  .qa-um-panel h2 {
+    margin: 0 0 4px 0;
+    font-size: 17px;
+    font-weight: 600;
+    color: #1a1a1a;
+    cursor: pointer;
+    user-select: none;
+  }
+  .qa-um-panel h2::before {
+    content: "▸ ";
+    display: inline-block;
+    width: 14px;
+    transition: transform 0.15s ease;
+  }
+  .qa-um-panel.qa-um-open h2::before { transform: rotate(90deg); }
+  .qa-um-panel .qa-um-subtitle { font-size: 12px; color: #666; margin: 0 0 12px 0; }
+  .qa-um-panel .qa-um-body { display: none; margin-top: 12px; }
+  .qa-um-panel.qa-um-open .qa-um-body { display: block; }
+
+  .qa-um-table {
+    width: 100%; border-collapse: collapse; background: #fff;
+    font-size: 13px; border: 1px solid #e0e3e8; border-radius: 6px; overflow: hidden;
+  }
+  .qa-um-table th, .qa-um-table td {
+    padding: 8px 10px; text-align: left; border-bottom: 1px solid #eef0f4; vertical-align: middle;
+  }
+  .qa-um-table th {
+    background: #f0f2f6; font-size: 11px; font-weight: 600; color: #555;
+    text-transform: uppercase; letter-spacing: 0.03em;
+  }
+  .qa-um-table tr:last-child td { border-bottom: none; }
+  .qa-um-table tr.qa-um-self { background: #fffbea; }
+  .qa-um-table tr.qa-um-expired { background: #ffefef; }
+  .qa-um-table tr.qa-um-disabled { opacity: 0.55; }
+
+  .qa-um-role-badge {
+    display: inline-block; padding: 2px 8px; border-radius: 999px;
+    font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em;
+  }
+  .qa-um-role-badge.admin   { background: #fbe6e6; color: #a01717; }
+  .qa-um-role-badge.operator{ background: #e0eeff; color: #0f4d99; }
+
+  .qa-um-status-chip {
+    display: inline-block; padding: 1px 7px; border-radius: 4px;
+    font-size: 11px; font-weight: 500; margin-right: 4px;
+  }
+  .qa-um-status-chip.active   { background: #e6f7ea; color: #1a7f37; }
+  .qa-um-status-chip.disabled { background: #ffebeb; color: #b0141a; }
+  .qa-um-status-chip.expired  { background: #fff0e1; color: #ba4700; }
+
+  .qa-um-action-btn {
+    display: inline-block; padding: 4px 9px; margin-right: 4px; margin-bottom: 4px;
+    background: #fff; border: 1px solid #cbd0d8; border-radius: 4px;
+    font-size: 11px; color: #333; cursor: pointer; font-family: inherit;
+  }
+  .qa-um-action-btn:hover:not(:disabled) { background: #f0f2f6; border-color: #a8b0bd; }
+  .qa-um-action-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+  .qa-um-action-btn.qa-um-danger        { color: #b0141a; border-color: #f0c9c9; }
+  .qa-um-action-btn.qa-um-danger:hover:not(:disabled) { background: #ffefef; border-color: #d99999; }
+  .qa-um-action-btn.qa-um-primary       { background: #0f4d99; color: #fff; border-color: #0f4d99; }
+  .qa-um-action-btn.qa-um-primary:hover:not(:disabled) { background: #0d3e7d; }
+
+  .qa-um-add-form {
+    display: flex; align-items: center; gap: 10px; padding: 12px; margin-bottom: 12px;
+    background: #fff; border: 1px solid #e0e3e8; border-radius: 6px; flex-wrap: wrap;
+  }
+  .qa-um-add-form input[type="email"] {
+    flex: 1; min-width: 220px; padding: 6px 10px;
+    border: 1px solid #cbd0d8; border-radius: 4px; font-size: 13px; font-family: inherit;
+  }
+  .qa-um-add-form label { font-size: 13px; color: #333; margin-right: 4px; }
+  .qa-um-add-form input[type="radio"] { margin-right: 3px; vertical-align: -1px; }
+
+  .qa-um-msg { padding: 8px 12px; border-radius: 4px; margin-bottom: 12px; font-size: 13px; }
+  .qa-um-msg.error   { background: #ffefef; color: #b0141a; border: 1px solid #f0c9c9; }
+  .qa-um-msg.success { background: #e6f7ea; color: #1a7f37; border: 1px solid #b8e2c4; }
+
+  .qa-um-modal-bg {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.4); display: none;
+    align-items: center; justify-content: center; z-index: 9999;
+  }
+  .qa-um-modal-bg.qa-um-show { display: flex; }
+  .qa-um-modal {
+    background: #fff; padding: 20px 22px; border-radius: 8px;
+    max-width: 460px; width: 90%; font-family: inherit;
+  }
+  .qa-um-modal h3 { margin: 0 0 8px 0; font-size: 16px; font-weight: 600; }
+  .qa-um-modal p  { margin: 0 0 12px 0; font-size: 13px; color: #333; line-height: 1.5; }
+  .qa-um-modal input[type="text"], .qa-um-modal input[type="datetime-local"] {
+    width: 100%; padding: 8px 10px; border: 1px solid #cbd0d8; border-radius: 4px;
+    font-size: 13px; font-family: inherit; box-sizing: border-box; margin-bottom: 12px;
+  }
+  .qa-um-modal-actions { display: flex; gap: 8px; justify-content: flex-end; }
+</style>
+
+<div id="qa-um-root" class="qa-um-panel" style="display:none">
+  <h2 id="qa-um-toggle">Operators &amp; Access</h2>
+  <div class="qa-um-subtitle">
+    Add operators, change roles, and manage 90-day account expiry. Admin-only.
+  </div>
+  <div class="qa-um-body">
+    <div id="qa-um-msg-slot"></div>
+
+    <form class="qa-um-add-form" id="qa-um-add-form" onsubmit="return false">
+      <input type="email" id="qa-um-add-email" placeholder="new.operator@example.com" required />
+      <label><input type="radio" name="qa-um-add-role" value="operator" checked> Operator</label>
+      <label><input type="radio" name="qa-um-add-role" value="admin"> Admin</label>
+      <button type="submit" class="qa-um-action-btn qa-um-primary" id="qa-um-add-submit">
+        Add operator
+      </button>
+    </form>
+
+    <table class="qa-um-table" id="qa-um-table">
+      <thead>
+        <tr>
+          <th>Email</th>
+          <th>Role</th>
+          <th>Status</th>
+          <th>Expires</th>
+          <th>Last login</th>
+          <th style="min-width:200px">Actions</th>
+        </tr>
+      </thead>
+      <tbody id="qa-um-tbody">
+        <tr><td colspan="6" style="padding:16px;text-align:center;color:#888">Loading…</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="qa-um-modal-bg" id="qa-um-modal-bg">
+  <div class="qa-um-modal">
+    <h3 id="qa-um-modal-title">Confirm</h3>
+    <p id="qa-um-modal-body"></p>
+    <input type="text" id="qa-um-modal-input" style="display:none" autocomplete="off" />
+    <input type="datetime-local" id="qa-um-modal-datetime" style="display:none" />
+    <div class="qa-um-modal-actions">
+      <button class="qa-um-action-btn" id="qa-um-modal-cancel">Cancel</button>
+      <button class="qa-um-action-btn qa-um-primary" id="qa-um-modal-confirm">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+  if (typeof window.qaApi !== 'function' || typeof window.qaAuth !== 'object') {
+    console.error('[qa-user-mgmt] Requires dashboard-auth guard to be loaded first.');
+    return;
+  }
+  const root      = document.getElementById('qa-um-root');
+  const toggleEl  = document.getElementById('qa-um-toggle');
+  const tbody     = document.getElementById('qa-um-tbody');
+  const msgSlot   = document.getElementById('qa-um-msg-slot');
+  const addForm   = document.getElementById('qa-um-add-form');
+  const addEmail  = document.getElementById('qa-um-add-email');
+  const addSubmit = document.getElementById('qa-um-add-submit');
+  const modalBg    = document.getElementById('qa-um-modal-bg');
+  const modalTitle = document.getElementById('qa-um-modal-title');
+  const modalBody  = document.getElementById('qa-um-modal-body');
+  const modalInput = document.getElementById('qa-um-modal-input');
+  const modalDate  = document.getElementById('qa-um-modal-datetime');
+  const modalCancel  = document.getElementById('qa-um-modal-cancel');
+  const modalConfirm = document.getElementById('qa-um-modal-confirm');
+
+  function h(str) {
+    return String(str == null ? '' : str)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+  function showMsg(kind, text) {
+    msgSlot.innerHTML = '<div class="qa-um-msg ' + kind + '">' + h(text) + '</div>';
+    if (kind === 'success') {
+      setTimeout(function () {
+        if (msgSlot.querySelector('.success')) msgSlot.innerHTML = '';
+      }, 4000);
+    }
+  }
+  function fmtDate(iso) {
+    if (!iso) return '—';
+    try {
+      const d = new Date(iso);
+      const now = new Date();
+      const days = Math.round((d - now) / 86400000);
+      const dateStr = d.toLocaleDateString(undefined, {year:'numeric', month:'short', day:'numeric'});
+      if (Math.abs(days) < 1) return dateStr + ' (today)';
+      if (days > 0 && days <= 30) return dateStr + ' (in ' + days + 'd)';
+      if (days < 0) return dateStr + ' (' + Math.abs(days) + 'd ago)';
+      return dateStr;
+    } catch (_) { return iso; }
+  }
+
+  let pendingResolve = null;
+  function closeModal(value) {
+    modalBg.classList.remove('qa-um-show');
+    modalInput.style.display = 'none';
+    modalDate.style.display  = 'none';
+    modalInput.value = ''; modalDate.value = '';
+    if (pendingResolve) { const r = pendingResolve; pendingResolve = null; r(value); }
+  }
+  modalCancel.addEventListener('click', function () { closeModal(null); });
+  modalBg.addEventListener('click', function (e) { if (e.target === modalBg) closeModal(null); });
+
+  function confirmTyping(title, body, expectedString) {
+    return new Promise(function (resolve) {
+      modalTitle.textContent = title;
+      modalBody.textContent  = body;
+      modalInput.style.display = 'block';
+      modalInput.placeholder = 'Type: ' + expectedString;
+      modalDate.style.display = 'none';
+      modalBg.classList.add('qa-um-show');
+      pendingResolve = resolve;
+      modalConfirm.textContent = 'Confirm';
+      modalConfirm.onclick = function () {
+        if (modalInput.value.trim() === expectedString) { closeModal(true); }
+        else {
+          modalInput.style.borderColor = '#b0141a';
+          setTimeout(function () { modalInput.style.borderColor = ''; }, 800);
+        }
+      };
+      setTimeout(function () { modalInput.focus(); }, 50);
+    });
+  }
+  function chooseDatetime(title, body, defaultIsoDays) {
+    return new Promise(function (resolve) {
+      modalTitle.textContent = title; modalBody.textContent = body;
+      modalInput.style.display = 'none'; modalDate.style.display = 'block';
+      const def = new Date(Date.now() + defaultIsoDays * 86400000);
+      const pad = function (n) { return String(n).padStart(2, '0'); };
+      modalDate.value = def.getFullYear() + '-' + pad(def.getMonth()+1) + '-' + pad(def.getDate()) +
+        'T' + pad(def.getHours()) + ':' + pad(def.getMinutes());
+      modalBg.classList.add('qa-um-show');
+      pendingResolve = resolve;
+      modalConfirm.textContent = 'Set expiry';
+      modalConfirm.onclick = function () {
+        if (!modalDate.value) return;
+        const d = new Date(modalDate.value);
+        closeModal(d.toISOString());
+      };
+    });
+  }
+
+  async function fetchUsers() {
+    const r = await window.qaApi('/api/admin/users');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const data = await r.json();
+    return data.users || [];
+  }
+  function renderRow(u, selfEmail) {
+    const isSelf = (u.email || '').toLowerCase() === (selfEmail || '').toLowerCase();
+    const rowClass =
+      (isSelf ? 'qa-um-self ' : '') +
+      (u.is_expired && !u.disabled ? 'qa-um-expired ' : '') +
+      (u.disabled ? 'qa-um-disabled ' : '');
+    const chips = [];
+    if (u.disabled)  chips.push('<span class="qa-um-status-chip disabled">Disabled</span>');
+    else if (u.is_expired) chips.push('<span class="qa-um-status-chip expired">Expired</span>');
+    else             chips.push('<span class="qa-um-status-chip active">Active</span>');
+    if (isSelf) chips.push('<span class="qa-um-status-chip" style="background:#fff4bd;color:#7a5c00">You</span>');
+    const otherRole = u.role === 'admin' ? 'operator' : 'admin';
+    const buttons = [];
+    if (!isSelf) buttons.push('<button class="qa-um-action-btn" data-act="role" data-email="' + h(u.email) + '" data-newrole="' + otherRole + '">Make ' + otherRole + '</button>');
+    if (u.disabled) buttons.push('<button class="qa-um-action-btn" data-act="enable" data-email="' + h(u.email) + '">Re-enable</button>');
+    else if (!isSelf) buttons.push('<button class="qa-um-action-btn" data-act="disable" data-email="' + h(u.email) + '">Disable</button>');
+    buttons.push('<button class="qa-um-action-btn" data-act="extend" data-email="' + h(u.email) + '">Extend +90d</button>');
+    buttons.push('<button class="qa-um-action-btn" data-act="expiry" data-email="' + h(u.email) + '">Set expiry…</button>');
+    if (u.expires_at) buttons.push('<button class="qa-um-action-btn" data-act="never" data-email="' + h(u.email) + '">Never expires</button>');
+    if (!isSelf) buttons.push('<button class="qa-um-action-btn qa-um-danger" data-act="delete" data-email="' + h(u.email) + '">Delete</button>');
+    return '<tr class="' + rowClass.trim() + '">' +
+      '<td>' + h(u.display_name || u.email) +
+        (u.display_name && u.display_name !== u.email
+          ? '<div style="font-size:11px;color:#888">' + h(u.email) + '</div>' : '') +
+      '</td>' +
+      '<td><span class="qa-um-role-badge ' + u.role + '">' + h(u.role) + '</span></td>' +
+      '<td>' + chips.join(' ') + '</td>' +
+      '<td>' + (u.expires_at ? h(fmtDate(u.expires_at)) : '<span style="color:#888">never</span>') + '</td>' +
+      '<td>' + (u.last_login_at ? h(fmtDate(u.last_login_at)) : '<span style="color:#888">never</span>') + '</td>' +
+      '<td>' + buttons.join('') + '</td>' +
+      '</tr>';
+  }
+  async function refresh() {
+    try {
+      const users = await fetchUsers();
+      const self  = window.qaAuth.user() || {};
+      if (users.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="6" style="padding:16px;text-align:center;color:#888">No operators yet.</td></tr>';
+      } else {
+        tbody.innerHTML = users.map(function (u) { return renderRow(u, self.email); }).join('');
+      }
+    } catch (e) {
+      tbody.innerHTML = '<tr><td colspan="6" style="padding:16px;text-align:center;color:#b0141a">Load failed: ' + h(e.message) + '</td></tr>';
+    }
+  }
+  async function doAction(act, email, extra) {
+    let r;
+    try {
+      if (act === 'role') {
+        r = await window.qaApi('/api/admin/users/' + encodeURIComponent(email), {
+          method: 'PATCH', headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({role: extra.newrole}),
+        });
+      } else if (act === 'disable') {
+        r = await window.qaApi('/api/admin/users/' + encodeURIComponent(email) + '/disable', {method:'POST'});
+      } else if (act === 'enable') {
+        r = await window.qaApi('/api/admin/users/' + encodeURIComponent(email) + '/enable', {method:'POST'});
+      } else if (act === 'extend') {
+        r = await window.qaApi('/api/admin/users/' + encodeURIComponent(email) + '/extend', {method:'POST'});
+      } else if (act === 'expiry') {
+        r = await window.qaApi('/api/admin/users/' + encodeURIComponent(email), {
+          method: 'PATCH', headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({expires_at: extra.iso}),
+        });
+      } else if (act === 'never') {
+        r = await window.qaApi('/api/admin/users/' + encodeURIComponent(email), {
+          method: 'PATCH', headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({expires_at: 'never'}),
+        });
+      } else if (act === 'delete') {
+        r = await window.qaApi('/api/admin/users/' + encodeURIComponent(email), {method:'DELETE'});
+      }
+      if (!r.ok) {
+        const detail = await r.json().catch(function () { return {detail:'HTTP ' + r.status}; });
+        showMsg('error', 'Failed: ' + (detail.detail || ('HTTP ' + r.status)));
+      } else {
+        showMsg('success', 'Done.');
+        await refresh();
+      }
+    } catch (e) { showMsg('error', 'Failed: ' + e.message); }
+  }
+  toggleEl.addEventListener('click', function () {
+    root.classList.toggle('qa-um-open');
+    if (root.classList.contains('qa-um-open')) refresh();
+  });
+  addForm.addEventListener('submit', async function () {
+    const email = addEmail.value.trim();
+    const role  = document.querySelector('input[name="qa-um-add-role"]:checked').value;
+    if (!email || email.indexOf('@') === -1) { showMsg('error', 'Enter a valid email.'); return; }
+    addSubmit.disabled = true;
+    try {
+      const r = await window.qaApi('/api/admin/users', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({email: email, role: role}),
+      });
+      if (!r.ok) {
+        const detail = await r.json().catch(function () { return {detail:'HTTP ' + r.status}; });
+        showMsg('error', 'Add failed: ' + (detail.detail || ('HTTP ' + r.status)));
+      } else {
+        showMsg('success', 'Added ' + email + '.');
+        addEmail.value = '';
+        await refresh();
+      }
+    } catch (e) { showMsg('error', 'Add failed: ' + e.message); }
+    finally { addSubmit.disabled = false; }
+  });
+  tbody.addEventListener('click', async function (e) {
+    const btn = e.target.closest('button.qa-um-action-btn');
+    if (!btn) return;
+    const act   = btn.getAttribute('data-act');
+    const email = btn.getAttribute('data-email');
+    if (!act || !email) return;
+    if (act === 'delete') {
+      const ok = await confirmTyping('Delete ' + email + '?',
+        'This permanently removes the user from the allowlist. Their historical audit rows remain, but they lose all access immediately. Type the full email to confirm.',
+        email);
+      if (ok) await doAction('delete', email);
+    } else if (act === 'expiry') {
+      const iso = await chooseDatetime('Set expiry for ' + email,
+        'Pick the date/time after which this account can no longer sign in. Times are local to your browser.', 90);
+      if (iso) await doAction('expiry', email, {iso: iso});
+    } else if (act === 'role') {
+      const newrole = btn.getAttribute('data-newrole');
+      const ok = await confirmTyping('Change ' + email + ' to ' + newrole + '?',
+        (newrole === 'admin'
+          ? 'Admins can add, disable, and delete other operators. Grant sparingly. Type the full email to confirm.'
+          : 'Demoting from admin to operator removes their user-management access. Type the full email to confirm.'),
+        email);
+      if (ok) await doAction('role', email, {newrole: newrole});
+    } else {
+      await doAction(act, email);
+    }
+  });
+  function applyVisibility() {
+    const u = window.qaAuth.user();
+    if (u && u.role === 'admin') { root.style.display = 'block'; }
+    else { root.style.display = 'none'; root.classList.remove('qa-um-open'); }
+  }
+  applyVisibility();
+  window.qaAuth.onChange(applyVisibility);
+})();
+</script>
+
+<!-- ═════════════════════════════════════════════════════════════════════
+     Quake Angel — Recent activity + Exports (CSV, PDF, B1, B2)
+     Replaces the previous stub audit block. Renders inline via /api/audit
+     polling and provides admin/operator export buttons.
+     ═════════════════════════════════════════════════════════════════════ -->
+<style>
+  #qg-audit .qg-export-bar {
+    display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; align-items: center;
+  }
+  #qg-audit .qg-export-btn {
+    padding: 5px 11px; background: #fff; border: 1px solid #cbd0d8; border-radius: 4px;
+    font-size: 12px; font-weight: 600; color: #333; cursor: pointer; font-family: inherit;
+  }
+  #qg-audit .qg-export-btn:hover:not(:disabled) { background:#f0f2f6; border-color:#a8b0bd; }
+  #qg-audit .qg-export-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  #qg-audit .qg-export-range {
+    padding: 4px 8px; border: 1px solid #cbd0d8; border-radius: 4px; font-size: 12px; font-family: inherit;
+  }
+  #qg-audit .qg-export-msg { font-size: 12px; color: #666; margin-left: 6px; }
+  #qg-audit .qg-export-msg.error   { color: #b0141a; }
+  #qg-audit .qg-export-msg.success { color: #1a7f37; }
+</style>
+
 <div id="qg-audit">
   <div class="qg-audit-header">
     <h3>Recent activity</h3>
     <span class="qg-audit-meta" id="qg-audit-meta">Loading…</span>
   </div>
+
+  <div class="qg-export-bar" id="qg-export-bar" style="display:none">
+    <label style="font-size:12px;color:#555">Export</label>
+    <select class="qg-export-range" id="qg-export-range">
+      <option value="24">Last 24h</option>
+      <option value="168" selected>Last 7 days</option>
+      <option value="720">Last 30 days</option>
+    </select>
+    <button class="qg-export-btn" id="qg-export-csv">Download CSV</button>
+    <button class="qg-export-btn" id="qg-export-pdf">Download PDF</button>
+    <span style="color:#ccc">|</span>
+    <button class="qg-export-btn" id="qg-report-b1" title="Full-detail internal report with names, GPS, notes. NOT for public distribution.">B1 Operational</button>
+    <button class="qg-export-btn" id="qg-report-b2" title="Aggregate counts only — safe to share externally.">B2 Public</button>
+    <span class="qg-export-msg" id="qg-export-msg"></span>
+  </div>
+
   <div id="qg-audit-body"></div>
 </div>
+
+<script>
+(function () {
+  var QUAKEGUARD_BACKEND = "https://quake-alert-18.emergent.host"; // fallback if window.qaApi not present
+  var LIMIT = 100;
+  var POLL_MS = 10000;
+
+  var body = document.getElementById("qg-audit-body");
+  var meta = document.getElementById("qg-audit-meta");
+  if (!body || !meta) return;
+
+  function esc(s) {
+    return String(s == null ? "" : s)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  }
+  function sevColor(s) {
+    if (s === "red")    return "#C21818";
+    if (s === "yellow") return "#EA9500";
+    if (s === "green")  return "#2E7D32";
+    return "#666";
+  }
+  function renderIdent(e) {
+    var did = esc(e.device_id || "");
+    var code = e.short_code ? esc(e.short_code) : "";
+    var name = e.display_name ? esc(e.display_name) : "";
+    if (name && code) return '<b>' + name + '</b> · <code title="' + did + '">' + code + '</code>';
+    if (code) return '<code title="' + did + '">' + code + '</code>';
+    return '<code>' + did + '</code>';
+  }
+  function formatEvent(e) {
+    if (e.kind === "trigger") {
+      var delivered = !!e.delivered;
+      var badge = '<span class="qg-badge" style="background:' +
+        (delivered ? "#1F8A3A" : "#C21818") + '">' + (delivered ? "delivered" : "FAILED") + "</span>";
+      var mag = e.magnitude != null ? "M" + esc(e.magnitude) : "M?";
+      var counts = "iOS " + (e.ios_count || 0) + " · Android " + (e.android_count || 0);
+      var err = e.error ? '<div style="color:#c21818;font-size:12px;margin-top:4px"><b>Error:</b> ' + esc(e.error) + "</div>" : "";
+      return '<div class="qg-audit-row trigger">' +
+          '<div class="qg-audit-title">⚠️ TRIGGER ' + badge + ' · ' + mag + ' · ' +
+            esc(e.recipients_total || 0) + ' device' + (e.recipients_total === 1 ? '' : 's') +
+            ' (' + counts + ') · by <code>' + esc(e.triggered_by || "dashboard") + '</code></div>' +
+          err + '<div class="qg-audit-at">' + esc(e.at || "") + '</div></div>';
+    }
+    if (e.kind === "rescued") {
+      var priorSev = e.prior_severity ? '<span class="qg-badge" style="background:' + sevColor(e.prior_severity) + '">' + esc(e.prior_severity) + '</span>' : "";
+      var notes = "";
+      if (e.notes) notes = '<div style="color:#555;font-size:12px;margin-top:4px">📝 ' + esc(e.notes) + '</div>';
+      else if (e.notes_present) notes = '<div style="color:#888;font-size:12px;margin-top:4px" title="Notes exist but are only visible to admin-authenticated viewers.">🔒 <i>operator note recorded (admin-only)</i></div>';
+      return '<div class="qg-audit-row rescued">' +
+          '<div class="qg-audit-title">✅ RESCUED · ' + renderIdent(e) +
+            ' was <b>' + esc(e.prior_status || "trapped") + '</b>' + priorSev +
+            ' · closed by <code>' + esc(e.rescued_by || "dashboard") + '</code></div>' +
+          notes + '<div class="qg-audit-at">' + esc(e.at || "") + '</div></div>';
+    }
+    if (e.kind === "rescue_reverted") {
+      var restoredSev = e.restored_severity ? '<span class="qg-badge" style="background:' + sevColor(e.restored_severity) + '">' + esc(e.restored_severity) + '</span>' : "";
+      return '<div class="qg-audit-row rescue_reverted">' +
+          '<div class="qg-audit-title">↩️ RESCUE REVERTED · ' + renderIdent(e) +
+            ' restored to <b>' + esc(e.restored_status || e.status || "trapped") + '</b>' + restoredSev +
+            ' · by <code>' + esc(e.reverted_by || "dashboard") + '</code></div>' +
+          '<div class="qg-audit-at">' + esc(e.at || "") + '</div></div>';
+    }
+    var sev = e.severity ? '<span class="qg-badge" style="background:' + sevColor(e.severity) + '">' + esc(e.severity) + "</span>" : "";
+    var mob = e.mobility ? '<span class="qg-badge" style="background:' + (e.mobility === "trapped" ? "#C21818" : "#2E7D32") + '">' + (e.mobility === "trapped" ? "trapped/pinned" : "can move") + "</span>" : "";
+    var loc = "";
+    if (e.latitude != null && e.longitude != null) {
+      loc = ' · <a href="https://www.google.com/maps/place/' + encodeURIComponent(e.latitude + "," + e.longitude) + '" target="_blank" rel="noopener">📍 map</a>';
+    }
+    var bat = e.battery_pct != null ? " · 🔋 " + esc(e.battery_pct) + "%" : "";
+    return '<div class="qg-audit-row status">' +
+        '<div class="qg-audit-title">📱 STATUS · ' + renderIdent(e) + " → <b>" + esc(e.status || "") + '</b>' + sev + mob + loc + bat + '</div>' +
+        '<div class="qg-audit-at">' + esc(e.at || "") + '</div></div>';
+  }
+
+  async function refresh() {
+    try {
+      var url = "/api/audit?limit=" + LIMIT;
+      var res;
+      if (window.qaApi) { res = await window.qaApi(url, {cache: "no-store"}); }
+      else { res = await fetch(QUAKEGUARD_BACKEND + url, {cache: "no-store"}); }
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      var data = await res.json();
+      var events = (data && data.events) || [];
+      if (events.length === 0) body.innerHTML = '<div class="qg-audit-empty">No activity yet.</div>';
+      else body.innerHTML = events.map(formatEvent).join("");
+      meta.textContent = events.length + " events · updated " + new Date().toLocaleTimeString();
+    } catch (e) {
+      meta.textContent = "load error: " + (e && e.message ? e.message : e);
+    }
+  }
+  refresh();
+  setInterval(refresh, POLL_MS);
+
+  // ─── Export toolbar (CSV + PDF + B1 + B2) ───────────────────────
+  var exportBar = document.getElementById("qg-export-bar");
+  var exportRange = document.getElementById("qg-export-range");
+  var exportCsvBtn = document.getElementById("qg-export-csv");
+  var exportPdfBtn = document.getElementById("qg-export-pdf");
+  var exportMsg = document.getElementById("qg-export-msg");
+  var reportB1Btn = document.getElementById("qg-report-b1");
+  var reportB2Btn = document.getElementById("qg-report-b2");
+
+  function showExportMsg(kind, text) {
+    if (!exportMsg) return;
+    exportMsg.className = "qg-export-msg " + kind;
+    exportMsg.textContent = text;
+    if (kind === "success") setTimeout(function () {
+      if (exportMsg.className.indexOf("success") !== -1) exportMsg.textContent = "";
+    }, 4000);
+  }
+  function applyExportVisibility() {
+    if (typeof window.qaApi !== "function" || typeof window.qaAuth !== "object") {
+      exportBar.style.display = "none"; return;
+    }
+    var u = window.qaAuth.user();
+    if (u && (u.role === "admin" || u.role === "operator")) exportBar.style.display = "flex";
+    else exportBar.style.display = "none";
+  }
+  async function doExport(kind /* "csv" | "pdf" */) {
+    if (typeof window.qaApi !== "function") return;
+    var hours = parseInt(exportRange.value, 10) || 168;
+    var since = new Date(Date.now() - hours * 3600 * 1000).toISOString();
+    var path = "/api/admin/audit-log/export." + kind + "?since=" + encodeURIComponent(since);
+    var btn = kind === "csv" ? exportCsvBtn : exportPdfBtn;
+    btn.disabled = true;
+    showExportMsg("", "Preparing…");
+    try {
+      var r = await window.qaApi(path);
+      if (!r.ok) {
+        var detail = "HTTP " + r.status;
+        try { var b = await r.json(); detail = b.detail || detail; } catch (_) {}
+        showExportMsg("error", "Export failed: " + detail); return;
+      }
+      var rowCount = r.headers.get("X-Row-Count") || "?";
+      var blob = await r.blob();
+      var url = URL.createObjectURL(blob);
+      var cd = r.headers.get("Content-Disposition") || "";
+      var m = /filename="([^"]+)"/.exec(cd);
+      var stamp = new Date().toISOString().replace(/[-:]/g,"").replace(/\.\d+/,"");
+      var filename = m ? m[1] : ("quakeangel-audit-" + stamp + "." + kind);
+      var a = document.createElement("a");
+      a.href = url; a.download = filename;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      setTimeout(function () { URL.revokeObjectURL(url); }, 5000);
+      showExportMsg("success", "Downloaded " + rowCount + " row(s).");
+    } catch (e) {
+      showExportMsg("error", "Export failed: " + (e && e.message ? e.message : e));
+    } finally { btn.disabled = false; }
+  }
+  async function doCasualtyReport(kind /* "operational" | "public" */) {
+    if (typeof window.qaApi !== "function") return;
+    var hours = parseInt(exportRange.value, 10) || 168;
+    var since = new Date(Date.now() - hours * 3600 * 1000).toISOString();
+    var path = "/api/admin/casualty-report/" + kind + ".pdf" + "?since=" + encodeURIComponent(since);
+    var btn = kind === "operational" ? reportB1Btn : reportB2Btn;
+    btn.disabled = true;
+    showExportMsg("", "Preparing " + (kind === "operational" ? "B1 Operational" : "B2 Public") + "…");
+    try {
+      var r = await window.qaApi(path);
+      if (!r.ok) {
+        var detail = "HTTP " + r.status;
+        try { var b = await r.json(); detail = b.detail || detail; } catch (_) {}
+        showExportMsg("error", "Report failed: " + detail); return;
+      }
+      var kindHeader = (r.headers.get("X-Report-Kind") || "").toLowerCase();
+      var expectedKind = kind === "operational" ? "b1-operational" : "b2-public";
+      if (kindHeader !== expectedKind) {
+        showExportMsg("error",
+          "Report kind mismatch. Server returned '" + kindHeader + "' but we asked for '" +
+          expectedKind + "'. Not downloading — this could be a routing bug. Contact support.");
+        return;
+      }
+      var blob = await r.blob();
+      var url = URL.createObjectURL(blob);
+      var cd = r.headers.get("Content-Disposition") || "";
+      var m = /filename="([^"]+)"/.exec(cd);
+      var stamp = new Date().toISOString().replace(/[-:]/g,"").replace(/\.\d+/,"");
+      var filename = m ? m[1] : ("quakeangel-" + kind + "-" + stamp + ".pdf");
+      var a = document.createElement("a");
+      a.href = url; a.download = filename;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      setTimeout(function () { URL.revokeObjectURL(url); }, 5000);
+      showExportMsg("success", (kind === "operational" ? "B1 downloaded" : "B2 downloaded (safe to share externally)") + ".");
+    } catch (e) {
+      showExportMsg("error", "Report failed: " + (e && e.message ? e.message : e));
+    } finally { btn.disabled = false; }
+  }
+
+  if (exportCsvBtn) exportCsvBtn.addEventListener("click", function () { doExport("csv"); });
+  if (exportPdfBtn) exportPdfBtn.addEventListener("click", function () { doExport("pdf"); });
+  if (reportB1Btn) reportB1Btn.addEventListener("click", function () { doCasualtyReport("operational"); });
+  if (reportB2Btn) reportB2Btn.addEventListener("click", function () { doCasualtyReport("public"); });
+
+  applyExportVisibility();
+  if (window.qaAuth && typeof window.qaAuth.onChange === "function") {
+    window.qaAuth.onChange(applyExportVisibility);
+  }
+})();
+</script>
 
 <style>
   /* ── Mark-Rescued button (renders inline in map popups + sidebar rows) ── */
