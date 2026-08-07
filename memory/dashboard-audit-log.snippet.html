@@ -151,6 +151,9 @@
     </select>
     <button class="qg-export-btn" id="qg-export-csv">Download CSV</button>
     <button class="qg-export-btn" id="qg-export-pdf">Download PDF</button>
+    <span style="color:#ccc">|</span>
+    <button class="qg-export-btn" id="qg-report-b1" title="Full-detail internal report with names, GPS, notes. NOT for public distribution.">B1 Operational</button>
+    <button class="qg-export-btn" id="qg-report-b2" title="Aggregate counts only — safe to share externally.">B2 Public</button>
     <span class="qg-export-msg" id="qg-export-msg"></span>
   </div>
 
@@ -434,6 +437,71 @@
 
   if (exportCsvBtn) exportCsvBtn.addEventListener("click", function () { doExport("csv"); });
   if (exportPdfBtn) exportPdfBtn.addEventListener("click", function () { doExport("pdf"); });
+
+  // Casualty reports (B1 Operational / B2 Public). Same download plumbing
+  // as the audit exports, but calls the dedicated report endpoints. Kept
+  // in the same toolbar because operators think of "exports" as one
+  // concept and hunting through two separate panels for a similar action
+  // is friction we don't need during an actual incident.
+  var reportB1Btn = document.getElementById("qg-report-b1");
+  var reportB2Btn = document.getElementById("qg-report-b2");
+
+  async function doCasualtyReport(kind /* "operational" | "public" */) {
+    if (typeof window.qaApi !== "function") return;
+    var hours = parseInt(exportRange.value, 10) || 168;
+    var since = new Date(Date.now() - hours * 3600 * 1000).toISOString();
+    var path = "/api/admin/casualty-report/" + kind + ".pdf" +
+               "?since=" + encodeURIComponent(since);
+    var btn = kind === "operational" ? reportB1Btn : reportB2Btn;
+    btn.disabled = true;
+    showExportMsg("", "Preparing " + (kind === "operational" ? "B1 Operational" : "B2 Public") + "…");
+    try {
+      var r = await window.qaApi(path);
+      if (!r.ok) {
+        var detail = "HTTP " + r.status;
+        try {
+          var body = await r.json();
+          detail = body.detail || detail;
+        } catch (_) {}
+        showExportMsg("error", "Report failed: " + detail);
+        return;
+      }
+      // Defense-in-depth: sanity-check X-Report-Kind matches what we
+      // asked for. If a proxy misroutes, a malicious edit swaps the
+      // routes, or the server misreports, we want to catch it here
+      // BEFORE the operator emails a "public" report that's actually
+      // full of names.
+      var kindHeader = (r.headers.get("X-Report-Kind") || "").toLowerCase();
+      var expectedKind = kind === "operational" ? "b1-operational" : "b2-public";
+      if (kindHeader !== expectedKind) {
+        showExportMsg("error",
+          "Report kind mismatch. Server returned '" + kindHeader + "' but we asked for '" +
+          expectedKind + "'. Not downloading — this could be a routing bug. Contact support.");
+        return;
+      }
+      var blob = await r.blob();
+      var url = URL.createObjectURL(blob);
+      var cd = r.headers.get("Content-Disposition") || "";
+      var m = /filename="([^"]+)"/.exec(cd);
+      var stamp = new Date().toISOString().replace(/[-:]/g,"").replace(/\.\d+/,"");
+      var filename = m ? m[1] : ("quakeangel-" + kind + "-" + stamp + ".pdf");
+      var a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(function () { URL.revokeObjectURL(url); }, 5000);
+      showExportMsg("success", (kind === "operational" ? "B1 downloaded" : "B2 downloaded (safe to share externally)") + ".");
+    } catch (e) {
+      showExportMsg("error", "Report failed: " + (e && e.message ? e.message : e));
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  if (reportB1Btn) reportB1Btn.addEventListener("click", function () { doCasualtyReport("operational"); });
+  if (reportB2Btn) reportB2Btn.addEventListener("click", function () { doCasualtyReport("public"); });
 
   applyExportVisibility();
   if (window.qaAuth && typeof window.qaAuth.onChange === "function") {

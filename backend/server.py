@@ -1376,9 +1376,18 @@ async def casualty_report_operational_pdf(
         # Sort: trapped > rescued > safe; within status, red > yellow > green > unknown; then newest first.
         rank_status = {"trapped": 0, "rescued": 1, "safe": 2}.get(e.get("status"), 3)
         rank_sev = {"red": 0, "yellow": 1, "green": 2}.get((e.get("severity") or "").lower(), 3)
-        return (rank_status, rank_sev, -1 * (e.get("recorded_at") or "" and 1))
+        # Recorded_at is an ISO 8601 string — lexicographic desc sort by
+        # negating via a tuple companion is cleanest without parsing.
+        return (rank_status, rank_sev, "" if e.get("recorded_at") is None else e["recorded_at"])
 
+    # Sort by (rank_status, rank_sev, recorded_at) ascending on the ranks
+    # and DESCENDING on recorded_at (newest first within each group).
     events_sorted = sorted(events, key=_sort_key)
+    events_sorted.sort(key=lambda e: e.get("recorded_at") or "", reverse=True)
+    events_sorted.sort(key=lambda e: (
+        {"trapped": 0, "rescued": 1, "safe": 2}.get(e.get("status"), 3),
+        {"red": 0, "yellow": 1, "green": 2}.get((e.get("severity") or "").lower(), 3),
+    ))
     data = [header]
     for e in events_sorted:
         lat = e.get("latitude"); lon = e.get("longitude")
