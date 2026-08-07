@@ -189,6 +189,12 @@ Rationale: Paul is the operator, not a developer. Assuming there's a developer b
   - `GET /api/admin/emsc/preview/recent` — audit trail including rate-limited skips (honest volume signal)
 - **APNs path:** `apns.send_preview_alerts()` — `apns-priority: 5` (power-efficient), `sound: default`, `interruption-level: active`, payload includes `preview: true` top-level for mobile app styling if desired.
 - **iOS-only for v1.** Android via Emergent push relay is a future addition — Paul's device is iOS so this doesn't block v1.
+- **TEST-ONLY radius override (landed 2026-08-07):** operators can widen the preview radius per-country (e.g., Malta 2000 km to catch Greek/Turkish quakes) without touching the real 600 km alert boundary that real users see. Field: `country_config.preview_mode.preview_radius_km_override` (100–5000 km, server-enforced). Server also stamps `preview_radius_km_override_expires_at = set_at + 7 days`; the evaluator ignores the override once it expires, so the setting **can never be silently left on when real users arrive**. Preview notifications generated only because of the override get the body prefix `⚠️ Beyond alert zone — ` so a 1800 km preview can never be visually mistaken for a 600 km-boundary alert. Every set/clear is logged in `emsc_audit_log` (`kind: preview_radius_override_change`, with from→to values and expiry). Real-alert path is architecturally isolated: `dispatch_preview_if_needed` is the ONLY code path that reads the override field. Locked-in invariants (5 unit tests in `tests/test_preview_radius_override.py`):
+  1. Athens (830 km) skipped without override
+  2. Athens fires with override + Beyond-alert-zone prefix
+  3. Expired override → falls back to 600 km + skip reason annotated
+  4. Sicily (200 km, inside 600 km) fires without prefix (event is inside real zone)
+  5. Auckland (18000 km) never fires even at max 5000 km override
 
 ### Continuity tracking (landed 2026-08-06 after 18h gap incident)
 - **What went wrong:** initial Phase 1 landing had no persistent continuity check. Credit exhaustion suspended the pod for ~18h; on resume the poller restarted but the `poller_started_at` field got overwritten with the current-process start time. `total_polls` counter also reset (Mongo persistence quirk under pod suspension). No way to distinguish "quiet period" from "was dead" — would have contaminated threshold-tuning on day 14.
