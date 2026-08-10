@@ -737,6 +737,113 @@ MAX_EXPORT_WINDOW_DAYS = 30
 MAX_EXPORT_ROWS = 500
 
 
+# ─── Dashboard settings (org logo, next-of-kin authority name, etc.) ─────
+#
+# Single-document collection `dashboard_settings` with well-known _id="global".
+# Motivation:
+#   - Some things (org logo bytes, authority name for casualty reports) are
+#     deployment-specific and must NOT be hard-coded. "Malta Civil Protection"
+#     was hard-coded in the B2 report footer, which implied an operational
+#     agreement that didn't exist and would have been misleading if the
+#     PDF ever reached press. Also blocks selling the platform to other
+#     civil-protection agencies without a source-code fork.
+#   - This is not per-country — it's per-deployment. If Quake Angel later
+#     multi-tenants, this becomes per-tenant. For now, single doc.
+#
+# Fields:
+#   authority_name    : str  — what to render in the B2 report footer. When
+#                              unset, the report uses the generic phrasing
+#                              "the responsible authorities" (Paul, 2026-08-10).
+#   logo_b64          : str  — base64-encoded PNG or SVG. Bounded at 200 KB
+#                              PNG / 100 KB SVG at the API layer.
+#   logo_mime         : "image/png" | "image/svg+xml"
+#   logo_updated_at   : datetime
+#   logo_updated_by   : str
+DASHBOARD_SETTINGS_ID = "global"
+
+async def _get_dashboard_settings() -> dict:
+    """Fetch the single dashboard-settings doc. Never raises — returns {}
+    if the collection is empty, so callers can `settings.get(...)` freely
+    without null-guarding a missing doc."""
+    doc = await db.dashboard_settings.find_one({"_id": DASHBOARD_SETTINGS_ID})
+    return doc or {}
+
+
+async def _get_authority_name() -> str:
+    """Resolve the "responsible authorities" phrase used in casualty
+    reports and the B1/B2 legal footers. Falls back to a generic wording
+    when no specific authority has been configured — this is intentional:
+    naming an authority we have no agreement with (e.g. "Malta Civil
+    Protection") in a distributable PDF creates a legal + reputational
+    exposure that a generic phrase does not."""
+    settings = await _get_dashboard_settings()
+    name = (settings.get("authority_name") or "").strip()
+    return name or "the responsible authorities"
+
+
+# ─── Confidentiality banner (PDF + CSV) ─────────────────────────────────
+#
+# Every export that contains personal data (CSV audit, PDF audit, B1
+# operational report) must carry a visible confidentiality notice on
+# EVERY page (PDF) or as the FIRST ROW (CSV). B2 Public is exempt — it
+# contains only aggregate counts and is designed for press/family use.
+#
+# Wording locked in by Paul on 2026-08-10. Do not paraphrase or shorten
+# the text below without checking with him — the current phrasing was
+# specifically negotiated to (a) invoke GDPR by name, (b) tell the reader
+# where to get a shareable version instead of just refusing, (c) not
+# assume any specific enforcement regime beyond GDPR (which the EU-wide
+# deployment target actually gives us jurisdiction over).
+CONFIDENTIALITY_TEXT = (
+    "CONFIDENTIAL — contains personal data including precise locations "
+    "and device identifiers. Do not share outside authorised emergency "
+    "personnel. Handling is subject to GDPR. For public, press or family "
+    "communication use the B2 Public report instead."
+)
+
+
+def _pdf_confidentiality_onpage(canvas_, doc_):
+    """Reportlab onPage callback — draws a red confidentiality banner
+    across the top of every page and a matching footer line at the
+    bottom. Used by CSV/audit PDF and B1 operational PDF; explicitly
+    NOT used by B2 Public.
+
+    Colour choice: dark red (#B0141A) — WCAG-AA on white background for
+    the 10pt banner text. On B&W printers this shows up as ~50% grey,
+    still legible; combined with the ALL-CAPS "CONFIDENTIAL" prefix and
+    bold face, the label carries even when colour is stripped.
+    """
+    from reportlab.lib import colors as _rl_colors
+    canvas_.saveState()
+    w, h = doc_.pagesize   # width, height in points
+    banner_h = 22          # ~7.8mm
+    canvas_.setFillColor(_rl_colors.HexColor("#B0141A"))
+    canvas_.rect(0, h - banner_h, w, banner_h, fill=1, stroke=0)
+    canvas_.setFillColor(_rl_colors.white)
+    canvas_.setFont("Helvetica-Bold", 8)
+    canvas_.drawString(12, h - 14, "CONFIDENTIAL")
+    canvas_.setFont("Helvetica", 7)
+    # Wrap-safe: this text is short enough for A4 landscape and portrait
+    # at 7pt; SimpleDocTemplate leaves top margin so body content won't
+    # collide with the banner.
+    canvas_.drawString(90, h - 14,
+        "personal data — do not share outside authorised emergency personnel. "
+        "For public use the B2 Public report."
+    )
+    # Footer band
+    canvas_.setFillColor(_rl_colors.HexColor("#B0141A"))
+    canvas_.setFont("Helvetica-Bold", 7)
+    canvas_.drawString(12, 8, "CONFIDENTIAL · GDPR-protected · use B2 Public for external distribution")
+    # Page number on the right — trivial but reviewers ask for it
+    canvas_.setFont("Helvetica", 7)
+    canvas_.setFillColor(_rl_colors.HexColor("#666666"))
+    canvas_.drawRightString(w - 12, 8, f"Page {doc_.page}")
+    canvas_.restoreState()
+
+
+
+
+
 def _parse_iso_or_none(s: Optional[str]) -> Optional[datetime]:
     if not s:
         return None
@@ -887,6 +994,16 @@ async def export_audit_log_csv(
     events = await _fetch_audit_for_export(since, until, kind, limit)
 
     buf = _io.StringIO()
+    # First non-data row: a single-cell confidentiality warning. Sits
+    # above the header row so any tool that pastes the CSV into a
+    # spreadsheet shows the warning as the first thing the operator sees
+    # (Excel/Sheets treat it as a merged-looking first line since it's a
+    # single quoted string). Using a `# ` prefix is deliberately NOT done
+    # because most CSV parsers don't honour comments and would treat it
+    # as data — better to expose it as a labelled first row that stands
+    # out because subsequent rows have the CSV_COLUMNS header layout.
+    buf.write(f'"{CONFIDENTIALITY_TEXT}"\n')
+
     writer = _csv.DictWriter(buf, fieldnames=_CSV_COLUMNS, extrasaction="ignore")
     writer.writeheader()
     for ev in events:
@@ -1068,11 +1185,15 @@ async def export_audit_log_pdf(
         buf,
         pagesize=landscape(A4),
         leftMargin=12*mm, rightMargin=12*mm,
-        topMargin=12*mm, bottomMargin=12*mm,
+        # Top+bottom margins expanded to clear the confidentiality banner
+        # + footer drawn by _pdf_confidentiality_onpage (22pt each ≈ 8mm).
+        topMargin=20*mm, bottomMargin=15*mm,
         title="Quake Angel Audit Log",
         author=principal.get("email", ""),
     )
-    doc.build(story)
+    doc.build(story,
+              onFirstPage=_pdf_confidentiality_onpage,
+              onLaterPages=_pdf_confidentiality_onpage)
     pdf_bytes = buf.getvalue()
 
     filename = f"quakeangel-audit-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.pdf"
@@ -1312,6 +1433,7 @@ async def casualty_report_operational_pdf(
 
     events, since_dt, until_dt = await _gather_devices_in_report_window(since, until)
     counts = _bucket_by_status(events)
+    authority = await _get_authority_name()   # for the footer copy — never hard-coded
 
     r = _pdf_common_setup()
     colors, mm = r["colors"], r["mm"]
@@ -1440,7 +1562,7 @@ async def casualty_report_operational_pdf(
     story.append(Paragraph(
         "END OF B1 OPERATIONAL REPORT — For public communications, use the B2 Public report which "
         "exposes aggregate numbers only. Do NOT share this document publicly, with press, or with "
-        "next-of-kin before Civil Protection has completed formal notification.",
+        f"next-of-kin before {authority} has completed formal notification.",
         footer_style,
     ))
 
@@ -1449,11 +1571,15 @@ async def casualty_report_operational_pdf(
         buf,
         pagesize=r["landscape"](r["A4"]),
         leftMargin=12*mm, rightMargin=12*mm,
-        topMargin=12*mm, bottomMargin=12*mm,
+        # Expanded top+bottom margins to clear the confidentiality banner
+        # + footer drawn by _pdf_confidentiality_onpage.
+        topMargin=20*mm, bottomMargin=15*mm,
         title="Quake Angel B1 Operational Report",
         author=principal.get("email", ""),
     )
-    doc.build(story)
+    doc.build(story,
+              onFirstPage=_pdf_confidentiality_onpage,
+              onLaterPages=_pdf_confidentiality_onpage)
     return Response(
         content=buf.getvalue(),
         media_type="application/pdf",
@@ -1497,6 +1623,7 @@ async def casualty_report_public_pdf(
 
     events, since_dt, until_dt = await _gather_devices_in_report_window(since, until)
     counts = _bucket_by_status(events)
+    authority = await _get_authority_name()   # configurable, never hard-coded
 
     # Belt-and-braces assertion. If a future refactor accidentally left
     # a per-person field in `counts`, this assertion refuses to render
@@ -1570,7 +1697,7 @@ async def casualty_report_public_pdf(
         "Notes: These counts reflect app users who have checked in via Quake Angel during the "
         "window shown. They do not represent the total affected population. Individual "
         "identities are not disclosed in this report to protect privacy and to preserve formal "
-        "next-of-kin notification procedures conducted by Malta Civil Protection.",
+        f"next-of-kin notification procedures conducted by {authority}.",
         footer_style,
     ))
 
@@ -1597,6 +1724,183 @@ async def casualty_report_public_pdf(
     )
 
 
+
+
+
+
+
+# ---------- Dashboard settings (org logo + authority name) --------------
+#
+# Public-readable, admin-writeable single-document config.
+#
+# GET is public because the logo needs to render on the anonymous
+# dashboard-load path (no JWT yet at render time); operators viewing
+# the dashboard before signing in shouldn't see a broken image. The
+# authority name is not sensitive either — it's meant to appear on
+# publishable PDFs.
+#
+# POST /logo accepts JSON: {"logo_b64": "<base64>", "mime": "image/png"|"image/svg+xml"}
+# POST /authority-name accepts JSON: {"authority_name": "<string>"|null}
+#
+# Size caps (enforced at API):
+#   PNG ≤ 200 KB decoded — a header logo bigger than this is a design
+#     mistake in the source file, not a legitimate use case.
+#   SVG ≤ 100 KB source — SVG scales natively; anything bigger is
+#     almost certainly an unoptimised export from Illustrator/Figma.
+
+class DashboardLogoBody(BaseModel):
+    logo_b64: str = Field(..., min_length=32, description="base64-encoded logo bytes (data-URI stripped)")
+    mime: str = Field(..., description="'image/png' or 'image/svg+xml'")
+
+
+class DashboardAuthorityBody(BaseModel):
+    # Optional string. Empty/whitespace/None clears the setting and the
+    # PDFs revert to the generic "the responsible authorities" phrasing.
+    authority_name: Optional[str] = Field(default=None, max_length=120)
+
+
+_LOGO_ALLOWED_MIME = {"image/png", "image/svg+xml"}
+_LOGO_MAX_BYTES_PNG = 200 * 1024
+_LOGO_MAX_BYTES_SVG = 100 * 1024
+
+
+@api_router.get("/dashboard-settings")
+async def dashboard_settings_get():
+    """Public read of dashboard settings. Returns logo (base64) if set,
+    authority name if set, and last-updated metadata. Called on every
+    dashboard load — kept small and fast (single-doc find)."""
+    s = await _get_dashboard_settings()
+    # Deliberately DON'T include _id or updated_by metadata in the
+    # anonymous public response — that's operator identity.
+    return {
+        "authority_name": s.get("authority_name") or None,
+        "logo_b64": s.get("logo_b64") or None,
+        "logo_mime": s.get("logo_mime") or None,
+    }
+
+
+@api_router.post("/admin/dashboard-settings/logo")
+async def dashboard_settings_set_logo(
+    request: Request,
+    body: DashboardLogoBody,
+):
+    """Upload/replace the org logo. Admin-only."""
+    principal = await resolve_principal(
+        request,
+        request.headers.get("x-admin-token"),
+        ADMIN_TRIGGER_PASSWORD,
+        db,
+    )
+    require_role(principal, "admin")
+
+    mime = body.mime.strip().lower()
+    if mime not in _LOGO_ALLOWED_MIME:
+        raise HTTPException(400, f"Unsupported logo type: {mime}. Allowed: {sorted(_LOGO_ALLOWED_MIME)}")
+
+    # Strip any accidental data-URI prefix client-side operators might paste
+    b64 = body.logo_b64
+    if b64.startswith("data:"):
+        try:
+            b64 = b64.split(",", 1)[1]
+        except IndexError:
+            raise HTTPException(400, "Malformed data URI — expected 'data:...;base64,<payload>'")
+
+    import base64
+    try:
+        raw = base64.b64decode(b64, validate=True)
+    except Exception as e:
+        raise HTTPException(400, f"Not valid base64: {e}")
+
+    # Size cap by mime — see rationale in section header above.
+    cap = _LOGO_MAX_BYTES_PNG if mime == "image/png" else _LOGO_MAX_BYTES_SVG
+    if len(raw) > cap:
+        raise HTTPException(
+            413,
+            f"Logo too large: {len(raw)} bytes; max {cap} bytes for {mime}. "
+            f"Optimise the source file (tinypng.com / SVGO) and re-upload."
+        )
+
+    # Minimal validation:
+    #   PNG must start with the 8-byte magic \x89PNG\r\n\x1a\n
+    #   SVG must contain "<svg" case-insensitively in the first 500 bytes
+    # This catches "operator pastes a JPG renamed to .png" without needing
+    # a full image-parsing dependency.
+    if mime == "image/png":
+        if not raw.startswith(b"\x89PNG\r\n\x1a\n"):
+            raise HTTPException(400, "Payload doesn't look like a PNG (magic-byte check failed).")
+    else:  # SVG
+        head = raw[:500].lower()
+        if b"<svg" not in head:
+            raise HTTPException(400, "Payload doesn't look like SVG (missing <svg root element).")
+
+    now = datetime.now(timezone.utc)
+    await db.dashboard_settings.update_one(
+        {"_id": DASHBOARD_SETTINGS_ID},
+        {"$set": {
+            "logo_b64": b64,
+            "logo_mime": mime,
+            "logo_updated_at": now,
+            "logo_updated_by": principal.get("email", "unknown"),
+        }},
+        upsert=True,
+    )
+    return {"ok": True, "bytes": len(raw), "mime": mime}
+
+
+@api_router.delete("/admin/dashboard-settings/logo")
+async def dashboard_settings_clear_logo(request: Request):
+    """Remove the uploaded logo — dashboard reverts to Quake Angel branding
+    only. Admin-only."""
+    principal = await resolve_principal(
+        request,
+        request.headers.get("x-admin-token"),
+        ADMIN_TRIGGER_PASSWORD,
+        db,
+    )
+    require_role(principal, "admin")
+    await db.dashboard_settings.update_one(
+        {"_id": DASHBOARD_SETTINGS_ID},
+        {"$unset": {"logo_b64": "", "logo_mime": "", "logo_updated_at": "", "logo_updated_by": ""}},
+    )
+    return {"ok": True, "cleared": True}
+
+
+@api_router.post("/admin/dashboard-settings/authority-name")
+async def dashboard_settings_set_authority(
+    request: Request,
+    body: DashboardAuthorityBody,
+):
+    """Set/clear the authority name shown on B1/B2 footers. Admin-only.
+    Passing an empty string or null clears — reports fall back to the
+    generic "the responsible authorities" wording."""
+    principal = await resolve_principal(
+        request,
+        request.headers.get("x-admin-token"),
+        ADMIN_TRIGGER_PASSWORD,
+        db,
+    )
+    require_role(principal, "admin")
+
+    name = (body.authority_name or "").strip()
+    now = datetime.now(timezone.utc)
+    if not name:
+        await db.dashboard_settings.update_one(
+            {"_id": DASHBOARD_SETTINGS_ID},
+            {"$unset": {"authority_name": ""},
+             "$set": {"authority_updated_at": now, "authority_updated_by": principal.get("email", "unknown")}},
+            upsert=True,
+        )
+        return {"ok": True, "authority_name": None}
+    await db.dashboard_settings.update_one(
+        {"_id": DASHBOARD_SETTINGS_ID},
+        {"$set": {
+            "authority_name": name,
+            "authority_updated_at": now,
+            "authority_updated_by": principal.get("email", "unknown"),
+        }},
+        upsert=True,
+    )
+    return {"ok": True, "authority_name": name}
 
 
 # ---------- Subscription entitlement (Phase A of subscription-lapse work) ----
