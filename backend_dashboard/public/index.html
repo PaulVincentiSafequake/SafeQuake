@@ -6,53 +6,196 @@
 <title>Quake Angel — Emergency Response Dashboard</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 <style>
+  /* ═════════════════════════════════════════════════════════════════════
+     THEME SYSTEM (Part C — 2026-08-10)
+     Every colour surface + text tone comes from these vars. Dark is the
+     default (control-room, night shift, low-light). A toggle in the
+     header flips to light for daylight incident-vehicle use.
+
+     Quake Angel identity palette: black, white, red, yellow (green
+     retained for MINOR severity because accessibility requires it and
+     universal convention expects it; it's used sparingly to keep red +
+     yellow dominant).
+
+     Semantic contract:
+       --sev-immediate  RED     · circle icon · label "IMMEDIATE"
+       --sev-serious    YELLOW  · triangle    · label "SERIOUS"
+       --sev-minor      GREEN   · square      · label "MINOR"
+       Colour is a REDUNDANT channel. Shape + label carry the meaning on
+       B&W printers and for the ~1-in-12 red/green-colourblind men. See
+       .qg-sev-chip below for the composed indicator.
+     ═════════════════════════════════════════════════════════════════════ */
   :root {
-    --safe: #2e7d32;
-    --trapped: #c62828;
-    --waiting: #f9a825;
-    --danger: #757575;
-    --rescued: #1F8A3A;
-    --bg: #f4f5f7;
+    /* Brand — Quake Angel identity. Do not tint further. */
+    --brand-black:  #0a0a0a;
+    --brand-white:  #ffffff;
+    --brand-red:    #C21818;
+    --brand-yellow: #E8A72B;
+    --brand-green:  #1F8A3A;
+
+    /* Severity (semantic aliases). Component code refers to these,
+       NOT to the brand colours directly. Lets us re-theme later without
+       hunting every use site. */
+    --sev-immediate: var(--brand-red);
+    --sev-serious:   var(--brand-yellow);
+    --sev-minor:     var(--brand-green);
+
+    /* Legacy names kept for backwards compat with the existing CSS
+       (Leaflet marker colouring, badge shorthands). New code should
+       use --sev-* semantic names instead. */
+    --safe:     var(--brand-green);
+    --trapped:  var(--brand-red);
+    --waiting:  var(--brand-yellow);
+    --rescued:  var(--brand-green);
+    --danger:   #757575;
+
+    /* Focus ring — must be visible against every surface. Yellow works
+       on both black and white backgrounds. */
+    --focus-ring: #ffc22b;
   }
+
+  /* Dark theme = default */
+  :root, :root[data-theme="dark"] {
+    --bg:            #0a0a0a;
+    --surface:       #16181c;
+    --surface-2:     #1e2126;
+    --surface-3:     #2a2e35;
+    --text:          #f2f2f2;
+    --text-muted:    #a0a4ab;
+    --text-dim:      #7a7f87;
+    --border:        #2a2e35;
+    --border-strong: #3a3f47;
+    --header-bg:     #050505;
+    --link:          #6db3ff;
+    --danger-tint:   rgba(194, 24, 24, 0.16);
+    --warn-tint:     rgba(232, 167, 43, 0.16);
+    --ok-tint:       rgba(31, 138, 58, 0.16);
+    --code-bg:       #232529;
+  }
+  :root[data-theme="light"] {
+    --bg:            #f5f6f8;
+    --surface:       #ffffff;
+    --surface-2:     #f8f9fb;
+    --surface-3:     #eef0f4;
+    --text:          #0a0a0a;
+    --text-muted:    #5a6068;
+    --text-dim:      #8a8f97;
+    --border:        #d9dde3;
+    --border-strong: #b0b6bf;
+    --header-bg:     #0a0a0a;    /* keep header dark even in light mode — brand */
+    --link:          #0f4d99;
+    --danger-tint:   rgba(194, 24, 24, 0.08);
+    --warn-tint:     rgba(232, 167, 43, 0.10);
+    --ok-tint:       rgba(31, 138, 58, 0.08);
+    --code-bg:       #f0f2f6;
+  }
+
   * { box-sizing: border-box; }
+  html { color-scheme: dark; }
+  html[data-theme="light"] { color-scheme: light; }
   body {
     margin: 0;
     font-family: -apple-system, "Segoe UI", Arial, sans-serif;
     background: var(--bg);
-    color: #222;
-    /* Flex column so the map fills whatever vertical space is left after
-       the sign-in bar, preview panel, trigger button and header — rather
-       than assuming a fixed offset. The old calc(100vh - 60px) on .layout
-       was written when the header was the ONLY thing above the map; every
-       control added since pushed the page taller than the viewport and
-       scrolled the sign-in bar and trigger button off the top. */
+    color: var(--text);
     display: flex;
     flex-direction: column;
     min-height: 100vh;
   }
   header {
-    background: linear-gradient(135deg, #1c2b36 0%, #23384a 55%, #1a2a35 100%);
-    color: #fff;
+    background: var(--header-bg);
+    color: var(--brand-white);
     padding: 14px 20px;
     display: flex;
     align-items: center;
     justify-content: space-between;
     flex-wrap: wrap;
     gap: 10px;
-    box-shadow: 0 2px 14px rgba(0,0,0,0.25);
+    box-shadow: 0 2px 14px rgba(0,0,0,0.35);
+    border-bottom: 3px solid var(--brand-red);
   }
   .header-brand { display: flex; align-items: center; gap: 12px; }
-  .header-brand img {
-    width: 40px;
-    height: 40px;
-    border-radius: 10px;
-    box-shadow: 0 3px 10px rgba(0,0,0,0.35), 0 0 0 1px rgba(255,255,255,0.08);
-    flex-shrink: 0;
+  .header-brand .qg-logo-slot {
+    display: inline-flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .header-brand .qg-logo-slot img {
+    max-height: 40px;
+    max-width: 160px;
+    border-radius: 6px;
+    background: rgba(255,255,255,0.06);
+    padding: 2px 6px;
+  }
+  .header-brand .qg-logo-slot .qg-divider {
+    width: 1px; height: 28px; background: rgba(255,255,255,0.18);
   }
   header h1 { font-size: 18px; margin: 0; font-weight: 700; letter-spacing: .2px; }
   header p { margin: 2px 0 0; font-size: 12px; color: #b7c2cc; }
-  /* flex:1 makes the map/sidebar row absorb the remaining height, so the
-     controls above it always stay on screen no matter how many we add. */
+  .header-actions {
+    display: flex; align-items: center; gap: 10px; margin-left: auto;
+  }
+  .qg-theme-toggle {
+    background: transparent;
+    color: var(--brand-white);
+    border: 1px solid rgba(255,255,255,0.25);
+    padding: 6px 12px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-family: inherit;
+  }
+  .qg-theme-toggle:hover { background: rgba(255,255,255,0.10); border-color: rgba(255,255,255,0.5); }
+  .qg-theme-toggle:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+
+  /* ── Severity chip: colour + shape + label ─────────────────────
+     Used ANYWHERE severity is displayed. Renders as an inline flex row
+     with an SVG shape and an all-caps label. The SVG has 2px black
+     stroke so it retains contrast if printed in B&W. */
+  .qg-sev-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 8px 2px 4px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: #fff;
+    line-height: 1.4;
+    vertical-align: middle;
+  }
+  .qg-sev-chip svg { flex-shrink: 0; }
+  .qg-sev-chip.immediate { background: var(--sev-immediate); }
+  .qg-sev-chip.serious   { background: var(--sev-serious); color: #1a1000; }
+  .qg-sev-chip.minor     { background: var(--sev-minor); }
+  .qg-sev-chip.unknown   { background: #666; }
+
+  /* Powered-by footer */
+  .qg-powered-by {
+    margin-top: 24px;
+    padding: 16px 20px;
+    text-align: center;
+    color: var(--text-dim);
+    font-size: 11px;
+    border-top: 1px solid var(--border);
+    background: var(--surface);
+  }
+  .qg-powered-by strong { color: var(--text-muted); }
+
+  /* Print rules — everything shape-and-label first, no reliance on hue */
+  @media print {
+    header, .qg-theme-toggle, .qg-export-bar, .qg-audit-header .qg-audit-meta { display: none !important; }
+    body { background: #fff; color: #000; }
+    .qg-sev-chip { border: 1.5px solid #000 !important; color: #000 !important; background: transparent !important; }
+    .qg-sev-chip svg * { fill: #000 !important; stroke: #000 !important; }
+  }
+
   .layout { display: flex; flex: 1 1 auto; min-height: 420px; flex-wrap: wrap; }
   #map-wrap { position: relative; flex: 1 1 60%; min-height: 400px; }
   #map { position: absolute; inset: 0; }
@@ -1410,11 +1553,24 @@
 
 <header>
   <div class="header-brand">
-    <img src="data:image/png;base64,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" alt="Quake Angel">
+    <div class="qg-logo-slot">
+      <img id="qg-brand-logo" alt="Quake Angel" src="data:image/png;base64,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">
+      <div id="qg-org-logo-slot" style="display:none">
+        <span class="qg-divider" aria-hidden="true"></span>
+        <img id="qg-org-logo-img" alt="Organisation logo">
+      </div>
+    </div>
     <div>
       <h1>Quake Angel &mdash; Emergency Response Dashboard (PILOT / DEMO)</h1>
       <p>Live device data. Refreshes every 4 seconds.</p>
     </div>
+  </div>
+  <div class="header-actions">
+    <button id="qg-theme-toggle" class="qg-theme-toggle" type="button"
+            aria-label="Toggle dark/light theme" title="Toggle theme">
+      <span id="qg-theme-icon" aria-hidden="true">🌙</span>
+      <span id="qg-theme-label">Dark</span>
+    </button>
   </div>
 </header>
 
@@ -1962,7 +2118,9 @@
           err + '<div class="qg-audit-at">' + esc(e.at || "") + '</div></div>';
     }
     if (e.kind === "rescued") {
-      var priorSev = e.prior_severity ? '<span class="qg-badge" style="background:' + sevColor(e.prior_severity) + '">' + esc(e.prior_severity) + '</span>' : "";
+      var priorSev = e.prior_severity && window.qgSeverityChip
+        ? window.qgSeverityChip(e.prior_severity)
+        : (e.prior_severity ? '<span class="qg-badge" style="background:' + sevColor(e.prior_severity) + '">' + esc(e.prior_severity) + '</span>' : "");
       var notes = "";
       if (e.notes) notes = '<div style="color:#555;font-size:12px;margin-top:4px">📝 ' + esc(e.notes) + '</div>';
       else if (e.notes_present) notes = '<div style="color:#888;font-size:12px;margin-top:4px" title="Notes exist but are only visible to admin-authenticated viewers.">🔒 <i>operator note recorded (admin-only)</i></div>';
@@ -1973,14 +2131,18 @@
           notes + '<div class="qg-audit-at">' + esc(e.at || "") + '</div></div>';
     }
     if (e.kind === "rescue_reverted") {
-      var restoredSev = e.restored_severity ? '<span class="qg-badge" style="background:' + sevColor(e.restored_severity) + '">' + esc(e.restored_severity) + '</span>' : "";
+      var restoredSev = e.restored_severity && window.qgSeverityChip
+        ? window.qgSeverityChip(e.restored_severity)
+        : (e.restored_severity ? '<span class="qg-badge" style="background:' + sevColor(e.restored_severity) + '">' + esc(e.restored_severity) + '</span>' : "");
       return '<div class="qg-audit-row rescue_reverted">' +
           '<div class="qg-audit-title">↩️ RESCUE REVERTED · ' + renderIdent(e) +
             ' restored to <b>' + esc(e.restored_status || e.status || "trapped") + '</b>' + restoredSev +
             ' · by <code>' + esc(e.reverted_by || "dashboard") + '</code></div>' +
           '<div class="qg-audit-at">' + esc(e.at || "") + '</div></div>';
     }
-    var sev = e.severity ? '<span class="qg-badge" style="background:' + sevColor(e.severity) + '">' + esc(e.severity) + "</span>" : "";
+    var sev = e.severity && window.qgSeverityChip
+      ? window.qgSeverityChip(e.severity)
+      : (e.severity ? '<span class="qg-badge" style="background:' + sevColor(e.severity) + '">' + esc(e.severity) + "</span>" : "");
     var mob = e.mobility ? '<span class="qg-badge" style="background:' + (e.mobility === "trapped" ? "#C21818" : "#2E7D32") + '">' + (e.mobility === "trapped" ? "trapped/pinned" : "can move") + "</span>" : "";
     var loc = "";
     if (e.latitude != null && e.longitude != null) {
@@ -2765,6 +2927,289 @@ window.QuakeAngelRescue = (function () {
   }
 
   return { mark: mark, unmark: unmark, renderButton: renderButton, markBulk: markBulk };
+})();
+</script>
+
+<!-- ═════════════════════════════════════════════════════════════════════
+     Part C — theme toggle, org logo, admin settings panel, footer
+     ═════════════════════════════════════════════════════════════════════ -->
+
+<div id="qg-settings-panel" style="display:none; margin:16px 12px; padding:16px; background:var(--surface); border:1px solid var(--border); border-left:4px solid var(--brand-yellow); border-radius:8px">
+  <h2 id="qg-settings-toggle" style="margin:0 0 4px 0; font-size:17px; font-weight:600; color:var(--text); cursor:pointer; user-select:none">
+    <span id="qg-settings-caret">▸</span> Dashboard settings
+  </h2>
+  <div style="font-size:12px; color:var(--text-muted); margin-bottom:12px">
+    Org logo (shown in header + printed reports) and next-of-kin authority name (shown on B1/B2 PDFs). Admin-only.
+  </div>
+  <div id="qg-settings-body" style="display:none">
+    <div id="qg-settings-msg" style="margin-bottom:12px"></div>
+    <h3 style="font-size:13px; margin:0 0 6px 0; color:var(--text)">Organisation logo</h3>
+    <div style="font-size:12px; color:var(--text-muted); margin-bottom:8px">
+      PNG or SVG. PNG max 200 KB, SVG max 100 KB. Appears in the header alongside Quake Angel and on B1/B2 PDF headers when print-support is added.
+    </div>
+    <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:16px">
+      <input type="file" id="qg-logo-file" accept=".png,image/png,.svg,image/svg+xml" style="font-size:12px; color:var(--text)">
+      <button type="button" id="qg-logo-save" class="qg-export-btn" style="background:var(--brand-red); color:var(--brand-white); border:0; padding:6px 14px; font-weight:700">Upload</button>
+      <button type="button" id="qg-logo-clear" class="qg-export-btn">Remove logo</button>
+      <span id="qg-logo-preview-wrap" style="display:none; align-items:center; gap:8px">
+        <span style="font-size:11px; color:var(--text-muted)">Currently:</span>
+        <img id="qg-logo-preview" style="max-height:32px; max-width:120px; background:#111; padding:2px 4px; border-radius:3px">
+      </span>
+    </div>
+    <h3 style="font-size:13px; margin:0 0 6px 0; color:var(--text)">Authority name (on B1/B2 report footers)</h3>
+    <div style="font-size:12px; color:var(--text-muted); margin-bottom:8px">
+      The name of the organisation responsible for next-of-kin notification in this jurisdiction (e.g., "Malta Civil Protection Department"). Leave blank to use the generic "the responsible authorities" wording. Only set this when a formal agreement exists — the name will appear on distributable public PDFs.
+    </div>
+    <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap">
+      <input type="text" id="qg-authority-input" maxlength="120" placeholder="(leave blank for generic wording)"
+             style="flex:1; min-width:260px; padding:7px 10px; border:1px solid var(--border-strong); border-radius:4px; background:var(--surface-2); color:var(--text); font-family:inherit; font-size:13px">
+      <button type="button" id="qg-authority-save" class="qg-export-btn" style="background:var(--brand-red); color:var(--brand-white); border:0; padding:6px 14px; font-weight:700">Save</button>
+    </div>
+    <div id="qg-authority-current" style="margin-top:6px; font-size:11px; color:var(--text-muted)"></div>
+  </div>
+</div>
+
+<footer class="qg-powered-by">
+  Powered by <strong>Quake Angel</strong> · Emergency response platform
+</footer>
+
+<script>
+(function () {
+  'use strict';
+
+  // ── Theme boot ─────────────────────────────────────────────────────
+  // Read from localStorage; default DARK (control-room). No FOUC because
+  // the CSS defaults to dark and we only flip the attribute if the user
+  // previously chose light.
+  var THEME_KEY = 'qa_theme';
+  var themeBtn   = document.getElementById('qg-theme-toggle');
+  var themeIcon  = document.getElementById('qg-theme-icon');
+  var themeLabel = document.getElementById('qg-theme-label');
+
+  function applyTheme(t) {
+    document.documentElement.setAttribute('data-theme', t);
+    if (themeIcon)  themeIcon.textContent  = t === 'light' ? '☀️' : '🌙';
+    if (themeLabel) themeLabel.textContent = t === 'light' ? 'Light' : 'Dark';
+  }
+  var stored = null;
+  try { stored = localStorage.getItem(THEME_KEY); } catch (_) {}
+  applyTheme(stored === 'light' ? 'light' : 'dark');
+  if (themeBtn) {
+    themeBtn.addEventListener('click', function () {
+      var next = document.documentElement.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
+      applyTheme(next);
+      try { localStorage.setItem(THEME_KEY, next); } catch (_) {}
+    });
+  }
+
+  // ── Settings fetch — populate org logo (public GET, no auth needed) ─
+  var API_BASE = (window.qaAuth && window.qaAuth.apiBase) || '';
+  async function fetchSettings() {
+    try {
+      var url = '/api/dashboard-settings';
+      var r = window.qaApi ? await window.qaApi(url) : await fetch(url);
+      if (!r.ok) return null;
+      return await r.json();
+    } catch (_) { return null; }
+  }
+
+  function renderOrgLogo(logoB64, mime) {
+    var slot = document.getElementById('qg-org-logo-slot');
+    var img  = document.getElementById('qg-org-logo-img');
+    var preview = document.getElementById('qg-logo-preview');
+    var previewWrap = document.getElementById('qg-logo-preview-wrap');
+    if (!logoB64 || !mime) {
+      if (slot) slot.style.display = 'none';
+      if (previewWrap) previewWrap.style.display = 'none';
+      return;
+    }
+    var dataUri = 'data:' + mime + ';base64,' + logoB64;
+    if (img) img.src = dataUri;
+    if (slot) slot.style.display = 'inline-flex';
+    if (preview) preview.src = dataUri;
+    if (previewWrap) previewWrap.style.display = 'inline-flex';
+  }
+
+  async function refreshSettings() {
+    var s = await fetchSettings();
+    if (!s) return;
+    renderOrgLogo(s.logo_b64, s.logo_mime);
+    var authInput   = document.getElementById('qg-authority-input');
+    var authCurrent = document.getElementById('qg-authority-current');
+    if (authInput && s.authority_name && !authInput.value) authInput.value = s.authority_name;
+    if (authCurrent) {
+      authCurrent.textContent = s.authority_name
+        ? 'Current: "' + s.authority_name + '" — appears on B1/B2 report footers.'
+        : 'Current: (unset) — reports use the generic "the responsible authorities" wording.';
+    }
+  }
+  refreshSettings();
+
+  // ── Admin settings panel (visibility + wiring) ─────────────────────
+  var panel = document.getElementById('qg-settings-panel');
+  var toggle = document.getElementById('qg-settings-toggle');
+  var body   = document.getElementById('qg-settings-body');
+  var caret  = document.getElementById('qg-settings-caret');
+  var msgSlot = document.getElementById('qg-settings-msg');
+
+  function applySettingsVisibility() {
+    var u = window.qaAuth && window.qaAuth.user ? window.qaAuth.user() : null;
+    var role = (u && typeof u.role === 'string') ? u.role.toLowerCase() : null;
+    if (panel) panel.style.display = role === 'admin' ? 'block' : 'none';
+  }
+  if (window.qaAuth && typeof window.qaAuth.onChange === 'function') {
+    window.qaAuth.onChange(applySettingsVisibility);
+  }
+  applySettingsVisibility();
+  // Same defensive polling pattern as the User Management panel.
+  var __qaSettingsTicks = 0;
+  var __qaSettingsPoll = setInterval(function () {
+    __qaSettingsTicks += 1;
+    applySettingsVisibility();
+    if (__qaSettingsTicks >= 15) clearInterval(__qaSettingsPoll);
+  }, 400);
+
+  if (toggle) toggle.addEventListener('click', function () {
+    var open = body.style.display === 'block';
+    body.style.display = open ? 'none' : 'block';
+    if (caret) caret.textContent = open ? '▸' : '▾';
+  });
+
+  function showSettingsMsg(kind, text) {
+    if (!msgSlot) return;
+    var bg  = kind === 'error' ? 'var(--danger-tint)' : kind === 'success' ? 'var(--ok-tint)' : 'var(--warn-tint)';
+    var col = kind === 'error' ? 'var(--brand-red)'  : kind === 'success' ? 'var(--brand-green)' : 'var(--brand-yellow)';
+    msgSlot.innerHTML = '<div style="padding:8px 12px; border-radius:4px; background:' + bg + '; color:' + col + '; font-size:13px">' +
+      String(text).replace(/</g, '&lt;') + '</div>';
+    if (kind === 'success') setTimeout(function () {
+      if (msgSlot.querySelector('div')) msgSlot.innerHTML = '';
+    }, 4000);
+  }
+
+  // ── Logo upload wiring ────────────────────────────────────────────
+  var logoFileEl = document.getElementById('qg-logo-file');
+  var logoSaveBtn = document.getElementById('qg-logo-save');
+  var logoClearBtn = document.getElementById('qg-logo-clear');
+
+  if (logoSaveBtn) logoSaveBtn.addEventListener('click', async function () {
+    var f = logoFileEl && logoFileEl.files && logoFileEl.files[0];
+    if (!f) { showSettingsMsg('error', 'Pick a PNG or SVG file first.'); return; }
+    var mime = f.type;
+    if (mime !== 'image/png' && mime !== 'image/svg+xml') {
+      showSettingsMsg('error', 'Only PNG or SVG accepted. Got: ' + (mime || '(unknown)'));
+      return;
+    }
+    var cap = mime === 'image/png' ? 200 * 1024 : 100 * 1024;
+    if (f.size > cap) {
+      showSettingsMsg('error', 'File is ' + Math.round(f.size/1024) + ' KB — max ' + (cap/1024) + ' KB for ' + mime + '.');
+      return;
+    }
+    logoSaveBtn.disabled = true;
+    showSettingsMsg('info', 'Uploading...');
+    try {
+      var b64 = await new Promise(function (resolve, reject) {
+        var reader = new FileReader();
+        reader.onload = function () {
+          // FileReader gives us "data:image/...;base64,PAYLOAD" — strip the prefix
+          var s = String(reader.result);
+          var idx = s.indexOf(',');
+          resolve(idx >= 0 ? s.slice(idx + 1) : s);
+        };
+        reader.onerror = function () { reject(new Error('Read failed.')); };
+        reader.readAsDataURL(f);
+      });
+      var r = await window.qaApi('/api/admin/dashboard-settings/logo', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({logo_b64: b64, mime: mime}),
+      });
+      if (!r.ok) {
+        var detail = 'HTTP ' + r.status;
+        try { var j = await r.json(); detail = j.detail || detail; } catch (_) {}
+        showSettingsMsg('error', 'Upload failed: ' + detail);
+      } else {
+        showSettingsMsg('success', 'Uploaded — hard refresh the page to see it in the header.');
+        await refreshSettings();
+        logoFileEl.value = '';
+      }
+    } catch (e) {
+      showSettingsMsg('error', 'Upload failed: ' + e.message);
+    } finally {
+      logoSaveBtn.disabled = false;
+    }
+  });
+
+  if (logoClearBtn) logoClearBtn.addEventListener('click', async function () {
+    if (!confirm('Remove the organisation logo? The header will revert to Quake Angel branding only.')) return;
+    logoClearBtn.disabled = true;
+    try {
+      var r = await window.qaApi('/api/admin/dashboard-settings/logo', {method: 'DELETE'});
+      if (!r.ok) {
+        var detail = 'HTTP ' + r.status;
+        try { var j = await r.json(); detail = j.detail || detail; } catch (_) {}
+        showSettingsMsg('error', 'Remove failed: ' + detail);
+      } else {
+        showSettingsMsg('success', 'Logo removed.');
+        await refreshSettings();
+      }
+    } finally {
+      logoClearBtn.disabled = false;
+    }
+  });
+
+  // ── Authority name wiring ─────────────────────────────────────────
+  var authSaveBtn = document.getElementById('qg-authority-save');
+  if (authSaveBtn) authSaveBtn.addEventListener('click', async function () {
+    var input = document.getElementById('qg-authority-input');
+    var val = (input.value || '').trim();
+    authSaveBtn.disabled = true;
+    try {
+      var r = await window.qaApi('/api/admin/dashboard-settings/authority-name', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({authority_name: val || null}),
+      });
+      if (!r.ok) {
+        var detail = 'HTTP ' + r.status;
+        try { var j = await r.json(); detail = j.detail || detail; } catch (_) {}
+        showSettingsMsg('error', 'Save failed: ' + detail);
+      } else {
+        showSettingsMsg('success', val
+          ? 'Authority set to "' + val + '". Future B1/B2 reports will use this name.'
+          : 'Authority cleared — reports revert to generic wording.'
+        );
+        await refreshSettings();
+      }
+    } finally {
+      authSaveBtn.disabled = false;
+    }
+  });
+
+  // ── Severity chip helper (exposed globally for other snippets) ─────
+  // Renders colour + shape + label — the three redundant channels that
+  // guarantee severity is unambiguous under colour-blindness, B&W
+  // printing, and low-vision magnification.
+  window.qgSeverityChip = function (sev) {
+    var normalized = String(sev || '').toLowerCase();
+    var kind, label, shape;
+    if (normalized === 'red' || normalized === 'immediate') {
+      kind = 'immediate'; label = 'IMMEDIATE';
+      // Filled circle, black stroke for B&W legibility
+      shape = '<svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><circle cx="6" cy="6" r="5" fill="currentColor" stroke="#000" stroke-width="1"/></svg>';
+    } else if (normalized === 'yellow' || normalized === 'serious') {
+      kind = 'serious'; label = 'SERIOUS';
+      // Triangle with black stroke
+      shape = '<svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><polygon points="6,1 11,10.5 1,10.5" fill="currentColor" stroke="#000" stroke-width="1" stroke-linejoin="round"/></svg>';
+    } else if (normalized === 'green' || normalized === 'minor') {
+      kind = 'minor'; label = 'MINOR';
+      // Square
+      shape = '<svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><rect x="1.5" y="1.5" width="9" height="9" fill="currentColor" stroke="#000" stroke-width="1"/></svg>';
+    } else {
+      kind = 'unknown'; label = 'UNKNOWN';
+      shape = '<svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><rect x="2" y="2" width="8" height="8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-dasharray="2,1"/></svg>';
+    }
+    return '<span class="qg-sev-chip ' + kind + '" role="img" aria-label="' + label + '">' + shape + label + '</span>';
+  };
 })();
 </script>
 
