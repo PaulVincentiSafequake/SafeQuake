@@ -51,16 +51,9 @@
   }
   header h1 { font-size: 18px; margin: 0; font-weight: 700; letter-spacing: .2px; }
   header p { margin: 2px 0 0; font-size: 12px; color: #b7c2cc; }
-  /* Bounded height so content BELOW the map (User Management, Recent
-     activity) is reachable via normal page scroll. The old `flex: 1 1 auto`
-     made the map+sidebar absorb the entire remaining viewport, and combined
-     with `.sidebar { overflow-y: auto }` and Leaflet catching wheel events
-     on the map, the admin panels below became unreachable — scrolling on
-     the map zoomed instead of paged, scrolling on the sidebar hit its own
-     internal cap, and the body never saw the wheel events. Fixed height
-     range gives us a big map on tall screens without eating the whole
-     viewport on short ones. Mobile override below keeps stacking behaviour. */
-  .layout { display: flex; height: 70vh; min-height: 480px; max-height: 720px; flex-wrap: wrap; }
+  /* flex:1 makes the map/sidebar row absorb the remaining height, so the
+     controls above it always stay on screen no matter how many we add. */
+  .layout { display: flex; flex: 1 1 auto; min-height: 420px; flex-wrap: wrap; }
   #map-wrap { position: relative; flex: 1 1 60%; min-height: 400px; }
   #map { position: absolute; inset: 0; }
   .map-filters {
@@ -92,7 +85,13 @@
     max-width: 380px;
     background: #fff;
     padding: 16px;
-    overflow-y: auto;
+    /* IMPORTANT: DO NOT set overflow-y here. A prior version had
+       `overflow-y: auto` which turned the sidebar into a self-contained
+       scroll container — wheel events landing on it never chained to
+       body, and any panels rendered below the layout (User Management,
+       Recent activity) became unreachable via mouse scroll. The mobile
+       media query below sets `overflow-y: visible` explicitly for the
+       same reason; keeping desktop consistent. */
     border-left: 1px solid #e0e0e0;
   }
   .stat-row { display: flex; gap: 10px; margin-bottom: 16px; flex-wrap: wrap; }
@@ -1836,12 +1835,39 @@
     }
   });
   function applyVisibility() {
-    const u = window.qaAuth.user();
-    if (u && u.role === 'admin') { root.style.display = 'block'; }
-    else { root.style.display = 'none'; root.classList.remove('qa-um-open'); }
+    // Case-insensitive role check. Backend today emits lowercase, but a
+    // future JWT-payload variant or a legacy sessionStorage cache could
+    // ship "Admin"; we don't want the panel to disappear over a case
+    // mismatch — the backend still enforces authorization on every write.
+    const u = window.qaAuth && typeof window.qaAuth.user === 'function'
+      ? window.qaAuth.user() : null;
+    const role = (u && typeof u.role === 'string') ? u.role.toLowerCase() : null;
+    if (role === 'admin') {
+      root.style.display = 'block';
+    } else {
+      root.style.display = 'none';
+      root.classList.remove('qa-um-open');
+    }
   }
-  applyVisibility();
+  // Register the onChange listener FIRST, then do the initial call.
+  // Order matters: if the auth guard's async /api/auth/me boot happens
+  // to resolve between these two lines (should be impossible with sync
+  // JS, but browsers surprise us), we still catch it.
   window.qaAuth.onChange(applyVisibility);
+  applyVisibility();
+  // Belt-and-braces poll: some browsers or timing edge cases (page
+  // returned from bfcache, extension racing the auth guard's async
+  // /api/auth/me boot, etc.) leave qaAuth.user() null for a beat even
+  // when a JWT is present in sessionStorage. Re-check every 400ms for
+  // the first 6 seconds; then stop so we don't burn CPU indefinitely.
+  // The check itself is O(1) — a sessionStorage read and a role string
+  // compare — so this costs nothing measurable.
+  let __qaUmTicks = 0;
+  const __qaUmPoll = setInterval(function () {
+    __qaUmTicks += 1;
+    applyVisibility();
+    if (__qaUmTicks >= 15) clearInterval(__qaUmPoll);
+  }, 400);
 })();
 </script>
 
@@ -2007,7 +2033,9 @@
       exportBar.style.display = "none"; return;
     }
     var u = window.qaAuth.user();
-    if (u && (u.role === "admin" || u.role === "operator")) exportBar.style.display = "flex";
+    // Case-insensitive role match — same reasoning as user-mgmt panel.
+    var role = (u && typeof u.role === "string") ? u.role.toLowerCase() : null;
+    if (role === "admin" || role === "operator") exportBar.style.display = "flex";
     else exportBar.style.display = "none";
   }
   async function doExport(kind /* "csv" | "pdf" */) {
@@ -2089,6 +2117,14 @@
   if (window.qaAuth && typeof window.qaAuth.onChange === "function") {
     window.qaAuth.onChange(applyExportVisibility);
   }
+  // Same polling fallback as user-mgmt panel — see the long comment there.
+  // Keeps the two admin surfaces in sync when late auth resolves.
+  var __qaExportTicks = 0;
+  var __qaExportPoll = setInterval(function () {
+    __qaExportTicks += 1;
+    applyExportVisibility();
+    if (__qaExportTicks >= 15) clearInterval(__qaExportPoll);
+  }, 400);
 })();
 </script>
 
