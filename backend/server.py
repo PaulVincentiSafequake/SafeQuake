@@ -4261,8 +4261,25 @@ app.add_middleware(
     allow_credentials=True,
     allow_origins=CORS_ALLOWED_ORIGINS,
     allow_origin_regex=CORS_ALLOWED_ORIGIN_REGEX,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    # PATCH + DELETE were missing — needed by the User Management panel
+    # (role changes / user deletion). GET+POST+OPTIONS was enough for the
+    # trigger-alert + preview-config flows but would silently break user-
+    # mgmt once the Operators & Access panel became reachable.
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
+    # Cross-origin dashboards (safequake.onrender.com → this backend) can't
+    # read custom response headers unless we explicitly expose them. Missing
+    # this list was blocking B1/B2 casualty reports client-side: the JS
+    # `r.headers.get("X-Report-Kind")` returned null, tripping the guard
+    # that verifies "the report I got is the report I asked for". Same
+    # invisibility hit X-Row-Count (audit export "Downloaded N rows" toast
+    # showed "?") and Content-Disposition (filename fell back to a client-
+    # computed name). All three now visible to dashboard JS.
+    expose_headers=[
+        "X-Report-Kind",
+        "X-Row-Count",
+        "Content-Disposition",
+    ],
 )
 
 logging.basicConfig(
