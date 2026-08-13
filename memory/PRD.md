@@ -644,3 +644,31 @@ After EMSC Phase 1 and subscription lapse A+B. Ahead of QR feature and report ex
 - **1.1** caching: to be fixed at the repo during the next push (Cache-Control headers / server config — inspect `backend_dashboard` server when cloned).
 
 **DB additions:** `operator_pseudonyms {identity, alias, created_at}`.
+
+---
+
+## 2026-08-13 — Fixes from Paul's verification of 88d4fb2 + backend Publish
+
+**🔴 1. Narrative/table contradiction (worst finding — on the public report):**
+- Root cause: narrative merged self-reported "safe" check-ins into "found", while the table counted only operator-confirmed rescues.
+- Fix: `_progress_figures()` computes every narrative figure from the SAME source as the aggregate table. "Confirmed found by a rescue team" (== table People rescued) and "told us themselves that they are now safe" are now two separate, separately-worded lines — never merged. Singular/plural grammar handled (`_plural`). B1 overall percentage states its base inline ("counting app users who checked in only"); B2 still never shows a percentage.
+- Process fix Paul asked for: `TestNarrativeTableConsistency` in tests/test_export_hardening.py compares the narrative numbers AGAINST the table figures on the generated PDFs (plus merged-wording and grammar regression tests).
+
+**🔴 2. Signed-out privacy exposure:**
+- GET /api/devices and GET /api/audit now require operator/admin (JWT or X-Admin-Token). New anonymous GET /api/public/summary returns aggregate counts only.
+- Dashboard: signed-out visitors get count pills + "Sign in to see live triage detail" — no markers, no feed (client-gated too, covering the window between the Render deploy and the backend Publish).
+- Confirmed for Paul: /api/trigger-alert rejects unauthenticated POSTs server-side (401) — the browser message is not the only gate.
+
+**🟠 3. Preview mode relocated:**
+- The #qa-preview-panel node is MOVED at runtime into a collapsed "🧪 Admin testing tools" <details> at the bottom of the page (below the footer). Triage + map render first, always. Wrapper visibility mirrors the panel's own admin gating via MutationObserver.
+- Enter key inside preview-panel inputs is neutralised (the 1951 km incident).
+
+**🟡 4. Smaller:**
+- Watermark alpha 0.08→0.05 + opaque white backing strip behind the chart legend (was obscuring "Checked in safe"; also helps B&W print).
+- B1/B2 narrative blocks wrapped in KeepTogether — caveat lines can't be stranded on the next page.
+- accuracy_m rounded to 1 dp on exports.
+- display_name plumbing CONFIRMED end-to-end (app sends it via checkin.ts; backfill test passes with a seeded name). Live rows are empty simply because no user has entered a name yet.
+
+Tests: 141 passing across export/report/gating/CORS/display-name suites. test_cors_iteration_24 + test_display_name_iteration_25 updated to authenticate against the newly gated endpoints.
+
+**DEPLOY STATE: backend changes awaiting Publish; dashboard changes staged in /app/memory/dashboard_build/index.html — LAST PUSH FAILED because the PAT expired. Ask Paul for a fresh PAT and push (single commit, message drafted).**

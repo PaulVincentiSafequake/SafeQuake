@@ -368,6 +368,7 @@ async def post_status(payload: StatusInPayload):
 
 @api_router.get("/devices")
 async def get_devices(
+    request: Request,
     since: Optional[str] = Query(
         default=None,
         description="ISO-8601 timestamp. Only return devices updated on/after this instant.",
@@ -376,11 +377,21 @@ async def get_devices(
 ):
     """Return every known device's latest state for the rescuer dashboard.
 
+    GATED to operator/admin as of 2026-08-13: signed-out visitors could
+    previously see per-device triage detail, short codes, battery levels
+    and precise coordinates — live GDPR exposure. Anonymous consumers get
+    GET /api/public/summary (aggregate counts only) instead.
+
     CORS is limited to https://safequake.onrender.com,
     https://*.quakeangel.app (any subdomain), and http://localhost:*
     (see middleware config below). Response is snake_case, null-safe, and
     stable — field names will not change after this ship.
     """
+    principal = await resolve_principal(
+        request, request.headers.get("x-admin-token"), ADMIN_TRIGGER_PASSWORD, db
+    )
+    require_role(principal, "admin", "operator")
+
     query: dict = {}
     if since:
         query["updated_at"] = {"$gte": since}
@@ -435,9 +446,28 @@ async def get_status_checks():
     return [StatusCheck(**s) for s in status_checks]
 
 
+# ---------- Public aggregate summary (signed-out dashboard view) ----------
+@api_router.get("/public/summary")
+async def public_summary():
+    """Aggregate counts ONLY — the B2-style view for anonymous visitors.
+    No device ids, no short codes, no coordinates, no operator identities.
+    This is everything a signed-out dashboard is allowed to show."""
+    rows = await db.device_status.find({}, {"_id": 0, "status": 1}).to_list(10000)
+    counts = {"safe": 0, "trapped": 0, "rescued": 0, "not_responding": 0, "unknown": 0}
+    for r in rows:
+        st = r.get("status") or "unknown"
+        counts[st if st in counts else "unknown"] += 1
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "total": len(rows),
+        "counts": counts,
+    }
+
+
 # ---------- Audit log (unified trigger + status feed) ----------
 @api_router.get("/audit")
 async def get_audit_log(
+    request: Request,
     limit: int = Query(default=100, ge=1, le=500),
     since: Optional[str] = Query(
         default=None,
@@ -474,11 +504,12 @@ async def get_audit_log(
     https://*.quakeangel.app (any subdomain), and http://localhost:*
     (see middleware config). Field names are stable snake_case.
     """
-    # Only trust the token when the server has one configured — an empty
-    # ADMIN_TRIGGER_PASSWORD must never make anonymous callers "authenticated".
-    is_admin = bool(
-        ADMIN_TRIGGER_PASSWORD and x_admin_token == ADMIN_TRIGGER_PASSWORD
-    )
+    # GATED to operator/admin as of 2026-08-13 — the feed exposed device
+    # short codes, triage severity, map links and operator EMAILS to anyone
+    # with the URL. Notes remain admin-only on top of that.
+    principal = await resolve_principal(request, x_admin_token, ADMIN_TRIGGER_PASSWORD, db)
+    require_role(principal, "admin", "operator")
+    is_admin = principal.get("role") == "admin"
 
     events: List[dict] = []
 
@@ -826,7 +857,7 @@ def _pdf_confidentiality_onpage(canvas_, doc_):
     canvas_.rotate(30)
     canvas_.setFont("Helvetica-Bold", 64)
     try:
-        canvas_.setFillAlpha(0.08)
+        canvas_.setFillAlpha(0.05)
     except Exception:
         pass  # very old reportlab without alpha — banner still carries
     canvas_.setFillColor(_rl_colors.HexColor("#B0141A"))
@@ -1097,12 +1128,19 @@ def _timeline_chart(buckets: list[dict], width_pt: float, height_pt: float):
     chart.categoryAxis.labels.angle = 45
     chart.categoryAxis.labels.boxAnchor = "ne"
     d.add(chart)
-    lx = 34.0
-    for label, color in (
+    # Legend with an opaque white backing strip — the diagonal watermark
+    # crosses the top of the drawing and was obscuring "Checked in safe"
+    # on B1 (2026-08-13). The strip keeps legend text legible in colour
+    # AND in black-and-white print.
+    legend_items = (
         ("Told us they are trapped", "#C21818"),
         ("Marked found / rescued", "#1F8A3A"),
         ("Checked in safe", "#7A8CA0"),
-    ):
+    )
+    legend_w = sum(10 + len(label) * 3.6 + 18 for label, _ in legend_items)
+    d.add(Rect(30, height_pt - 14, legend_w, 13, fillColor=C.white, strokeColor=None))
+    lx = 34.0
+    for label, color in legend_items:
         d.add(Rect(lx, height_pt - 11, 7, 7, fillColor=C.HexColor(color), strokeColor=None))
         s = String(lx + 10, height_pt - 10, label)
         s.fontSize = 7
@@ -1111,35 +1149,92 @@ def _timeline_chart(buckets: list[dict], width_pt: float, height_pt: float):
     return d
 
 
-def _rescue_progress(raw_rows: list[dict], latest_events: list[dict]) -> tuple[int, int]:
-    """(total_trapped, found): distinct devices that reported trapped in
-    the window, and how many of those now read rescued or safe."""
+def _plural(n: int, singular: str, plural: str) -> str:
+    return singular if n == 1 else plural
+
+
+def _progress_figures(raw_rows: list[dict], latest_events: list[dict], counts: dict) -> dict:
+    """All figures for the plain-language narrative.
+
+    CONSISTENCY RULE (bug 2026-08-13): any narrative figure that shares a
+    concept with the aggregate table MUST be computed from the SAME source
+    as the table. The table once said "People rescued: 0" while the
+    narrative said "1 of 1 found" — because a self-reported safe check-in
+    was silently merged into "found". Two definitions of one word, a
+    paragraph apart, on the report families read.
+
+    - `rescued`       == the table's "People rescued" (operator-confirmed).
+    - `still_trapped` == the table's trapped count.
+    - `self_safe`     is a SEPARATE figure (self-reported, never merged).
+    """
     trapped_ids = {r["device_id"] for r in raw_rows
                    if r.get("status") == "trapped" and r.get("device_id")}
-    found = sum(
-        1 for e in latest_events
-        if e.get("device_id") in trapped_ids and e.get("status") in ("rescued", "safe")
-    )
-    return len(trapped_ids), found
+    self_safe = sum(1 for e in latest_events
+                    if e.get("device_id") in trapped_ids and e.get("status") == "safe")
+    resolved = sum(1 for e in latest_events
+                   if e.get("device_id") in trapped_ids and e.get("status") in ("rescued", "safe"))
+    return {
+        "total_trapped_reports": len(trapped_ids),
+        "rescued": int(counts.get("rescued") or 0),
+        "still_trapped": int(counts.get("trapped") or 0),
+        "self_safe": self_safe,
+        "resolved": resolved,
+    }
 
 
-def _plain_language_progress(found: int, total: int, include_percentage: bool) -> list[str]:
-    """Short lines, one idea per line, no bare percentages. The base is
-    stated ON THE SAME LINE as any percentage — a bare '68% rescued'
-    would be read by press as 68% of everyone caught in the earthquake.
-    HARD REQUIREMENT locked with Paul 2026-08-12."""
+def _plain_language_progress(raw_rows: list[dict], latest_events: list[dict],
+                             counts: dict, include_percentage: bool) -> list[str]:
+    """Short lines, one idea per line, no bare percentages, no jargon.
+
+    HARD LOCKS (Paul, 2026-08-12/13):
+    - "found by a rescue team" and "told us themselves they are safe" are
+      two separate, separately-worded figures. Never merged into a single
+      "found" number.
+    - Every percentage states its base on the same line.
+    - Singular/plural handled ("1 person … has", never "1 of the 1 … have").
+    """
+    f = _progress_figures(raw_rows, latest_events, counts)
+    total = f["total_trapped_reports"]
     if total == 0:
         return [
             "No one has told us they are trapped in this time window.",
             "This only counts people using the app.",
             "Others may be affected who we cannot see.",
         ]
-    lines = [f"{found} of the {total} people who told us they were trapped have now been found."]
-    if include_percentage:
-        pct = round(100.0 * found / total)
+    lines = [f"{total} {_plural(total, 'person', 'people')} told us they were trapped during this window."]
+
+    resc = f["rescued"]
+    if resc == 0:
+        lines.append("No one has been confirmed found by a rescue team yet.")
+    else:
+        lines.append(f"{resc} {_plural(resc, 'person has', 'people have')} been confirmed found by a rescue team.")
+
+    ss = f["self_safe"]
+    if ss:
         lines.append(
-            f"That is {pct}% — of app users who checked in, not of everyone affected by the earthquake."
+            f"{ss} {_plural(ss, 'person who had been trapped told', 'people who had been trapped told')} "
+            "us themselves that they are now safe."
         )
+
+    still = f["still_trapped"]
+    if still == 0:
+        lines.append("No one is still recorded as trapped.")
+    else:
+        lines.append(f"{still} {_plural(still, 'person is', 'people are')} still recorded as trapped.")
+
+    if include_percentage:
+        pct = round(100.0 * f["resolved"] / total)
+        if total == 1:
+            base = ("The 1 person who told us they were trapped is now recorded as rescued or safe"
+                    if f["resolved"] >= 1
+                    else "The 1 person who told us they were trapped is not yet recorded as rescued or safe")
+            lines.append(f"{base} ({pct}% — counting app users who checked in only).")
+        else:
+            lines.append(
+                f"Overall: {f['resolved']} of the {total} who told us they were trapped are now recorded as "
+                f"rescued or safe ({pct}% — counting app users who checked in only)."
+            )
+
     lines.append("This only counts people using the app.")
     lines.append("Others may be affected who we cannot see.")
     return lines
@@ -1255,6 +1350,12 @@ async def _fetch_audit_for_export(
         for k in ("latitude", "longitude"):
             if e.get(k) is not None:
                 e[k] = _round5(e[k])
+        # A metre reading needs one decimal, not fifteen.
+        if e.get("accuracy_m") is not None:
+            try:
+                e["accuracy_m"] = round(float(e["accuracy_m"]), 1)
+            except (TypeError, ValueError):
+                pass
     return events
 
 
@@ -1853,9 +1954,11 @@ async def casualty_report_operational_pdf(
     if any(b["trapped"] or b["safe"] or b["rescued"] for b in buckets):
         story.append(_timeline_chart(buckets, 240 * mm, 55 * mm))
         story.append(Spacer(0, 6))
-    total_trapped, found = _rescue_progress(raw_rows, events)
-    for line in _plain_language_progress(found, total_trapped, include_percentage=True):
-        story.append(Paragraph(_html.escape(line), plain_style))
+    from reportlab.platypus import KeepTogether as _KT
+    story.append(_KT([
+        Paragraph(_html.escape(line), plain_style)
+        for line in _plain_language_progress(raw_rows, events, counts, include_percentage=True)
+    ]))
     story.append(Spacer(0, 10))
 
     story.append(Paragraph("Per-device detail", h2_style))
@@ -2076,9 +2179,14 @@ async def casualty_report_public_pdf(
     if any(b["trapped"] or b["safe"] or b["rescued"] for b in buckets):
         story.append(_timeline_chart(buckets, 220 * mm, 55 * mm))
         story.append(Spacer(0, 6))
-    total_trapped, found = _rescue_progress(raw_rows, events)
-    for line in _plain_language_progress(found, total_trapped, include_percentage=False):
-        story.append(Paragraph(_html.escape(line), body_style))
+    # KeepTogether: the caveat lines ("Others may be affected who we cannot
+    # see.") must never be stranded alone on the next page, split from the
+    # figures they qualify.
+    from reportlab.platypus import KeepTogether as _KT
+    story.append(_KT([
+        Paragraph(_html.escape(line), body_style)
+        for line in _plain_language_progress(raw_rows, events, counts, include_percentage=False)
+    ]))
 
     story.append(Spacer(0, 14))
     story.append(Paragraph(

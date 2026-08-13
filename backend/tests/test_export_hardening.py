@@ -101,6 +101,31 @@ def seeded(request):
                   "updated_at": now.isoformat(), "_test_seed": TAG}},
         upsert=True,
     )
+    # trapped then SELF-REPORTED safe — must appear in the narrative as its
+    # own separately-worded figure, never merged into "found by a rescue team"
+    dev_selfsafe = f"{TAG}-dev-selfsafe"
+    db.status_events.insert_one({
+        "recorded_at": (now - timedelta(minutes=90)).isoformat(),
+        "device_id": dev_selfsafe, "display_name": None,
+        "status": "trapped", "severity": "green", "mobility": "mobile",
+        "latitude": 35.912345678901, "longitude": 14.487654321098,
+        "accuracy_m": 18.634929726061234, "battery_pct": 77,
+        "battery_state": "unplugged", "platform": "ios", "_test_seed": TAG,
+    })
+    db.status_events.insert_one({
+        "recorded_at": (now - timedelta(minutes=20)).isoformat(),
+        "device_id": dev_selfsafe, "display_name": None,
+        "status": "safe", "severity": None, "mobility": None,
+        "latitude": 35.912345678901, "longitude": 14.487654321098,
+        "accuracy_m": 18.634929726061234, "battery_pct": 75,
+        "battery_state": "unplugged", "platform": "ios", "_test_seed": TAG,
+    })
+    db.device_status.update_one(
+        {"device_id": dev_selfsafe},
+        {"$set": {"device_id": dev_selfsafe, "status": "safe",
+                  "updated_at": now.isoformat(), "_test_seed": TAG}},
+        upsert=True,
+    )
     # device for the credential-guard live POST
     db.device_status.update_one(
         {"device_id": f"{TAG}-dev-cred"},
@@ -156,6 +181,9 @@ class TestCsvStructure:
             if row["latitude"]:
                 assert len(row["latitude"].split(".")[-1]) <= 5, \
                     f"latitude not rounded: {row['latitude']}"
+            if row.get("accuracy_m") and "." in row["accuracy_m"]:
+                assert len(row["accuracy_m"].split(".")[-1]) <= 1, \
+                    f"accuracy_m not rounded to 1 dp: {row['accuracy_m']}"
             assert row["delivered"] in ("", "TRUE", "FALSE")
 
     def test_display_name_backfilled(self, seeded):
@@ -218,6 +246,40 @@ class TestCredentialGuard:
         assert r.status_code == 200, r.text
 
 
+class TestAccessGating:
+    """2026-08-13: signed-out visitors could see per-device triage detail,
+    coordinates and operator emails. /api/devices and /api/audit are now
+    operator/admin gated; anonymous callers get aggregate counts only."""
+
+    def test_devices_requires_auth(self, seeded):
+        r = requests.get(f"{BASE_URL}/api/devices", timeout=15)
+        assert r.status_code == 401
+
+    def test_audit_requires_auth(self, seeded):
+        r = requests.get(f"{BASE_URL}/api/audit?limit=10", timeout=15)
+        assert r.status_code == 401
+
+    def test_devices_ok_with_token(self, seeded):
+        r = requests.get(f"{BASE_URL}/api/devices", headers=HEADERS, timeout=15)
+        assert r.status_code == 200 and "devices" in r.json()
+
+    def test_public_summary_is_aggregate_only(self, seeded):
+        r = requests.get(f"{BASE_URL}/api/public/summary", timeout=15)
+        assert r.status_code == 200
+        body = r.json()
+        assert set(body.keys()) == {"generated_at", "total", "counts"}
+        assert set(body["counts"].keys()) == {"safe", "trapped", "rescued", "not_responding", "unknown"}
+        # nothing device-shaped may leak
+        text = r.text.lower()
+        for banned in ("device_id", "latitude", "longitude", "short_code", "@"):
+            assert banned not in text, f"public summary leaks {banned!r}"
+
+    def test_trigger_alert_rejected_server_side(self, seeded):
+        r = requests.post(f"{BASE_URL}/api/trigger-alert", timeout=15,
+                          json={"triggeredBy": "anon", "magnitude": 6.0})
+        assert r.status_code == 401, "trigger must be enforced server-side, not just hidden in the UI"
+
+
 class TestPdfHardening:
     def test_audit_pdf_confidential_filename_and_watermark(self, seeded):
         r = requests.get(PDF_URL, headers=HEADERS, params=_window(), timeout=30)
@@ -240,7 +302,7 @@ class TestPdfHardening:
         r = requests.get(B1_URL, headers=HEADERS, params=_window(), timeout=30)
         text = _pdf_text(r.content)
         if "%" in text:
-            assert "of app users who checked in" in text, \
+            assert "counting app users who checked in only" in text, \
                 "B1 shows a percentage without stating its base"
 
     def test_b2_has_timeline_but_no_percentage(self, seeded):
@@ -252,3 +314,61 @@ class TestPdfHardening:
         assert "This only counts people using the app." in text
         # Privacy invariant: no names/codes on B2.
         assert "Harden Test Person" not in text
+
+
+class TestNarrativeTableConsistency:
+    """Bug 2026-08-13: table said 'People rescued: 0' while the narrative
+    said '1 of 1 found' — a self-reported safe check-in was merged into
+    'found'. These tests compare the narrative AGAINST the aggregate
+    figures it describes, instead of testing each in isolation."""
+
+    def _texts(self):
+        b1 = _pdf_text(requests.get(B1_URL, headers=HEADERS, params=_window(), timeout=30).content)
+        b2 = _pdf_text(requests.get(B2_URL, headers=HEADERS, params=_window(), timeout=30).content)
+        return b1, b2
+
+    @staticmethod
+    def _narrative_rescued(text: str):
+        import re
+        if "No one has been confirmed found by a rescue team yet." in text:
+            return 0
+        m = re.search(r"(\d+)\s+(?:person has|people have)\s+been confirmed found by a rescue team",
+                      text.replace("\n", " "))
+        return int(m.group(1)) if m else None
+
+    def test_b2_rescued_narrative_equals_table(self, seeded):
+        import re
+        _, b2 = self._texts()
+        flat = b2.replace("\n", " ")
+        m = re.search(r"People rescued\s*(\d+)", flat)
+        assert m, "aggregate table row 'People rescued' not found on B2"
+        table_rescued = int(m.group(1))
+        narrative_rescued = self._narrative_rescued(b2)
+        assert narrative_rescued is not None, "rescue-team narrative line missing on B2"
+        assert narrative_rescued == table_rescued, (
+            f"CONTRADICTION: table says {table_rescued} rescued, "
+            f"narrative says {narrative_rescued} found by a rescue team"
+        )
+
+    def test_no_merged_found_wording(self, seeded):
+        b1, b2 = self._texts()
+        for name, text in (("B1", b1), ("B2", b2)):
+            assert "have now been found" not in text and "has now been found" not in text, (
+                f"{name} still merges rescue-team confirmations and self-reported "
+                "safe check-ins into a single 'found' number"
+            )
+
+    def test_self_reported_safe_is_its_own_line(self, seeded):
+        b1, b2 = self._texts()
+        for name, text in (("B1", b1), ("B2", b2)):
+            assert "told" in text and "us themselves that they are now safe." in text, (
+                f"{name} missing the separately-worded self-reported-safe figure"
+            )
+
+    def test_singular_plural_grammar(self, seeded):
+        b1, b2 = self._texts()
+        for name, text in (("B1", b1), ("B2", b2)):
+            flat = text.replace("\n", " ")
+            assert "1 people" not in flat, f"{name}: '1 people' grammar error"
+            assert "1 person have" not in flat, f"{name}: '1 person have' grammar error"
+            assert "1 person are" not in flat, f"{name}: '1 person are' grammar error"

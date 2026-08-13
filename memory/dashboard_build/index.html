@@ -2160,10 +2160,33 @@
 
   async function refresh() {
     try {
+      // Client-side gate first (defence in depth — the server enforces
+      // this too as of 2026-08-13): the feed carries short codes,
+      // severity, map links and operator emails.
+      if (!(window.qaAuth && window.qaAuth.jwt && window.qaAuth.jwt())) {
+        var lockedMsg0 = '<div class="qg-audit-empty">🔒 Sign in to view the activity feed.</div>';
+        if (lockedMsg0 !== body.__qgLastHtml) {
+          body.__qgLastHtml = lockedMsg0;
+          body.innerHTML = lockedMsg0;
+        }
+        meta.textContent = "";
+        return;
+      }
       var url = "/api/audit?limit=" + LIMIT;
       var res;
       if (window.qaApi) { res = await window.qaApi(url, {cache: "no-store"}); }
       else { res = await fetch(QUAKEGUARD_BACKEND + url, {cache: "no-store"}); }
+      if (res.status === 401 || res.status === 403) {
+        // Feed is operator/admin gated server-side (2026-08-13) — it
+        // carries short codes, severity, map links and operator emails.
+        var lockedMsg = '<div class="qg-audit-empty">🔒 Sign in to view the activity feed.</div>';
+        if (lockedMsg !== body.__qgLastHtml) {
+          body.__qgLastHtml = lockedMsg;
+          body.innerHTML = lockedMsg;
+        }
+        meta.textContent = "";
+        return;
+      }
       if (!res.ok) throw new Error("HTTP " + res.status);
       var data = await res.json();
       var events = (data && data.events) || [];
@@ -3057,6 +3080,58 @@ window.QuakeAngelRescue = (function () {
   Powered by <strong>Quake Angel</strong> · Emergency response platform
 </footer>
 
+<!-- ═════════════════════════════════════════════════════════════════════
+     Admin testing tools — deliberately at the BOTTOM of the page.
+     Preview Mode (incl. PANIC KILL + radius override) used to be injected
+     at the very top, above the map and triage list. During a live incident
+     an operator must see who needs help first — never test tooling — and
+     destructive controls must not sit where the eye lands and mis-clicks
+     happen (a stray Return keypress set the radius to 1951 km on
+     2026-08-13). The panel itself still renders into #qa-preview-panel;
+     we MOVE that node here at runtime so its script and event delegation
+     keep working untouched, and wrap it in a collapsed <details> so it is
+     reached deliberately.
+     ═════════════════════════════════════════════════════════════════════ -->
+<details id="qg-admintools" style="display:none; margin:16px 12px; padding:4px 16px 16px; background:var(--surface); border:1px dashed var(--border-strong, #999); border-radius:8px">
+  <summary style="cursor:pointer; font-size:14px; font-weight:700; color:var(--text); padding:10px 0; user-select:none">
+    🧪 Admin testing tools — Preview Mode &amp; radius override
+  </summary>
+  <div style="font-size:12px; color:var(--text-muted); margin:2px 0 10px">
+    Nothing in this section is needed during a real incident. Test devices, preview
+    broadcasts, the panic kill and the radius override all live here, away from live operations.
+  </div>
+  <div id="qg-admintools-slot"></div>
+</details>
+<script>
+(function () {
+  var panel = document.getElementById("qa-preview-panel");
+  var slot  = document.getElementById("qg-admintools-slot");
+  var wrap  = document.getElementById("qg-admintools");
+  if (!panel || !slot || !wrap) return;
+  slot.appendChild(panel);   // DOM move keeps the panel's listeners intact
+
+  // The preview panel gates itself on admin role by toggling its .show
+  // class — mirror that onto the wrapper so non-admins never even see
+  // the collapsed summary line.
+  function syncVisibility() {
+    wrap.style.display = panel.classList.contains("show") ? "" : "none";
+  }
+  new MutationObserver(syncVisibility).observe(panel, { attributes: true, attributeFilter: ["class"] });
+  syncVisibility();
+
+  // Guard: Return inside any preview-panel input must never trigger an
+  // action. Buttons stay keyboard-accessible (Space / Enter when the
+  // button itself is focused) — this only neutralises Enter while focus
+  // is in a text/number field.
+  panel.addEventListener("keydown", function (e) {
+    if (e.key === "Enter" && e.target && e.target.tagName === "INPUT") {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+  }, true);
+})();
+</script>
+
 <script>
 (function () {
   'use strict';
@@ -3350,7 +3425,8 @@ window.QuakeAngelRescue = (function () {
  * scroll-position jumps) and was deliberately NOT carried over.
  */
 (function () {
-  var DEVICES_ENDPOINT = "https://quake-alert-18.emergent.host/api/devices";
+  var API_ORIGIN = "https://quake-alert-18.emergent.host";
+  var SUMMARY_ENDPOINT = API_ORIGIN + "/api/public/summary";
   var MALTA_CENTER = [35.8997, 14.5146];
   var MALTA_ZOOM = 11;
 
@@ -3549,10 +3625,69 @@ window.QuakeAngelRescue = (function () {
     };
   }
 
+  // ── Signed-out visitors get aggregate counts ONLY ────────────────────
+  // GET /api/devices is now operator/admin gated server-side (it exposed
+  // short codes, triage severity, battery and precise coordinates to
+  // anyone with the URL — GDPR exposure found 2026-08-13). Anonymous
+  // view = count pills from /api/public/summary + a sign-in prompt.
+  var signedOutMode = null;   // null = unknown yet; true/false thereafter
+
+  function isSignedIn() {
+    return !!(window.qaAuth && window.qaAuth.jwt && window.qaAuth.jwt());
+  }
+
+  async function fetchSummary() {
+    var r = await fetch(SUMMARY_ENDPOINT, { cache: "no-store" });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    return await r.json();
+  }
+
+  function renderSignedOut(summary) {
+    if (summary && summary.counts) {
+      var c = summary.counts;
+      updateCountPills({
+        safe: c.safe || 0, trapped: c.trapped || 0, danger: c.not_responding || 0,
+        rescued: c.rescued || 0, waiting: c.unknown || 0,
+      });
+    }
+    markers.forEach(function (m) { map.removeLayer(m); });
+    markers.clear();
+    lastUsers = [];
+    if (signedOutMode !== true) {
+      signedOutMode = true;
+      lastSidebarSig = null;
+      selectedForRescue.clear();
+      updateBulkBar();
+      var container = document.getElementById("userlist");
+      container.innerHTML =
+        '<div style="padding:18px 14px; background:var(--surface, #fff); border:1px solid var(--border, #e0e0e0); border-radius:10px; font-size:13.5px; line-height:1.6; color:var(--text, #222)">' +
+        '🔒 <b>Sign in to see live triage detail.</b><br>' +
+        'The signed-out view shows overall numbers only — no names, codes, or locations.' +
+        '</div>';
+    }
+  }
+
   async function refresh() {
     try {
-      var res = await fetch(DEVICES_ENDPOINT);
+      if (!isSignedIn()) {
+        var summary = null;
+        try { summary = await fetchSummary(); } catch (_) {}   // summary may predate the backend deploy
+        renderSignedOut(summary);
+        return;
+      }
+      var res = await window.qaApi("/api/devices");
+      if (res.status === 401 || res.status === 403) {
+        var summary2 = null;
+        try { summary2 = await fetchSummary(); } catch (_) {}
+        renderSignedOut(summary2);
+        return;
+      }
+      if (!res.ok) throw new Error("HTTP " + res.status);
       var data = await res.json();
+      if (signedOutMode !== false) {
+        signedOutMode = false;
+        lastSidebarSig = null;   // force one full sidebar rebuild after sign-in
+      }
       var users = (data.devices || []).map(normalizeDevice);
       lastUsers = users;
       renderMap(users);

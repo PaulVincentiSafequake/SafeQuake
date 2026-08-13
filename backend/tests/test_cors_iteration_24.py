@@ -11,6 +11,15 @@ import requests
 
 BASE_URL = "http://localhost:8001"
 
+import os
+from dotenv import load_dotenv
+load_dotenv("/app/backend/.env")
+# GET /api/devices and /api/audit are operator/admin gated as of
+# 2026-08-13 — the actual-request CORS checks authenticate so they can
+# still assert on 200 responses. Preflights stay unauthenticated
+# (browsers never attach credentials to OPTIONS).
+ADMIN_TOKEN = os.environ.get("ADMIN_TRIGGER_PASSWORD")
+
 # Passing origins — must be echoed back in Access-Control-Allow-Origin
 PASSING_ORIGINS = [
     "https://malta.quakeangel.app",
@@ -48,7 +57,7 @@ def _preflight(endpoint: str, origin: str, method: str = "GET"):
 def _get_with_origin(endpoint: str, origin: str):
     return requests.get(
         f"{BASE_URL}{endpoint}",
-        headers={"Origin": origin},
+        headers={"Origin": origin, "X-Admin-Token": ADMIN_TOKEN},
         timeout=10,
     )
 

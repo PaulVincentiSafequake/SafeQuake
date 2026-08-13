@@ -21,7 +21,10 @@ import pytest
 import requests
 
 BASE_URL = "http://localhost:8001"
-ADMIN_TOKEN = "REDACTED_SEE_ENV"
+from dotenv import load_dotenv
+load_dotenv("/app/backend/.env")
+# GET /api/devices is operator/admin gated as of 2026-08-13.
+ADMIN_TOKEN = os.environ.get("ADMIN_TRIGGER_PASSWORD")
 
 
 # ----------------------- fixtures -----------------------
@@ -62,7 +65,8 @@ def _post_status(api, device_id, display_name="__OMIT__", status="safe"):
 
 
 def _get_device(api, device_id):
-    r = api.get(f"{BASE_URL}/api/devices?limit=5000")
+    r = api.get(f"{BASE_URL}/api/devices?limit=5000",
+                headers={"X-Admin-Token": ADMIN_TOKEN})
     assert r.status_code == 200
     devices = r.json()["devices"]
     for d in devices:
@@ -174,7 +178,7 @@ def test_audit_status_event_has_short_code_and_display_name(api, created_ids):
     device_id = f"qg-test-audit-{uuid.uuid4().hex[:6]}"
     created_ids.add(device_id)
     _post_status(api, device_id, display_name="Aiko", status="trapped")
-    r = api.get(f"{BASE_URL}/api/audit?kind=status&limit=200")
+    r = api.get(headers={"X-Admin-Token": ADMIN_TOKEN}, url=f"{BASE_URL}/api/audit?kind=status&limit=200")
     assert r.status_code == 200
     events = r.json()["events"]
     match = next((e for e in events if e.get("device_id") == device_id), None)
@@ -185,7 +189,7 @@ def test_audit_status_event_has_short_code_and_display_name(api, created_ids):
 
 def test_audit_all_status_rescued_reverted_have_fields(api):
     """Every status/rescued/rescue_reverted event must include the two keys."""
-    r = api.get(f"{BASE_URL}/api/audit?limit=200")
+    r = api.get(headers={"X-Admin-Token": ADMIN_TOKEN}, url=f"{BASE_URL}/api/audit?limit=200")
     assert r.status_code == 200
     events = r.json()["events"]
     for e in events:
@@ -209,7 +213,7 @@ def test_mark_rescued_carries_display_name(api, created_ids):
     )
     assert r.status_code == 200, f"mark-rescued failed: {r.status_code} {r.text}"
     # Verify audit
-    r = api.get(f"{BASE_URL}/api/audit?kind=rescued&limit=200")
+    r = api.get(headers={"X-Admin-Token": ADMIN_TOKEN}, url=f"{BASE_URL}/api/audit?kind=rescued&limit=200")
     assert r.status_code == 200
     events = r.json()["events"]
     match = next((e for e in events if e.get("device_id") == device_id), None)
@@ -240,7 +244,7 @@ def test_unmark_rescued_carries_display_name(api, created_ids):
         headers={"X-Admin-Token": ADMIN_TOKEN},
     )
     assert r.status_code == 200, f"unmark-rescued failed: {r.status_code} {r.text}"
-    r = api.get(f"{BASE_URL}/api/audit?kind=rescue_reverted&limit=200")
+    r = api.get(headers={"X-Admin-Token": ADMIN_TOKEN}, url=f"{BASE_URL}/api/audit?kind=rescue_reverted&limit=200")
     assert r.status_code == 200
     events = r.json()["events"]
     match = next((e for e in events if e.get("device_id") == device_id), None)
