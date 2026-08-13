@@ -19,6 +19,7 @@
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
 const { URL } = require("url");
 
 const PUBLIC_DIR = path.join(__dirname, "public");
@@ -77,7 +78,19 @@ function serveStatic(req, res, pathname) {
       return res.end("Not found");
     }
     const ext = path.extname(filePath);
-    res.writeHead(200, { "Content-Type": MIME[ext] || "application/octet-stream" });
+    // Cache fix (2026-08-12): the dashboard was served with NO caching
+    // headers, so browsers/CDN used heuristic caching and operators saw
+    // stale UI for hours after a deploy — twice a working feature looked
+    // broken during verification. `no-cache` forces revalidation on every
+    // load; the content-hash ETag makes that revalidation a cheap 304
+    // when nothing actually changed.
+    const etag = '"' + crypto.createHash("md5").update(content).digest("hex") + '"';
+    const cacheHeaders = { "Cache-Control": "no-cache, must-revalidate", ETag: etag };
+    if (req.headers["if-none-match"] === etag) {
+      res.writeHead(304, cacheHeaders);
+      return res.end();
+    }
+    res.writeHead(200, Object.assign({ "Content-Type": MIME[ext] || "application/octet-stream" }, cacheHeaders));
     res.end(content);
   });
 }

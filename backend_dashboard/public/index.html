@@ -2068,6 +2068,10 @@
     <span style="color:#ccc">|</span>
     <button class="qg-export-btn" id="qg-report-b1" title="Full-detail internal report with names, GPS, notes. NOT for public distribution.">B1 Operational</button>
     <button class="qg-export-btn" id="qg-report-b2" title="Aggregate counts only — safe to share externally.">B2 Public</button>
+    <label style="font-size:12px;color:#555;display:inline-flex;align-items:center;gap:4px;cursor:pointer"
+           title="Replaces operator emails with anonymous labels like operator-3 in the downloaded file (CSV, audit PDF, B1). The real mapping stays on the server for accountability.">
+      <input type="checkbox" id="qg-export-pseudo"> Hide operator emails
+    </label>
     <span class="qg-export-msg" id="qg-export-msg"></span>
   </div>
 
@@ -2163,8 +2167,19 @@
       if (!res.ok) throw new Error("HTTP " + res.status);
       var data = await res.json();
       var events = (data && data.events) || [];
-      if (events.length === 0) body.innerHTML = '<div class="qg-audit-empty">No activity yet.</div>';
-      else body.innerHTML = events.map(formatEvent).join("");
+      // In-place update: only touch the DOM when the content actually
+      // changed. Rewriting innerHTML on every poll collapsed the page
+      // height for a frame and threw the operator's scroll position back
+      // to the top every few seconds (bug 1.5, 2026-08-12).
+      var html = events.length === 0
+        ? '<div class="qg-audit-empty">No activity yet.</div>'
+        : events.map(formatEvent).join("");
+      if (html !== body.__qgLastHtml) {
+        var sx = window.scrollX, sy = window.scrollY;
+        body.__qgLastHtml = html;
+        body.innerHTML = html;
+        window.scrollTo(sx, sy);
+      }
       meta.textContent = events.length + " events · updated " + new Date().toLocaleTimeString();
     } catch (e) {
       meta.textContent = "load error: " + (e && e.message ? e.message : e);
@@ -2202,9 +2217,16 @@
   }
   async function doExport(kind /* "csv" | "pdf" */) {
     if (typeof window.qaApi !== "function") return;
+    // Confirmation friction on CONFIDENTIAL downloads — deliberate.
+    if (!confirm("This audit export is CONFIDENTIAL.\n\n" +
+        "It contains personal data: precise locations, device identifiers and operator notes.\n" +
+        "Only download it if you are authorised and will store it securely.\n\n" +
+        "Download the " + kind.toUpperCase() + "?")) return;
     var hours = parseInt(exportRange.value, 10) || 168;
     var since = new Date(Date.now() - hours * 3600 * 1000).toISOString();
     var path = "/api/admin/audit-log/export." + kind + "?since=" + encodeURIComponent(since);
+    var pseudoCb = document.getElementById("qg-export-pseudo");
+    if (pseudoCb && pseudoCb.checked) path += "&pseudonymise=true";
     var btn = kind === "csv" ? exportCsvBtn : exportPdfBtn;
     btn.disabled = true;
     showExportMsg("", "Preparing…");
@@ -2233,9 +2255,21 @@
   }
   async function doCasualtyReport(kind /* "operational" | "public" */) {
     if (typeof window.qaApi !== "function") return;
+    // B1 carries names + GPS — same confirmation friction as the audit
+    // exports. B2 is aggregate-only and safe to share, so no dialog.
+    if (kind === "operational" && !confirm("The B1 Operational report is CONFIDENTIAL.\n\n" +
+        "It contains names, exact GPS positions and operator notes.\n" +
+        "Do NOT share it with press, families or anyone outside authorised emergency personnel.\n" +
+        "For anything public, use the B2 Public report instead.\n\n" +
+        "Download B1?")) return;
     var hours = parseInt(exportRange.value, 10) || 168;
     var since = new Date(Date.now() - hours * 3600 * 1000).toISOString();
     var path = "/api/admin/casualty-report/" + kind + ".pdf" + "?since=" + encodeURIComponent(since);
+    // Pseudonymisation applies to B1 only — B2 carries no operator identity.
+    if (kind === "operational") {
+      var pseudoCb2 = document.getElementById("qg-export-pseudo");
+      if (pseudoCb2 && pseudoCb2.checked) path += "&pseudonymise=true";
+    }
     var btn = kind === "operational" ? reportB1Btn : reportB2Btn;
     btn.disabled = true;
     showExportMsg("", "Preparing " + (kind === "operational" ? "B1 Operational" : "B2 Public") + "…");
@@ -2555,6 +2589,7 @@
     </div>
     <div class="qg-rescue-modal-authed" style="display:none">🔓 Signed in — no password needed.</div>
     <textarea placeholder="Optional notes (location found, condition, etc.)" style="display:none"></textarea>
+    <div id="qg-rescue-notes-hint" style="display:none">Never type passwords or keys here. Notes go into the audit log and appear in exports.</div>
     <div class="qg-rescue-modal-btns">
       <button class="qg-rescue-modal-btn cancel" type="button">Cancel</button>
       <button class="qg-rescue-modal-btn primary" type="button">Confirm</button>
@@ -2616,6 +2651,36 @@ window.QuakeAngelRescue = (function () {
   var authedEl = modal.querySelector(".qg-rescue-modal-authed");
   var okBtn    = modal.querySelector(".qg-rescue-modal-btn.primary");
   var cancelBtn = modal.querySelector(".qg-rescue-modal-btn.cancel");
+  var notesHint = document.getElementById("qg-rescue-notes-hint");
+
+  // Client-side credential warning on the notes field. The server also
+  // rejects credential-shaped notes (422) — this is the friendly early
+  // warning; the server check is the real gate. An admin password leaked
+  // into this exact field once before.
+  function notesLookRisky(t) {
+    if (!t) return false;
+    if (/eyJ[A-Za-z0-9_-]{10,}\./.test(t)) return true;                          // JWT
+    if (/AKIA[0-9A-Z]{16}/.test(t)) return true;                                 // AWS key
+    if (/-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(t)) return true;               // PEM
+    if (/\b(?:sk|pk|rk|ghp|gho|xox[abps])[_-][A-Za-z0-9_-]{16,}\b/.test(t)) return true;
+    var m = t.match(/\b(password|passwd|pwd|passphrase|api[ _-]?key|secret|token|bearer|credentials?)\b\s*(?:is|was|[:=])?\s*(\S{6,})/i);
+    if (m) {
+      var tail = m[2] || "";
+      if (/[0-9!@#$%^&*_\-+=/\\]/.test(tail)) return true;
+      if (tail !== tail.toLowerCase() && tail !== tail.toUpperCase() && tail.length >= 8) return true;
+    }
+    return false;
+  }
+  textEl.addEventListener("input", function () {
+    if (!notesHint || notesHint.style.display === "none") return;
+    if (notesLookRisky(textEl.value)) {
+      notesHint.classList.add("warn");
+      notesHint.textContent = "This looks like a password or key. It will be REJECTED when you confirm — remove it and use plain words.";
+    } else {
+      notesHint.classList.remove("warn");
+      notesHint.textContent = "Never type passwords or keys here. Notes go into the audit log and appear in exports.";
+    }
+  });
 
   function showPasswordField(focus) {
     pwdWrap.style.display = "block";
@@ -2652,6 +2717,11 @@ window.QuakeAngelRescue = (function () {
     modal.classList.remove("undo");
     textEl.style.display = "none";
     textEl.value = "";
+    if (notesHint) {
+      notesHint.style.display = "none";
+      notesHint.classList.remove("warn");
+      notesHint.textContent = "Never type passwords or keys here. Notes go into the audit log and appear in exports.";
+    }
     clearModalError();
     resetPasswordArea();
   }
@@ -2677,6 +2747,10 @@ window.QuakeAngelRescue = (function () {
     clearModalError();
     textEl.style.display = opts.showNotes ? "block" : "none";
     textEl.value = "";
+    if (notesHint) {
+      notesHint.style.display = opts.showNotes ? "block" : "none";
+      notesHint.classList.remove("warn");
+    }
     okBtn.textContent = opts.ctaLabel;
     modal.classList.toggle("undo", !!opts.undo);
 
@@ -2725,7 +2799,14 @@ window.QuakeAngelRescue = (function () {
       throw err403;
     }
     if (!res.ok) {
-      var err2 = new Error("HTTP " + res.status);
+      // Surface the server's human-readable detail (e.g. the credential
+      // rejection message from the notes guard) instead of a bare code.
+      var detail = "HTTP " + res.status;
+      try {
+        var j = await res.json();
+        if (j && j.detail) detail = String(j.detail);
+      } catch (_) {}
+      var err2 = new Error(detail);
       err2.status = res.status;
       throw err2;
     }
@@ -2769,6 +2850,9 @@ window.QuakeAngelRescue = (function () {
             showModalError("Your account isn't allowed to mark people as rescued.");
           } else if (e.status === 404) {
             showModalError("Device not found: " + deviceId + ". This case may have already been handled elsewhere.");
+          } else if (e.status === 422) {
+            // Credential guard — show the server's plain-language message.
+            showModalError(e.message);
           } else {
             showModalError("Failed: " + e.message + " — click Confirm to try again.");
           }
@@ -3214,6 +3298,679 @@ window.QuakeAngelRescue = (function () {
 </script>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-<script src="dashboard-v3.js"></script>
+
+<style>
+  /* ── Map markers: shape + colour + label (accessible, matches qg-sev-chip) ── */
+  .qg-mrk-wrap { background: none; border: none; }
+  .qg-mrk { display: flex; flex-direction: column; align-items: center; }
+  .qg-mrk svg { display: block; filter: drop-shadow(0 1px 2px rgba(0,0,0,0.45)); }
+  .qg-mrk .qg-mrk-tag {
+    font: 700 9px/1.3 system-ui, sans-serif; color: #fff; background: #C21818;
+    border-radius: 3px; padding: 0 3px; margin-top: 1px; white-space: nowrap;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.4);
+  }
+  .qg-mrk .qg-mrk-tag.rescued { background: #1F8A3A; }
+  /* ── Recentre control ── */
+  .qg-recentre-btn {
+    background: #fff; border: 2px solid rgba(0,0,0,0.25); border-radius: 6px;
+    padding: 6px 10px; font: 700 12px/1.2 system-ui, sans-serif; color: #1c2b36;
+    cursor: pointer; box-shadow: 0 1px 5px rgba(0,0,0,0.2);
+  }
+  .qg-recentre-btn:hover { background: #f0f2f6; }
+  /* ── "Use Ctrl+scroll to zoom" hint overlay ── */
+  #qg-map-scroll-hint {
+    position: absolute; inset: 0; z-index: 1200; display: flex;
+    align-items: center; justify-content: center; pointer-events: none;
+    background: rgba(20,28,36,0.45); opacity: 0; transition: opacity 0.25s ease;
+  }
+  #qg-map-scroll-hint.show { opacity: 1; }
+  #qg-map-scroll-hint span {
+    color: #fff; font: 600 15px/1.4 system-ui, sans-serif;
+    background: rgba(0,0,0,0.55); padding: 10px 18px; border-radius: 8px;
+  }
+  /* ── Rescue-notes credential hint ── */
+  #qg-rescue-notes-hint {
+    font-size: 11.5px; color: #7a5d10; background: #fff8e1;
+    border: 1px solid #e6d28a; border-radius: 6px; padding: 6px 9px;
+    margin-top: 6px; text-align: left; line-height: 1.4;
+  }
+  #qg-rescue-notes-hint.warn {
+    color: #fff; background: #b0141a; border-color: #7d0e13; font-weight: 700;
+  }
+</style>
+
+<script>
+/**
+ * Dashboard map + triage logic. Formerly the external dashboard-v3.js —
+ * folded inline 2026-08-12 so (a) there is exactly ONE file to deploy and
+ * cache-bust, and (b) the markers can share the accessible shape+label
+ * design system defined in this page. The separate audit-log widget that
+ * lived in dashboard-v3.js was a DUPLICATE of the richer one above (both
+ * wrote into #qg-audit-body on independent timers — one cause of the
+ * scroll-position jumps) and was deliberately NOT carried over.
+ */
+(function () {
+  var DEVICES_ENDPOINT = "https://quake-alert-18.emergent.host/api/devices";
+  var MALTA_CENTER = [35.8997, 14.5146];
+  var MALTA_ZOOM = 11;
+
+  var mapWrap = document.getElementById("map-wrap");
+  var mapEl = document.getElementById("map");
+
+  // scrollWheelZoom OFF: a plain wheel over the map must scroll the PAGE,
+  // never zoom. Paul got trapped zooming out to world view. Zoom is
+  // Ctrl/Cmd+scroll (handled below), pinch, double-click or the +/- control.
+  var map = L.map("map", { scrollWheelZoom: false }).setView([35.8997, 14.5146], 13);
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    attribution: "&copy; OpenStreetMap contributors",
+  }).addTo(map);
+  window.__qgMap = map;
+
+  // ── Fix 1.3: map only rendered tiles in a top strip ──────────────────
+  // Leaflet measures its container once at construction; if layout hasn't
+  // settled (fonts, flexbox, auth-gated panels appearing) it draws tiles
+  // for the wrong size. invalidateSize() re-measures — call it after
+  // load, after late layout shifts, and whenever the container resizes.
+  function fixMapSize() { try { map.invalidateSize(false); } catch (_) {} }
+  window.addEventListener("load", fixMapSize);
+  setTimeout(fixMapSize, 250);
+  setTimeout(fixMapSize, 1000);
+  setTimeout(fixMapSize, 2500);
+  if (window.ResizeObserver && mapWrap) {
+    new ResizeObserver(function () { fixMapSize(); }).observe(mapWrap);
+  }
+  document.addEventListener("visibilitychange", function () {
+    if (!document.hidden) setTimeout(fixMapSize, 100);
+  });
+
+  // ── Fix 1.4: Ctrl/Cmd + scroll zooms; plain scroll shows a hint ──────
+  var hint = document.createElement("div");
+  hint.id = "qg-map-scroll-hint";
+  hint.innerHTML = "<span>Use " + (navigator.platform && navigator.platform.indexOf("Mac") !== -1 ? "\u2318 Cmd" : "Ctrl") + " + scroll to zoom the map</span>";
+  if (mapWrap) mapWrap.appendChild(hint);
+  var hintTimer = null;
+  mapEl.addEventListener("wheel", function (e) {
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      hint.classList.remove("show");
+      var dir = e.deltaY < 0 ? 1 : -1;
+      map.setZoomAround(map.mouseEventToLatLng(e), map.getZoom() + dir);
+    } else {
+      // Let the page scroll; briefly explain how to zoom.
+      hint.classList.add("show");
+      if (hintTimer) clearTimeout(hintTimer);
+      hintTimer = setTimeout(function () { hint.classList.remove("show"); }, 1100);
+    }
+  }, { passive: false });
+
+  // "Recentre on Malta" control — visible escape hatch after any mis-zoom.
+  var RecentreControl = L.Control.extend({
+    options: { position: "topright" },
+    onAdd: function () {
+      var btn = L.DomUtil.create("button", "qg-recentre-btn");
+      btn.type = "button";
+      btn.textContent = "\u2302 Recentre on Malta";
+      btn.title = "Reset the map view to Malta";
+      L.DomEvent.disableClickPropagation(btn);
+      btn.addEventListener("click", function () { map.setView(MALTA_CENTER, MALTA_ZOOM); });
+      return btn;
+    },
+  });
+  map.addControl(new RecentreControl());
+
+  var markers = new Map();
+  var lastUsers = [];
+  var currentFilter = "all"; // "all" | "red" | "yellow" | "green"
+  var selectedForRescue = new Set(); // device IDs checked for group rescue
+
+  function statusLabel(status, severity) {
+    if (status === "trapped") {
+      if (severity === "red") return "TRAPPED — IMMEDIATE";
+      if (severity === "yellow") return "Trapped — Serious/Stable";
+      if (severity === "green") return "Trapped — Minor";
+      return "Trapped";
+    }
+    if (status === "rescued") return "✅ Rescued (confirmed)";
+    if (status === "safe") return "Safe";
+    if (status === "not_responding") return "Not responding";
+    return "Unknown";
+  }
+
+  function statusClass(status, severity) {
+    if (status === "trapped") {
+      if (severity === "red") return "trapped-red";
+      if (severity === "yellow") return "trapped-yellow";
+      return "trapped-green";
+    }
+    if (status === "rescued") return "rescued";
+    if (status === "safe") return "safe";
+    if (status === "not_responding") return "danger";
+    return "waiting";
+  }
+
+  function isUrgent(status, severity) {
+    return status === "trapped" && severity === "red";
+  }
+
+  function mobilityLabel(m) {
+    if (m === "mobile") return "🟢 can move";
+    if (m === "trapped") return "🔴 trapped/pinned";
+    return "";
+  }
+
+  // ── Accessible markers: shape + colour + label (fix for legacy
+  // colour-only circles), sized by zoom level (fix 3.4). Mirrors the
+  // qgSeverityChip mapping: circle=IMMEDIATE, triangle=SERIOUS,
+  // square=MINOR. Black stroke keeps shapes legible in B&W / colour-blind.
+  function markerVisual(u) {
+    if (u.status === "trapped") {
+      if (u.severity === "red") return { kind: "immediate", color: "#C21818", shape: "circle", tag: "SOS" };
+      if (u.severity === "yellow") return { kind: "serious", color: "#EA9500", shape: "triangle", tag: null };
+      return { kind: "minor", color: "#2E7D32", shape: "square", tag: null };
+    }
+    if (u.status === "rescued") return { kind: "rescued", color: "#1F8A3A", shape: "check", tag: "\u2713 found" };
+    if (u.status === "safe") return { kind: "safe", color: "#2e7d32", shape: "dot", tag: null };
+    if (u.status === "not_responding") return { kind: "nr", color: "#757575", shape: "diamond", tag: null };
+    return { kind: "unknown", color: "#455a64", shape: "dashed", tag: null };
+  }
+
+  function svgShape(shape, color, s) {
+    var h = s / 2;
+    if (shape === "circle")
+      return '<svg width="' + s + '" height="' + s + '"><circle cx="' + h + '" cy="' + h + '" r="' + (h - 1.5) + '" fill="' + color + '" stroke="#000" stroke-width="1.5"/></svg>';
+    if (shape === "triangle")
+      return '<svg width="' + s + '" height="' + s + '"><polygon points="' + h + ',1.5 ' + (s - 1.5) + ',' + (s - 1.5) + ' 1.5,' + (s - 1.5) + '" fill="' + color + '" stroke="#000" stroke-width="1.5" stroke-linejoin="round"/></svg>';
+    if (shape === "square")
+      return '<svg width="' + s + '" height="' + s + '"><rect x="1.5" y="1.5" width="' + (s - 3) + '" height="' + (s - 3) + '" fill="' + color + '" stroke="#000" stroke-width="1.5"/></svg>';
+    if (shape === "diamond")
+      return '<svg width="' + s + '" height="' + s + '"><polygon points="' + h + ',1.5 ' + (s - 1.5) + ',' + h + ' ' + h + ',' + (s - 1.5) + ' 1.5,' + h + '" fill="' + color + '" stroke="#000" stroke-width="1.5"/></svg>';
+    if (shape === "check")
+      return '<svg width="' + s + '" height="' + s + '"><circle cx="' + h + '" cy="' + h + '" r="' + (h - 1.5) + '" fill="' + color + '" stroke="#000" stroke-width="1.5"/><path d="M' + (s * 0.28) + ' ' + (s * 0.52) + ' l' + (s * 0.15) + ' ' + (s * 0.17) + ' l' + (s * 0.3) + ' ' + (-s * 0.33) + '" stroke="#fff" stroke-width="' + Math.max(2, s * 0.12) + '" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+    if (shape === "dot")
+      return '<svg width="' + s + '" height="' + s + '"><circle cx="' + h + '" cy="' + h + '" r="' + (h * 0.55) + '" fill="' + color + '" stroke="#000" stroke-width="1"/></svg>';
+    return '<svg width="' + s + '" height="' + s + '"><rect x="2" y="2" width="' + (s - 4) + '" height="' + (s - 4) + '" fill="none" stroke="' + color + '" stroke-width="2" stroke-dasharray="3,2"/></svg>';
+  }
+
+  function iconSizeForZoom(z) {
+    // Scales down at wide zoom so a single pin no longer covers half of
+    // Malta at world view, up at street zoom for tap targets.
+    return Math.round(Math.max(10, Math.min(26, 4 + z * 1.5)));
+  }
+
+  function makeIcon(u) {
+    var v = markerVisual(u);
+    var s = iconSizeForZoom(map.getZoom());
+    if (v.kind === "immediate") s = Math.round(s * 1.3);
+    var tagH = v.tag ? 13 : 0;
+    var tag = v.tag
+      ? '<span class="qg-mrk-tag' + (v.kind === "rescued" ? " rescued" : "") + '">' + v.tag + "</span>"
+      : "";
+    return L.divIcon({
+      className: "qg-mrk-wrap",
+      html: '<div class="qg-mrk">' + svgShape(v.shape, v.color, s) + tag + "</div>",
+      iconSize: [Math.max(s, 46), s + tagH],
+      iconAnchor: [Math.max(s, 46) / 2, s / 2],
+    });
+  }
+
+  function iconSignature(u) {
+    var v = markerVisual(u);
+    return v.kind + "|" + iconSizeForZoom(map.getZoom());
+  }
+
+  map.on("zoomend", function () {
+    markers.forEach(function (m) {
+      if (!m._qgDevice) return;
+      var sig = iconSignature(m._qgDevice);
+      if (m._qgIconSig !== sig) {
+        m._qgIconSig = sig;
+        m.setIcon(makeIcon(m._qgDevice));
+      }
+    });
+  });
+
+  function normalizeDevice(d) {
+    return {
+      deviceId: d.device_id,
+      device_id: d.device_id, // QuakeAngelRescue widget expects this exact key
+      status: d.status,
+      severity: d.severity,
+      mobility: d.mobility,
+      latitude: d.latitude,
+      longitude: d.longitude,
+      batteryPercent: d.battery_pct,
+      lastUpdated: d.updated_at,
+      platform: d.platform,
+      rescued_at: d.rescued_at,
+      rescued_by: d.rescued_by,
+      pre_rescue_status: d.pre_rescue_status,
+      pre_rescue_severity: d.pre_rescue_severity,
+      pre_rescue_mobility: d.pre_rescue_mobility,
+    };
+  }
+
+  async function refresh() {
+    try {
+      var res = await fetch(DEVICES_ENDPOINT);
+      var data = await res.json();
+      var users = (data.devices || []).map(normalizeDevice);
+      lastUsers = users;
+      renderMap(users);
+      applyFilterVisibility();
+      renderSidebar(users);
+    } catch (e) {
+      console.error("Failed to refresh dashboard:", e);
+    }
+  }
+
+  function renderMap(users) {
+    var seen = new Set();
+    users.forEach(function (u) {
+      if (u.latitude == null || u.longitude == null) return;
+      seen.add(u.deviceId);
+
+      if (markers.has(u.deviceId)) {
+        var m = markers.get(u.deviceId);
+        m._qgDevice = u;
+        m.setLatLng([u.latitude, u.longitude]);
+        var sig = iconSignature(u);
+        if (m._qgIconSig !== sig) {
+          m._qgIconSig = sig;
+          m.setIcon(makeIcon(u));
+        }
+        m.setPopupContent(popupHtml(u));
+        // If this popup happens to be open right now, re-wire its button too.
+        if (m.isPopupOpen && m.isPopupOpen()) {
+          var el = m.getPopup() && m.getPopup().getElement();
+          if (el) wireRescueButtons(el, m._qgDevice);
+        }
+      } else {
+        var marker = L.marker([u.latitude, u.longitude], {
+          icon: makeIcon(u),
+          keyboard: true,
+          alt: statusLabel(u.status, u.severity),
+        }).addTo(map);
+        marker._qgDevice = u;
+        marker._qgIconSig = iconSignature(u);
+        marker.bindPopup(popupHtml(u));
+        marker.on("popupopen", function () {
+          var el = marker.getPopup() && marker.getPopup().getElement();
+          if (el) wireRescueButtons(el, marker._qgDevice);
+        });
+        markers.set(u.deviceId, marker);
+      }
+    });
+
+    // Remove markers for devices no longer in the list
+    Array.from(markers.keys()).forEach(function (id) {
+      if (!seen.has(id)) {
+        map.removeLayer(markers.get(id));
+        markers.delete(id);
+      }
+    });
+  }
+
+  function matchesFilter(u) {
+    if (currentFilter === "all") return true;
+    if (u.status !== "trapped") return false;
+    var sev = u.severity || "green";
+    return sev === currentFilter;
+  }
+
+  function applyFilterVisibility() {
+    lastUsers.forEach(function (u) {
+      var m = markers.get(u.deviceId);
+      if (!m) return;
+      var show = matchesFilter(u);
+      if (show && !map.hasLayer(m)) map.addLayer(m);
+      if (!show && map.hasLayer(m)) map.removeLayer(m);
+    });
+  }
+
+  function setFilter(f) {
+    currentFilter = f;
+    applyFilterVisibility();
+    document.querySelectorAll(".map-filter-btn").forEach(function (btn) {
+      btn.classList.toggle("active", btn.dataset.filter === currentFilter);
+    });
+  }
+  window.setFilter = setFilter;
+
+  function popupHtml(u) {
+    var mob = mobilityLabel(u.mobility);
+    var showRescue = u.status === "trapped" || u.status === "rescued";
+    var rescueSlot = showRescue
+      ? '<div class="qg-rescue-slot" data-device-id="' + u.deviceId + '"></div>'
+      : "";
+    var sevChip = (u.status === "trapped" && window.qgSeverityChip)
+      ? "<br>" + window.qgSeverityChip(u.severity)
+      : "";
+    return "<b>" + u.deviceId + "</b><br>" + statusLabel(u.status, u.severity) + sevChip +
+      (mob ? "<br>" + mob : "") + "<br>Battery: " + (u.batteryPercent != null ? u.batteryPercent : "?") + "%" + rescueSlot;
+  }
+
+  function itemHtml(u) {
+    var mob = mobilityLabel(u.mobility);
+    var showRescue = u.status === "trapped" || u.status === "rescued";
+    var rescueSlot = showRescue
+      ? '<div class="qg-rescue-slot" data-device-id="' + u.deviceId + '"></div>'
+      : "";
+    var bulkCheck = u.status === "trapped"
+      ? '<label class="qg-bulk-check"><input type="checkbox" class="qg-bulk-checkbox" data-device-id="' + u.deviceId + '"> Select for group rescue</label>'
+      : "";
+    return bulkCheck +
+      '<div class="id">' + u.deviceId +
+      (isUrgent(u.status, u.severity) ? '<span class="badge sos">SOS</span>' : "") +
+      (u.status === "rescued" ? '<span class="badge rescued-badge">RESCUED</span>' : "") +
+      "</div>" +
+      '<div class="meta">' + statusLabel(u.status, u.severity) + (mob ? " · " + mob : "") +
+      " · Battery " + (u.batteryPercent != null ? u.batteryPercent : "?") + "%</div>" +
+      '<div class="meta">Updated: ' + (u.lastUpdated ? new Date(u.lastUpdated).toLocaleTimeString() : "—") + "</div>" +
+      rescueSlot;
+  }
+
+  function wireRescueButtons(root, device) {
+    if (!window.QuakeAngelRescue || !root) return;
+    var slots = root.querySelectorAll ? root.querySelectorAll(".qg-rescue-slot") : [];
+    slots.forEach(function (slot) {
+      window.QuakeAngelRescue.renderButton(slot, device);
+    });
+  }
+
+  function updateBulkBar() {
+    var bar = document.getElementById("qg-bulk-bar");
+    var countEl = document.getElementById("qg-bulk-count");
+    if (!bar || !countEl) return;
+    var n = selectedForRescue.size;
+    countEl.textContent = n + " selected";
+    bar.classList.toggle("show", n > 0);
+  }
+
+  function wireBulkCheckbox(root, u) {
+    if (!root) return;
+    var cb = root.querySelector ? root.querySelector(".qg-bulk-checkbox") : null;
+    if (!cb) return;
+    cb.checked = selectedForRescue.has(u.deviceId);
+    cb.addEventListener("change", function () {
+      if (cb.checked) selectedForRescue.add(u.deviceId);
+      else selectedForRescue.delete(u.deviceId);
+      updateBulkBar();
+    });
+  }
+
+  function initBulkBar() {
+    var markBtn = document.getElementById("qg-bulk-mark-btn");
+    var clearBtn = document.getElementById("qg-bulk-clear-btn");
+    if (markBtn) {
+      markBtn.addEventListener("click", function () {
+        if (!window.QuakeAngelRescue || selectedForRescue.size === 0) return;
+        window.QuakeAngelRescue.markBulk(Array.from(selectedForRescue), {
+          onDone: function () {
+            selectedForRescue.clear();
+            updateBulkBar();
+          },
+        });
+      });
+    }
+    if (clearBtn) {
+      clearBtn.addEventListener("click", function () {
+        selectedForRescue.clear();
+        updateBulkBar();
+        document.querySelectorAll(".qg-bulk-checkbox").forEach(function (cb) { cb.checked = false; });
+      });
+    }
+  }
+
+  function buildGroup(title, cls, items, alwaysOpen, openState) {
+    var details = document.createElement("details");
+    details.className = "triage-group " + cls;
+    // Preserve the operator's manual open/closed choice across re-renders.
+    details.open = (openState && cls in openState)
+      ? openState[cls]
+      : (alwaysOpen || items.length > 0);
+
+    var summary = document.createElement("summary");
+    summary.innerHTML = "<span>" + title + '</span><span class="group-count">' + items.length + "</span>";
+    details.appendChild(summary);
+
+    var ul = document.createElement("ul");
+    ul.className = "userlist";
+
+    if (items.length === 0) {
+      var li0 = document.createElement("li");
+      li0.className = "empty";
+      li0.textContent = "None";
+      ul.appendChild(li0);
+    } else {
+      items.forEach(function (u) {
+        var li = document.createElement("li");
+        li.className = statusClass(u.status, u.severity);
+        li.innerHTML = itemHtml(u);
+        ul.appendChild(li);
+        wireRescueButtons(li, u);
+        wireBulkCheckbox(li, u);
+      });
+    }
+
+    details.appendChild(ul);
+    return details;
+  }
+
+  // ── Fix 1.5: never reset scroll position on the 4-second poll ────────
+  // The old renderSidebar wiped and rebuilt the DOM on EVERY tick; the
+  // momentary height collapse clamped the page scroll back to the top.
+  // Now: (a) skip the rebuild entirely when nothing changed — the common
+  // case; (b) when it did change, preserve page scroll, group open/closed
+  // state, and keyboard focus across the rebuild.
+  var lastSidebarSig = null;
+
+  function sidebarSignature(users) {
+    return JSON.stringify(users.map(function (u) {
+      return [u.deviceId, u.status, u.severity, u.mobility, u.batteryPercent, u.lastUpdated];
+    })) + "|" + Array.from(selectedForRescue).sort().join(",");
+  }
+
+  function renderSidebar(users) {
+    var container = document.getElementById("userlist");
+
+    // Drop any selections for devices that are no longer trapped so the
+    // bulk bar count stays honest.
+    var trappedIds = new Set(users.filter(function (u) { return u.status === "trapped"; }).map(function (u) { return u.deviceId; }));
+    Array.from(selectedForRescue).forEach(function (id) {
+      if (!trappedIds.has(id)) selectedForRescue.delete(id);
+    });
+
+    var counts = computeCounts(users);
+    updateCountPills(counts);
+    updateBulkBar();
+
+    var sig = sidebarSignature(users);
+    if (sig === lastSidebarSig) return; // nothing changed — leave the DOM alone
+    lastSidebarSig = sig;
+
+    var sx = window.scrollX, sy = window.scrollY;
+    var activeId = document.activeElement && document.activeElement.dataset
+      ? document.activeElement.dataset.deviceId : null;
+    var openState = {};
+    container.querySelectorAll("details").forEach(function (d) {
+      openState[d.className.replace("triage-group ", "")] = d.open;
+    });
+
+    var byRecency = function (a, b) { return new Date(b.lastUpdated || 0) - new Date(a.lastUpdated || 0); };
+    var red = users.filter(function (u) { return u.status === "trapped" && u.severity === "red"; }).sort(byRecency);
+    var yellow = users.filter(function (u) { return u.status === "trapped" && u.severity === "yellow"; }).sort(byRecency);
+    var green = users.filter(function (u) { return u.status === "trapped" && (u.severity === "green" || !u.severity); }).sort(byRecency);
+    var rescued = users.filter(function (u) { return u.status === "rescued"; }).sort(byRecency);
+    var other = users.filter(function (u) { return u.status !== "trapped" && u.status !== "rescued"; }).sort(byRecency);
+
+    container.innerHTML = "";
+    container.appendChild(buildGroup("🔴 IMMEDIATE — seriously injured / can't move", "group-red", red, true, openState));
+    container.appendChild(buildGroup("🟡 SERIOUS — STABLE — hurt but stable", "group-yellow", yellow, true, openState));
+    container.appendChild(buildGroup("🟢 MINOR — walking wounded", "group-green", green, true, openState));
+    container.appendChild(buildGroup("✅ Rescued — confirmed found & safe", "group-rescued", rescued, false, openState));
+    container.appendChild(buildGroup("⚪ Other — Safe / Not Responding / Unknown", "group-other", other, false, openState));
+
+    // Restore focus (checkboxes carry data-device-id) and scroll position.
+    if (activeId) {
+      var el = container.querySelector('.qg-bulk-checkbox[data-device-id="' + activeId + '"]');
+      if (el) el.focus({ preventScroll: true });
+    }
+    window.scrollTo(sx, sy);
+  }
+
+  function computeCounts(users) {
+    var safe = 0, trapped = 0, danger = 0, rescued = 0;
+    users.forEach(function (u) {
+      if (u.status === "safe") safe += 1;
+      else if (u.status === "trapped") trapped += 1;
+      else if (u.status === "not_responding") danger += 1;
+      else if (u.status === "rescued") rescued += 1;
+    });
+    return {
+      safe: safe, trapped: trapped, danger: danger, rescued: rescued,
+      waiting: users.length - safe - trapped - danger - rescued,
+    };
+  }
+
+  function updateCountPills(c) {
+    var set = function (id, v) {
+      var el = document.getElementById(id);
+      if (el && el.textContent !== String(v)) el.textContent = v;
+    };
+    set("count-safe", c.safe);
+    set("count-trapped", c.trapped);
+    set("count-waiting", c.waiting);
+    set("count-danger", c.danger);
+    set("count-rescued", c.rescued);
+  }
+
+  initBulkBar();
+  refresh();
+  setInterval(refresh, 4000);
+})();
+
+/* ── Trigger button: confirm + broadcast, with prominent feedback ── */
+(function initQuakeGuardTriggerButton() {
+  var btn        = document.getElementById("qg-trigger-btn");
+  var banner     = document.getElementById("qg-banner");
+  var bannerText = banner && banner.querySelector(".qg-banner-text");
+  var bannerIcon = banner && banner.querySelector(".qg-banner-icon");
+  var bannerX    = banner && banner.querySelector(".qg-banner-close");
+  var modal        = document.getElementById("qg-modal-backdrop");
+  var modalOk      = modal && modal.querySelector(".qg-modal-ok");
+  var modalCancel  = modal && modal.querySelector(".qg-modal-cancel");
+  if (!btn || !banner || !modal) {
+    // Not on a page with the trigger UI — nothing to wire up.
+    return;
+  }
+
+  var bannerTimer = null;
+  function showBanner(kind, text, autoDismissMs) {
+    if (bannerTimer) { clearTimeout(bannerTimer); bannerTimer = null; }
+    banner.classList.remove("ok", "err");
+    banner.classList.add(kind);
+    bannerIcon.textContent = kind === "ok" ? "✓" : "!";
+    bannerText.textContent = text;
+    void banner.offsetWidth;
+    banner.classList.add("show");
+    if (autoDismissMs && autoDismissMs > 0) {
+      bannerTimer = setTimeout(hideBanner, autoDismissMs);
+    }
+  }
+  function hideBanner() {
+    banner.classList.remove("show");
+    if (bannerTimer) { clearTimeout(bannerTimer); bannerTimer = null; }
+  }
+  bannerX.addEventListener("click", hideBanner);
+
+  function hideModal() { modal.classList.remove("show"); }
+
+  // The legacy "wrong password" modal is retained only as a fallback for
+  // unexpected auth states. With Google sign-in there is no password to
+  // retype — a 401 means the session expired, so we send them back to
+  // sign-in rather than re-prompting for a secret that no longer exists.
+  modalOk.addEventListener("click", function () {
+    hideModal();
+    if (window.qaAuth) window.qaAuth.signIn();
+  });
+  modalCancel && modalCancel.addEventListener("click", function () {
+    hideModal();
+    showBanner("err", "Cancelled — no alert sent.", 4000);
+  });
+  modal.addEventListener("click", function (e) {
+    if (e.target === modal) hideModal();
+  });
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape" && modal.classList.contains("show")) hideModal();
+  });
+
+  async function sendTriggerAlert() {
+    if (!window.qaApi) {
+      showBanner("err", "Auth not loaded — reload the page.", 8000);
+      return;
+    }
+    if (!window.qaAuth || !window.qaAuth.jwt()) {
+      showBanner("err", "Please sign in before triggering an alert.", 6000);
+      if (window.qaAuth) window.qaAuth.signIn();
+      return;
+    }
+
+    btn.disabled = true;
+    showBanner("ok", "Broadcasting alert…", 0);
+
+    try {
+      var res = await window.qaApi("/api/trigger-alert", {
+        method: "POST",
+        body: JSON.stringify({
+          // triggeredBy is now only a hint to exclude the operator's own
+          // device from the broadcast. Attribution in the audit trail comes
+          // from the JWT, not from this field.
+          triggeredBy: "dashboard",
+          magnitude: 6.4,
+          distance_km: 12,
+          intensity: "VII"
+        })
+      });
+
+      if (res.status === 401) {
+        hideBanner();
+        showBanner("err", "Session expired — please sign in again.", 6000);
+        if (window.qaAuth) window.qaAuth.signIn();
+        return;
+      }
+      if (res.status === 403) {
+        showBanner("err", "Your account isn't allowed to trigger alerts.", 8000);
+        return;
+      }
+      if (!res.ok) {
+        showBanner("err", "Server error (" + res.status + "). Alert NOT sent.");
+        return;
+      }
+
+      var data = await res.json();
+      var n = (data && typeof data.recipients === "number") ? data.recipients : 0;
+      var delivered = data && data.push_delivered;
+      var text =
+        "ALERT BROADCAST — " + n + " device" + (n === 1 ? "" : "s") +
+        (delivered === false ? " (delivery issue — check /api/admin/last-push-events)" : "");
+      showBanner(delivered === false ? "err" : "ok", text, delivered === false ? 0 : 6000);
+    } catch (e) {
+      showBanner("err", "Network error: " + (e && e.message ? e.message : e));
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  btn.addEventListener("click", function onTriggerClick() {
+    var confirmed = window.confirm(
+      "Broadcast an EARTHQUAKE ALERT to every registered device?\n\n" +
+      "This will push a notification to all installed apps and flip their " +
+      "dashboard status to 'not responding' until they mark themselves safe."
+    );
+    if (!confirmed) return;
+    sendTriggerAlert();
+  });
+})();
+</script>
 </body>
 </html>
