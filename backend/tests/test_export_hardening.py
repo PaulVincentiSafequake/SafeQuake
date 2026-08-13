@@ -41,13 +41,15 @@ RESCUE_URL = f"{BASE_URL}/api/mark-rescued"
 
 TAG = f"TEST_HARDEN_{uuid.uuid4().hex[:8]}"
 HEADERS = {"X-Admin-Token": ADMIN_TOKEN}
-N_PREAMBLE_ROWS = 6  # warning row + 5 metadata rows before the header
 
 
 def _parse(text: str):
+    """Header position varies: warning row + metadata rows (incl. 'covers'
+    and an optional 'warning' gap row) precede it. Locate it by content."""
     rows = list(_csv.reader(_io.StringIO(text.lstrip("\ufeff"))))
-    header = rows[N_PREAMBLE_ROWS]
-    return header, [dict(zip(header, r)) for r in rows[N_PREAMBLE_ROWS + 1:]], rows
+    hdr_i = next(i for i, r in enumerate(rows) if r[:2] == ["at", "at_simple"])
+    header = rows[hdr_i]
+    return header, [dict(zip(header, r)) for r in rows[hdr_i + 1:]], rows, hdr_i
 
 
 def _pdf_text(content: bytes) -> str:
@@ -80,9 +82,17 @@ def seeded(request):
         "device_id": dev_anon, "display_name": None,
         "status": "trapped", "severity": "yellow", "mobility": "mobile",
         "latitude": 35.901234567891, "longitude": 14.498765432109,
-        "accuracy_m": 14.0, "battery_pct": 30, "battery_state": "unplugged",
+        "accuracy_m": 14.0, "battery_pct": 12, "battery_state": "unplugged",
         "platform": "android", "_test_seed": TAG,
     })
+    db.device_status.update_one(
+        {"device_id": dev_anon},
+        {"$set": {"device_id": dev_anon, "display_name": None, "status": "trapped",
+                  "severity": "yellow", "battery_pct": 12,
+                  "latitude": 35.901234567891, "longitude": 14.498765432109,
+                  "platform": "android", "updated_at": now.isoformat(), "_test_seed": TAG}},
+        upsert=True,
+    )
     # rescued event attributed to an operator email → pseudonymisation target
     db.status_events.insert_one({
         "recorded_at": (now - timedelta(minutes=30)).isoformat(),
@@ -161,9 +171,9 @@ class TestCsvStructure:
 
     def test_uniform_column_count_and_metadata(self, seeded):
         r = requests.get(CSV_URL, headers=HEADERS, params=_window(), timeout=15)
-        header, _, all_rows = _parse(r.text)
+        header, _, all_rows, hdr_i = _parse(r.text)
         assert len({len(row) for row in all_rows}) == 1, "Ragged rows"
-        keys = [row[0] for row in all_rows[:N_PREAMBLE_ROWS]]
+        keys = [row[0] for row in all_rows[:hdr_i]]
         assert keys[0].startswith("CONFIDENTIAL")
         for expected in ("export_window_start_utc", "export_window_end_utc",
                          "generated_at_utc", "generated_by", "row_count"):
@@ -171,7 +181,7 @@ class TestCsvStructure:
 
     def test_at_simple_and_booleans_and_rounding(self, seeded):
         r = requests.get(CSV_URL, headers=HEADERS, params=_window(), timeout=15)
-        header, rows, _ = _parse(r.text)
+        header, rows, _, _hi = _parse(r.text)
         assert "at_simple" in header
         ours = [x for x in rows if x.get("device_id", "").startswith(TAG)]
         assert ours, "seeded rows missing from export"
@@ -188,7 +198,7 @@ class TestCsvStructure:
 
     def test_display_name_backfilled(self, seeded):
         r = requests.get(CSV_URL, headers=HEADERS, params=_window(), timeout=15)
-        _, rows, _ = _parse(r.text)
+        _, rows, _, _hi = _parse(r.text)
         named = [x for x in rows if x.get("device_id") == seeded["dev_named"]]
         assert named and all(x["display_name"] == "Harden Test Person" for x in named), \
             "display_name not backfilled from device record"
@@ -204,7 +214,7 @@ class TestPseudonymisation:
         r = requests.get(CSV_URL, headers=HEADERS, params=params, timeout=15)
         assert r.status_code == 200
         assert f"{TAG}-op@example.com" not in r.text, "operator email leaked"
-        _, rows, _ = _parse(r.text)
+        _, rows, _, _hi = _parse(r.text)
         resc = [x for x in rows if x.get("kind") == "rescued"
                 and x.get("device_id") == seeded["dev_named"]]
         assert resc and resc[0]["rescued_by"].startswith("operator-")
@@ -213,8 +223,8 @@ class TestPseudonymisation:
         params = {**_window(), "pseudonymise": "true"}
         a = requests.get(CSV_URL, headers=HEADERS, params=params, timeout=15)
         b = requests.get(CSV_URL, headers=HEADERS, params=params, timeout=15)
-        _, ra, _ = _parse(a.text)
-        _, rb, _ = _parse(b.text)
+        _, ra, _, _hi = _parse(a.text)
+        _, rb, _, _hi = _parse(b.text)
         f = lambda rows: [x["rescued_by"] for x in rows
                           if x.get("device_id") == seeded["dev_named"] and x.get("kind") == "rescued"]
         assert f(ra) == f(rb) and f(ra), "pseudonym not stable across exports"
@@ -267,7 +277,7 @@ class TestAccessGating:
         r = requests.get(f"{BASE_URL}/api/public/summary", timeout=15)
         assert r.status_code == 200
         body = r.json()
-        assert set(body.keys()) == {"generated_at", "total", "counts"}
+        assert set(body.keys()) == {"generated_at", "total", "counts", "last_alert_at"}
         assert set(body["counts"].keys()) == {"safe", "trapped", "rescued", "not_responding", "unknown"}
         # nothing device-shaped may leak
         text = r.text.lower()
@@ -280,6 +290,79 @@ class TestAccessGating:
         assert r.status_code == 401, "trigger must be enforced server-side, not just hidden in the UI"
 
 
+class TestTimeWindowsAndCodes:
+    """Batch 3 (2026-08-13): absolute 'Covers …' lines, gap warnings,
+    trapped_since, low-battery narrative, collision-safe short codes."""
+
+    def test_csv_has_covers_row(self, seeded):
+        r = requests.get(CSV_URL, headers=HEADERS, params=_window(), timeout=15)
+        _, _, all_rows, hdr_i = _parse(r.text)
+        covers = [row for row in all_rows[:hdr_i] if row[0] == "covers"]
+        assert covers, "CSV missing plain-words 'covers' metadata row"
+        assert "Covers " in covers[0][1] and "(UTC)" in covers[0][1]
+        # unambiguous date form: month written out
+        assert any(m in covers[0][1] for m in (
+            "January", "February", "March", "April", "May", "June", "July",
+            "August", "September", "October", "November", "December"))
+
+    def test_pdfs_carry_covers_line(self, seeded):
+        for url in (B1_URL, B2_URL, PDF_URL):
+            r = requests.get(url, headers=HEADERS, params=_window(), timeout=30)
+            text = _pdf_text(r.content)
+            assert "Covers " in text and "(UTC)" in text, f"{url} missing Covers line"
+
+    def test_gap_warning_everywhere(self, seeded):
+        """Seed an alert older than the window start → every document must
+        say, in plain words, that it misses the start of the incident."""
+        client = MongoClient(MONGO_URL)
+        db = client[DB_NAME]
+        now = datetime.now(timezone.utc)
+        db.push_events.insert_one({
+            "created_at": (now - timedelta(hours=8)).isoformat(),
+            "triggered_by": "test", "_test_seed": TAG,
+        })
+        try:
+            # Anchor the window strictly AFTER the latest alert (real data
+            # may contain triggers newer than our seeded one).
+            last = requests.get(f"{BASE_URL}/api/public/summary", timeout=15).json()["last_alert_at"]
+            anchor = datetime.fromisoformat(last.replace("Z", "+00:00"))
+            win = {"since": (anchor + timedelta(hours=1)).isoformat(),
+                   "until": (anchor + timedelta(hours=3)).isoformat()}
+            for url in (B1_URL, B2_URL, PDF_URL):
+                text = _pdf_text(requests.get(url, headers=HEADERS, params=win, timeout=30).content)
+                assert "this window starts after the alert" in text, f"{url} missing gap warning"
+                assert "It leaves out the first" in text and "hours" in text
+            r = requests.get(CSV_URL, headers=HEADERS, params=win, timeout=15)
+            _, _, all_rows, hdr_i = _parse(r.text)
+            warn = [row for row in all_rows[:hdr_i] if row[0] == "warning"]
+            assert warn and "this window starts after the alert" in warn[0][1]
+        finally:
+            db.push_events.delete_many({"_test_seed": TAG})
+            client.close()
+
+    def test_public_summary_exposes_last_alert_at(self, seeded):
+        r = requests.get(f"{BASE_URL}/api/public/summary", timeout=15)
+        assert "last_alert_at" in r.json()
+
+    def test_devices_trapped_since_and_short_codes(self, seeded):
+        r = requests.get(f"{BASE_URL}/api/devices?limit=5000", headers=HEADERS, timeout=15)
+        devs = {d["device_id"]: d for d in r.json()["devices"]}
+        anon = devs.get(f"{TAG}-dev-anon")
+        assert anon and anon.get("trapped_since"), "trapped device missing trapped_since"
+        codes = [d["short_code"] for d in devs.values() if d.get("short_code")]
+        assert len(codes) == len(set(codes)), "duplicate short codes served to the dashboard"
+
+    def test_b1_low_battery_plain_language(self, seeded):
+        # detail=full: the 'trapped for' figure lives in the per-device
+        # table, which is opt-in since issue #130.
+        r = requests.get(B1_URL, headers=HEADERS,
+                         params={**_window(), "detail": "full"}, timeout=30)
+        text = _pdf_text(r.content)
+        assert "phone battery below 20%." in text
+        assert "We may stop receiving updates from them." in text
+        assert "trapped for" in text, "B1 per-device table missing 'trapped for' figure"
+
+
 class TestPdfHardening:
     def test_audit_pdf_confidential_filename_and_watermark(self, seeded):
         r = requests.get(PDF_URL, headers=HEADERS, params=_window(), timeout=30)
@@ -288,7 +371,9 @@ class TestPdfHardening:
         assert _pdf_text(r.content).count("CONFIDENTIAL") >= 2  # banner + watermark
 
     def test_b1_no_raw_html_and_rounded_coords(self, seeded):
-        r = requests.get(B1_URL, headers=HEADERS, params=_window(), timeout=30)
+        # detail=full: per-device rows are opt-in since issue #130.
+        r = requests.get(B1_URL, headers=HEADERS,
+                         params={**_window(), "detail": "full"}, timeout=30)
         assert r.status_code == 200
         assert 'filename="CONFIDENTIAL-' in r.headers.get("Content-Disposition", "")
         text = _pdf_text(r.content)
@@ -326,6 +411,25 @@ class TestPdfHardening:
         assert "Per-device detail omitted" in text
         assert "Harden Test Person" not in text, "summary version must not list devices"
         assert "CONFIDENTIAL" in text, "summary version keeps the confidential treatment"
+
+    def test_b1_defaults_to_summary(self, seeded):
+        # Issue #130: without an explicit detail param the report must be
+        # the short summary — the multi-page per-device table is opt-in.
+        r = requests.get(B1_URL, headers=HEADERS, params=_window(), timeout=30)
+        assert r.status_code == 200
+        assert "-summary-" in r.headers.get("Content-Disposition", "")
+        text = _pdf_text(r.content)
+        assert "Per-device detail omitted" in text
+        assert "Harden Test Person" not in text, "default report must not list devices"
+
+    def test_b1_filename_has_no_jargon(self, seeded):
+        # Issue #133: downloaded filenames use plain language, not B1/B2.
+        r = requests.get(B1_URL, headers=HEADERS, params=_window(), timeout=30)
+        cd = r.headers.get("Content-Disposition", "")
+        assert "team-report" in cd and "B1" not in cd
+        r2 = requests.get(B2_URL, headers=HEADERS, params=_window(), timeout=30)
+        cd2 = r2.headers.get("Content-Disposition", "")
+        assert "public-report" in cd2 and "B2" not in cd2
 
     def test_b2_names_issuer_but_no_operator(self, seeded):
         r = requests.get(B2_URL, headers=HEADERS, params=_window(), timeout=30)

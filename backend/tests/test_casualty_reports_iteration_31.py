@@ -289,7 +289,8 @@ class TestB1Content:
     @pytest.fixture(scope="class")
     def b1_text(self, admin_headers, seeded_events):
         now = datetime.now(timezone.utc)
-        params = {"since": (now - timedelta(hours=1)).isoformat(), "until": (now + timedelta(minutes=5)).isoformat()}
+        params = {"since": (now - timedelta(hours=1)).isoformat(), "until": (now + timedelta(minutes=5)).isoformat(),
+                  "detail": "full"}   # per-device rows are opt-in since issue #130
         r = requests.get(B1_URL, headers=admin_headers, params=params, timeout=60)
         assert r.status_code == 200
         return _extract_pdf_text(r.content)

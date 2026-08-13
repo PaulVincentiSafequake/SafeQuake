@@ -693,3 +693,33 @@ Tests: 141 passing across export/report/gating/CORS/display-name suites. test_co
 - Commit message drafted (see git history intent); ask for fresh PAT and push single commit.
 
 **NEXT AFTER THIS BATCH: full dashboard restructure — spec in `dashboard-restructure-spec.md` in Paul's project folder (tabs Live/Reports/Admin/Testing, persistent status bar, search, pop-out map). Ask Paul to provide the spec file contents when starting.**
+
+---
+
+## 2026-08-13 (batch 3) — Time windows, short codes, triage ergonomics
+
+Backend (server.py, tests green): `_covers_line`/`_duration_words`/`_fmt_dt_plain` (plain-words absolute coverage on B1/B2/audit PDFs + CSV `covers` metadata row); `_last_alert_start` (latest push_events row — NOTE: no end-of-incident marker exists; "active" = caller-defined, dashboard uses 72h); `_window_gap_warning` (window starts after alert → red warning on all 3 PDFs + CSV `warning` row); `/api/public/summary` exposes `last_alert_at`; `/api/devices` returns collision-safe `short_code` (`_short_codes_for`: last-5 alnum uppercase, colliders extended leftward +2 chars until unique) + `trapped_since` (`_trapped_since_map`: start of current trapped spell); B1 per-device Status cell carries "trapped for …" in words; B1 narrative appends `_low_battery_lines` (plain words, states total, no bare %).
+Dashboard (index.html): 8 window options shortest-first incl. "Since the alert"; default = alert if last_alert_at <72h else 24h (never 7d); on-screen gap warning `#qg-window-warning`; feed + all exports use `qgWindowSinceISO()`; cards lead with big short code + small full id, "Trapped for X"/"Updated X ago" in words ticking every minute (minute-tick in sidebar signature); low-battery flag ⚠ + words <20%; triage search box (code/name/id); within-group sort longest-waiting-first with battery tiebreak + visible label; Rescued group default collapsed (user open/close preserved in-session); live counts 2-col grid + session-only Hide/Show toggle (NO persistence — deliberate); pins carry short code tags; `window.__qgDebugRender` test hook.
+DEPLOY ORDER (Paul's rule): backend Publish FIRST, then GitHub push. Dashboard push PENDING — need fresh PAT after Paul publishes.
+Outstanding backlog (Paul's list): #128 logo/branding duplicates, #130 B1 default summary, #131 watermark, #133 export card text + dialog/filename jargon, #134 signed-out banner, #135 idle timeout, #136 Cmd/trackpad zoom. Then dashboard-restructure-spec.md.
+
+---
+
+## 2026-08-13 (batch 4) — Dashboard polish: issues #128–#136
+
+**Backend (server.py — tests green, NEEDS PUBLISH):**
+- #131: `CONFIDENTIAL` watermark moved from centred diagonal (crossed Rescued rows / chart legend) to rotated margin bands — "CONFIDENTIAL" repeats up BOTH 12mm side margins (11pt bold, 30% alpha, stops 80pt below top to clear banner+logos). Content-free margins ⇒ can NEVER overlap data. Banner+footer unchanged (audit test asserts ≥2 "CONFIDENTIAL" per page — still holds).
+- #128: `_QA_LOGO_B64` embedded (80×80 PNG, same mark as dashboard header); `_draw_header_logos` draws the Quake Angel mark top-right on EVERY B1/B2 page permanently; a configured partner logo renders to its LEFT under "In partnership with" caption. Replaced `_draw_logo`; `_make_confidential_onpage`/`_make_public_onpage` always draw the QA mark.
+- #130: `detail` Query default flipped `full`→`summary` on operational.pdf — per-device table is opt-in. Tests updated to pass `detail=full` where per-device content is asserted; new `test_b1_defaults_to_summary`.
+- #133: filenames de-jargoned — B1 → `CONFIDENTIAL-quakeangel-team-report{-summary}-TS.pdf`, B2 → `quakeangel-public-report-TS.pdf`. `X-Report-Kind` headers unchanged (b1-operational/b2-public — internal contract w/ dashboard). PDF body wording (locked confidentiality text, "END OF B1 OPERATIONAL REPORT") deliberately NOT touched. New `test_b1_filename_has_no_jargon`.
+
+**Dashboard (index.html — STAGED, needs PAT push):**
+- #128: partner badge is now ONE bordered chip (`.qg-partner-badge`) with the "In partnership with" caption inside it — label can't float. NEW dedup guard: uploaded org logo is pixel-compared (16×16 downsample composited on #0f0f0f, RGB mean-abs-diff <12; measured same-artwork≈1.4 vs different≈166) against the built-in QA mark — a duplicate upload (current prod state: 512×512 transparent re-export of the QA logo) is hidden from the header but kept in the admin preview so it can be removed.
+- #130: "Team report size" select defaults to "Summary only"; `&detail=` now ALWAYS sent explicitly.
+- #133: removed `(B1)`/`(B2)` code spans from export cards; confirm dialog / progress / success messages / settings-panel copy all say "team report"/"public report"/"printed reports".
+- #134: signed-out state = ONE active brand-red banner at top ("You are signed out — sign in to use the dashboard" + Google button inside). Sidebar + activity-feed signed-out messages reduced to quiet one-liners pointing at the banner.
+- #135: idle timeout 15→60 min (activity-reset + 60s warning modal unchanged).
+- #136: OS detection via `userAgentData.platform` fallback chain; hint mentions trackpad pinch; ctrl/meta wheel (= trackpad pinch) now ACCUMULATES deltaY and steps zoom once per |40| (mouse notch ≈100 steps immediately; pinch no longer rockets across zoom levels). Verified +1 step for 5×(-10) synthetic pinch events.
+
+Deferred (Paul's call): Android dashed-circle `lineDashPattern` workaround in MapCanvas.native.tsx.
+NOTE: full pytest run shows 116 pre-existing failures ALL in legacy push/debug suites (schema drift, e.g. `/api/status` now requires `status` field — tests predate it). Unrelated to this batch; candidates for cleanup during the server.py refactor task.

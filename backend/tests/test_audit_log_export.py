@@ -126,15 +126,14 @@ def _auth_headers():
     return {"X-Admin-Token": ADMIN_TOKEN}
 
 
-# New export format (2026-08-12): UTF-8 BOM, then a padded warning row and
-# 5 padded metadata rows, THEN the column header, then data rows.
-N_PREAMBLE_ROWS = 6
-
-
+# New export format: UTF-8 BOM, then a padded warning row and padded
+# metadata rows (count varies — a 'warning' row appears when the window
+# misses the start of the incident), THEN the column header, then data.
 def _parse_export_csv(text: str):
-    rows = list(_csv.reader(_io.StringIO(text.lstrip("\ufeff"))))
-    header = rows[N_PREAMBLE_ROWS]
-    data = [dict(zip(header, r)) for r in rows[N_PREAMBLE_ROWS + 1:]]
+    all_rows = list(_csv.reader(_io.StringIO(text.lstrip("\ufeff"))))
+    hdr_i = next(i for i, r in enumerate(all_rows) if r[:2] == ["at", "at_simple"])
+    header = all_rows[hdr_i]
+    data = [dict(zip(header, r)) for r in all_rows[hdr_i + 1:]]
     return header, data
 
 

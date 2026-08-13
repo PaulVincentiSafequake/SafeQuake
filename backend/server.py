@@ -398,13 +398,21 @@ async def get_devices(
 
     rows = await db.device_status.find(query, {"_id": 0}).sort("updated_at", -1).to_list(limit)
 
+    # Collision-safe short codes across the ACTIVE device set (item 2) and
+    # 'trapped since' timestamps for the current trapped spell (item 3).
+    code_map = _short_codes_for([r.get("device_id") for r in rows])
+    trapped_since = await _trapped_since_map(
+        [r.get("device_id") for r in rows if r.get("status") == "trapped"]
+    )
+
     def clean(r: dict) -> dict:
         return {
             "device_id": r.get("device_id"),
             # short_code is derived on read, not stored — that way any change
             # to the algorithm (e.g. hash-based instead of tail) applies to
             # existing rows without a migration.
-            "short_code": _short_code(r.get("device_id")),
+            "short_code": code_map.get(r.get("device_id")) or _short_code(r.get("device_id")),
+            "trapped_since": trapped_since.get(r.get("device_id")),
             # Optional first name captured at first app launch. Nullable —
             # dashboards should render "NAME · CODE" when present and fall
             # back to "CODE" alone when not, so pre-rollout devices without
@@ -457,10 +465,14 @@ async def public_summary():
     for r in rows:
         st = r.get("status") or "unknown"
         counts[st if st in counts else "unknown"] += 1
+    alert_dt = await _last_alert_start()
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "total": len(rows),
         "counts": counts,
+        # Timestamp of the most recent alert broadcast (non-personal). The
+        # dashboard anchors its "Since the alert" window to this.
+        "last_alert_at": alert_dt.isoformat() if alert_dt else None,
     }
 
 
@@ -848,21 +860,33 @@ def _pdf_confidentiality_onpage(canvas_, doc_):
     canvas_.saveState()
     w, h = doc_.pagesize   # width, height in points
 
-    # Diagonal watermark on EVERY page — large, translucent, painted
-    # before the flowables so content sits on top. Added 2026-08-12
-    # after Paul flagged that the banner alone was too easy to overlook
-    # on a document holding precise locations and device identifiers.
-    canvas_.saveState()
-    canvas_.translate(w / 2, h / 2)
-    canvas_.rotate(30)
-    canvas_.setFont("Helvetica-Bold", 56)
+    # Margin-band watermark on EVERY page — rotated "CONFIDENTIAL"
+    # running up BOTH side margins. Replaced the centred diagonal
+    # watermark (issue #131): the diagonal crossed the Rescued table
+    # row and the chart legend on some layouts. The 12 mm side margins
+    # are guaranteed content-free on every confidential document, so
+    # the mark can be bolder AND can never obscure report data.
+    canvas_.setFont("Helvetica-Bold", 11)
     try:
-        canvas_.setFillAlpha(0.05)
+        canvas_.setFillAlpha(0.30)
     except Exception:
         pass  # very old reportlab without alpha — banner still carries
     canvas_.setFillColor(_rl_colors.HexColor("#B0141A"))
-    canvas_.drawCentredString(0, -22, "CONFIDENTIAL")
-    canvas_.restoreState()
+    _wm = "CONFIDENTIAL"
+    _wm_w = canvas_.stringWidth(_wm, "Helvetica-Bold", 11)
+    _y = 60.0
+    while _y + _wm_w < h - 80:   # stop short of the top banner + header logos
+        for _x in (20.0, w - 11.0):   # left + right margin bands
+            canvas_.saveState()
+            canvas_.translate(_x, _y)
+            canvas_.rotate(90)
+            canvas_.drawString(0, 0, _wm)
+            canvas_.restoreState()
+        _y += _wm_w + 60
+    try:
+        canvas_.setFillAlpha(1)
+    except Exception:
+        pass
 
     # Top band: 30pt tall with a 13pt bold CONFIDENTIAL — the single most
     # important line on the document must be legible at a glance, even on
@@ -1020,44 +1044,71 @@ async def _get_logo_image_reader():
         return None
 
 
-def _draw_logo(canvas_, doc_, logo, top_offset_pt: float):
+# Quake Angel's own mark, embedded so every report carries the product
+# branding permanently (issue #128): before this, an uploaded partner
+# logo was the ONLY mark on B1/B2 headers, inverting the hierarchy.
+_QA_LOGO_B64 = "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"
+_QA_LOGO_READER = None
+
+
+def _get_qa_logo_reader():
+    global _QA_LOGO_READER
+    if _QA_LOGO_READER is None:
+        import base64
+        from reportlab.lib.utils import ImageReader
+        _QA_LOGO_READER = ImageReader(_io.BytesIO(base64.b64decode(_QA_LOGO_B64)))
+    return _QA_LOGO_READER
+
+
+def _draw_header_logos(canvas_, doc_, partner_logo, top_offset_pt: float):
+    """Top-right header marks: the permanent Quake Angel logo rightmost,
+    with the optional partner logo to its LEFT under an explicit
+    'In partnership with' caption. Hierarchy (issue #128): Quake Angel
+    is ALWAYS present; a partner mark is always labelled, never a
+    replacement."""
+    from reportlab.lib import colors as _rl_colors
     try:
-        iw, ih = logo.getSize()
-        lh = 26.0
-        lw = iw * lh / float(ih or 1)
         page_w, page_h = doc_.pagesize
-        # Partnership caption (Paul, 2026-08-13): the uploaded org logo is
-        # a labelled partner badge — never an unlabelled second mark next
-        # to Quake Angel's own branding.
-        canvas_.saveState()
-        canvas_.setFont("Helvetica-Oblique", 5.5)
-        from reportlab.lib import colors as _rl_colors
-        canvas_.setFillColor(_rl_colors.HexColor("#777777"))
-        canvas_.drawRightString(page_w - 14, page_h - top_offset_pt + 2, "In partnership with")
-        canvas_.restoreState()
+        lh = 26.0
+        x_right = page_w - 14
+        qa = _get_qa_logo_reader()
+        qw, qh = qa.getSize()
+        qa_w = qw * lh / float(qh or 1)
         canvas_.drawImage(
-            logo, page_w - 14 - lw, page_h - top_offset_pt - lh,
-            width=lw, height=lh, mask="auto", preserveAspectRatio=True,
+            qa, x_right - qa_w, page_h - top_offset_pt - lh,
+            width=qa_w, height=lh, mask="auto", preserveAspectRatio=True,
         )
+        if partner_logo is not None:
+            iw, ih = partner_logo.getSize()
+            lw = iw * lh / float(ih or 1)
+            px_right = x_right - qa_w - 10
+            canvas_.saveState()
+            canvas_.setFont("Helvetica-Oblique", 5.5)
+            canvas_.setFillColor(_rl_colors.HexColor("#777777"))
+            canvas_.drawRightString(px_right, page_h - top_offset_pt + 2, "In partnership with")
+            canvas_.restoreState()
+            canvas_.drawImage(
+                partner_logo, px_right - lw, page_h - top_offset_pt - lh,
+                width=lw, height=lh, mask="auto", preserveAspectRatio=True,
+            )
     except Exception:
         pass  # a broken logo must never block an emergency report
 
 
 def _make_confidential_onpage(logo=None):
-    """Banner + watermark + footer on every page, plus the org logo
-    (below the banner) when one is configured."""
+    """Banner + margin watermark + footer on every page, plus the
+    permanent Quake Angel mark (and the partner logo when configured)."""
     def _onpage(canvas_, doc_):
         _pdf_confidentiality_onpage(canvas_, doc_)
-        if logo is not None:
-            _draw_logo(canvas_, doc_, logo, top_offset_pt=42)
+        _draw_header_logos(canvas_, doc_, logo, top_offset_pt=42)
     return _onpage
 
 
 def _make_public_onpage(logo=None):
-    """B2 Public: org logo top-right, no confidentiality chrome."""
+    """B2 Public: Quake Angel mark + optional labelled partner logo
+    top-right, no confidentiality chrome."""
     def _onpage(canvas_, doc_):
-        if logo is not None:
-            _draw_logo(canvas_, doc_, logo, top_offset_pt=16)
+        _draw_header_logos(canvas_, doc_, logo, top_offset_pt=16)
     return _onpage
 
 
@@ -1242,6 +1293,132 @@ def _plain_language_progress(raw_rows: list[dict], latest_events: list[dict],
     return lines
 
 
+def _fmt_dt_plain(dt: datetime) -> str:
+    """'13 August 2026, 15:02' — unambiguous between British and American
+    date conventions, 24-hour clock. Timezone is stated once by the caller."""
+    return dt.strftime("%d %B %Y, %H:%M").lstrip("0")
+
+
+def _duration_words(td: timedelta) -> str:
+    """'3 hours and 12 minutes' / '1 day and 4 hours' — whole words, never
+    '3h 12m', never '0 hours'."""
+    total_min = int(td.total_seconds() // 60)
+    if total_min < 1:
+        return "less than a minute"
+    days, rem = divmod(total_min, 1440)
+    hours, minutes = divmod(rem, 60)
+    parts = []
+    if days:
+        parts.append(f"{days} {_plural(days, 'day', 'days')}")
+    if hours:
+        parts.append(f"{hours} {_plural(hours, 'hour', 'hours')}")
+    if minutes and not days:   # over a day reads "1 day and 4 hours"
+        parts.append(f"{minutes} {_plural(minutes, 'minute', 'minutes')}")
+    if not parts:
+        parts.append(f"{minutes} {_plural(minutes, 'minute', 'minutes')}")
+    return parts[0] if len(parts) == 1 else " and ".join(parts)
+
+
+def _covers_line(since_dt: datetime, until_dt: datetime) -> str:
+    """Every export states the period it covers in absolute terms — 'Last
+    7 days' is meaningless when the document is read next month or in an
+    inquiry next year (1c, 2026-08-13)."""
+    return (f"Covers {_fmt_dt_plain(since_dt)} to {_fmt_dt_plain(until_dt)} (UTC) — "
+            f"{_duration_words(until_dt - since_dt)}.")
+
+
+async def _last_alert_start() -> Optional[datetime]:
+    """Start of the most recent alert = latest push_events row. There is
+    no explicit end-of-incident marker in the data model, so 'active
+    alert' is defined by the CALLER (dashboard uses: within 72h)."""
+    rows = await db.push_events.find({}, {"_id": 0, "created_at": 1}).sort("created_at", -1).to_list(1)
+    if not rows:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(rows[0].get("created_at")).replace("Z", "+00:00"))
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return None
+
+
+async def _window_gap_warning(since_dt: datetime) -> Optional[str]:
+    """1d (2026-08-13): if the export window starts AFTER the alert began,
+    the document silently misses the first — probably worst — hours of the
+    incident. Say so on the document itself, in plain words."""
+    alert = await _last_alert_start()
+    if alert is not None and since_dt > alert:
+        return ("Warning: this window starts after the alert. It leaves out the first "
+                f"{_duration_words(since_dt - alert)} of the incident.")
+    return None
+
+
+def _short_codes_for(device_ids) -> dict:
+    """Collision-safe short codes (item 2, 2026-08-13). Rule: last 5
+    alphanumeric characters of the device id, uppercased; if two ACTIVE
+    devices collide, every collider is extended leftward 2 characters at
+    a time until unique. Same map must be used everywhere a code is shown
+    so the string matches across card / pin / report / CSV."""
+    from collections import Counter
+    alnum = {d: _re.sub(r"[^A-Za-z0-9]", "", str(d)) for d in device_ids if d}
+    # Contract (iteration 25): ids too short to be meaningful get NO code.
+    alnum = {d: a for d, a in alnum.items() if len(a) >= 3}
+    codes: dict = {}
+    remaining = list(alnum)
+    length = 5
+    while remaining:
+        trial = {d: alnum[d][-min(length, len(alnum[d])):].upper() for d in remaining}
+        counts = Counter(trial.values())
+        nxt = []
+        for d, code in trial.items():
+            if counts[code] == 1 or len(code) >= len(alnum[d]):
+                codes[d] = code
+            else:
+                nxt.append(d)
+        remaining = nxt
+        length += 2
+    return codes
+
+
+async def _trapped_since_map(device_ids) -> dict:
+    """device_id -> ISO timestamp of the FIRST 'trapped' report of the
+    current trapped spell (walks back until a non-trapped event breaks
+    the run). Drives 'Trapped for …' on cards and the team report."""
+    ids = [d for d in device_ids if d]
+    if not ids:
+        return {}
+    rows = await db.status_events.find(
+        {"device_id": {"$in": ids}},
+        {"_id": 0, "device_id": 1, "status": 1, "recorded_at": 1},
+    ).sort("recorded_at", -1).to_list(20000)
+    out: dict = {}
+    closed: set = set()
+    for r in rows:   # newest → oldest
+        d = r.get("device_id")
+        if d in closed:
+            continue
+        if r.get("status") == "trapped":
+            out[d] = r.get("recorded_at")
+        else:
+            closed.add(d)
+    return out
+
+
+def _low_battery_lines(latest_events: list[dict]) -> list[str]:
+    """Item 4 (2026-08-13): low battery is a countdown to losing contact.
+    Plain words, states the total it is out of, never a bare percentage."""
+    still = [e for e in latest_events if e.get("status") == "trapped"]
+    low = [e for e in still
+           if isinstance(e.get("battery_pct"), (int, float)) and e["battery_pct"] < 20]
+    if not low:
+        return []
+    n, t = len(low), len(still)
+    if t == 1:
+        first = "The 1 person still trapped has a phone battery below 20%."
+    else:
+        first = f"{n} of the {t} people still trapped {_plural(n, 'has', 'have')} a phone battery below 20%."
+    return [first, "We may stop receiving updates from them."]
+
+
 def _parse_iso_or_none(s: Optional[str]) -> Optional[datetime]:
     if not s:
         return None
@@ -1347,6 +1524,11 @@ async def _fetch_audit_for_export(
     events.sort(key=lambda e: e.get("at") or "", reverse=True)
     events = events[:limit]
     await _backfill_display_names(events)
+    # Collision-safe short codes, consistent with /api/devices (item 2).
+    _codes = _short_codes_for({e.get("device_id") for e in events if e.get("device_id")})
+    for e in events:
+        if e.get("device_id"):
+            e["short_code"] = _codes.get(e["device_id"]) or e.get("short_code")
     # GDPR data-minimisation: 5 dp (~1 m) is already beyond device accuracy.
     for e in events:
         for k in ("latitude", "longitude"):
@@ -1433,6 +1615,12 @@ async def export_audit_log_csv(
     writer.writerow(_pad(["generated_at_utc", datetime.now(timezone.utc).isoformat()]))
     writer.writerow(_pad(["generated_by", generated_by]))
     writer.writerow(_pad(["row_count", str(len(events))]))
+    # Plain-words coverage line + optional missing-start warning (1c/1d) —
+    # someone opening this file next month never saw the screen.
+    writer.writerow(_pad(["covers", _covers_line(since_dt, until_dt)]))
+    _gap = await _window_gap_warning(since_dt)
+    if _gap:
+        writer.writerow(_pad(["warning", _gap]))
     writer.writerow(_CSV_COLUMNS)
 
     for ev in events:
@@ -1533,19 +1721,31 @@ async def export_audit_log_pdf(
     )
 
     generated_at = datetime.now(timezone.utc).isoformat()
-    since_str = (_parse_iso_or_none(since) or datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
-    until_str = (_parse_iso_or_none(until) or datetime.now(timezone.utc)).isoformat()
+    since_dt = _parse_iso_or_none(since) or datetime.now(timezone.utc) - timedelta(days=7)
+    until_dt = _parse_iso_or_none(until) or datetime.now(timezone.utc)
 
     story: list = [
         Paragraph("Quake Angel — audit log export", title_style),
+        # Plain-words absolute coverage (1c) — the document may be read in
+        # an inquiry long after "Last 7 days" has lost all meaning.
+        Paragraph(_covers_line(since_dt, until_dt), ParagraphStyle(
+            "AuditCovers", parent=styles["Normal"], fontSize=9.5,
+            textColor=colors.HexColor("#222222"), spaceAfter=4,
+        )),
         Paragraph(
-            f"Window: {since_str} → {until_str} (UTC) &nbsp;·&nbsp; "
             f"Events: {len(events)} &nbsp;·&nbsp; "
             f"Generated: {generated_at} &nbsp;·&nbsp; "
             f"By: {generated_by}",
             meta_style,
         ),
     ]
+    _gap = await _window_gap_warning(since_dt)
+    if _gap:
+        story.insert(2, Paragraph(_html.escape(_gap), ParagraphStyle(
+            "AuditWarn", parent=styles["Normal"], fontSize=9,
+            textColor=colors.HexColor("#B0141A"), spaceAfter=8,
+            fontName="Helvetica-Bold",
+        )))
 
     def _cell(s) -> "Paragraph":
         # Wrap every cell in a Paragraph so long strings wrap instead
@@ -1873,8 +2073,10 @@ async def casualty_report_operational_pdf(
     since: Optional[str] = Query(default=None, description="ISO 8601 start; default 24h ago."),
     until: Optional[str] = Query(default=None, description="ISO 8601 end; default now."),
     pseudonymise: bool = Query(default=False, description="Replace operator emails with stable pseudonyms (operator-N)."),
-    detail: str = Query(default="full", pattern="^(full|summary)$",
-                        description="'full' includes the per-device table; 'summary' is aggregate + timeline only."),
+    detail: str = Query(default="summary", pattern="^(full|summary)$",
+                        description="'summary' (default) is aggregate + timeline only; "
+                                    "'full' adds one table row per device (issue #130: "
+                                    "the multi-page table is opt-in, never the default)."),
 ):
     """B1 — Operational casualty report. Admin+operator gated.
 
@@ -1921,8 +2123,12 @@ async def casualty_report_operational_pdf(
             f"Not for public distribution.",
             PS("CI", parent=meta_style, textColor=colors.HexColor("#8a1a1a"), fontName="Helvetica-Bold"),
         ),
+        # Plain-words absolute coverage (1c).
+        Paragraph(_covers_line(since_dt, until_dt), PS(
+            "B1Covers", parent=styles["Normal"], fontSize=9.5,
+            textColor=colors.HexColor("#222222"), spaceAfter=4,
+        )),
         Paragraph(
-            f"Window: {since_dt.isoformat()} → {until_dt.isoformat()} (UTC) &nbsp;·&nbsp; "
             f"Total devices reporting: {counts['total_devices']} &nbsp;·&nbsp; "
             f"Generated: {datetime.now(timezone.utc).isoformat()} &nbsp;·&nbsp; "
             f"By: {generated_by}",
@@ -1930,6 +2136,13 @@ async def casualty_report_operational_pdf(
         ),
         Paragraph("Aggregate", h2_style),
     ]
+    _gap = await _window_gap_warning(since_dt)
+    if _gap:
+        story.insert(3, Paragraph(_html.escape(_gap), PS(
+            "B1Warn", parent=styles["Normal"], fontSize=9,
+            textColor=colors.HexColor("#B0141A"), spaceAfter=8,
+            fontName="Helvetica-Bold",
+        )))
 
     summary_data = [
         ["", "Count"],
@@ -1965,9 +2178,13 @@ async def casualty_report_operational_pdf(
         story.append(_timeline_chart(buckets, 182 * mm, 55 * mm))
         story.append(Spacer(0, 6))
     from reportlab.platypus import KeepTogether as _KT
+    _narrative_lines = _plain_language_progress(raw_rows, events, counts)
+    # Low battery = countdown to losing contact (item 4). Plain words,
+    # states the total, never a bare percentage.
+    _narrative_lines.extend(_low_battery_lines(events))
     story.append(_KT([
         Paragraph(_html.escape(line), plain_style)
-        for line in _plain_language_progress(raw_rows, events, counts)
+        for line in _narrative_lines
     ]))
     story.append(Spacer(0, 10))
 
@@ -1992,6 +2209,11 @@ async def casualty_report_operational_pdf(
             {"red": 0, "yellow": 1, "green": 2}.get((e.get("severity") or "").lower(), 3),
         ))
         data = [header]
+        _b1_codes = _short_codes_for({e.get("device_id") for e in events_sorted if e.get("device_id")})
+        _b1_trapped_since = await _trapped_since_map(
+            [e.get("device_id") for e in events_sorted if e.get("status") == "trapped"]
+        )
+        _now_utc = datetime.now(timezone.utc)
         for e in events_sorted:
             lat = e.get("latitude"); lon = e.get("longitude")
             loc = "—"
@@ -2005,7 +2227,7 @@ async def casualty_report_operational_pdf(
                 if e.get("battery_state"):
                     batt += f" ({e.get('battery_state')})"
             name = e.get("display_name") or "(anonymous)"
-            code = _short_code(e.get("device_id"))
+            code = _b1_codes.get(e.get("device_id")) or _short_code(e.get("device_id"))
             # Escape the VALUES, not the markup — passing the composed string
             # through cell() double-escaped it and printed literal "<br/>"
             # tags on the PDF (bug #3.1, 2026-08-12).
@@ -2018,9 +2240,26 @@ async def casualty_report_operational_pdf(
             status_display = e.get("status") or "?"
             if e.get("rescue_reverted"):
                 status_display = f"{status_display} (reverted)"
+            # 'Trapped for …' in words (item 3) — the operationally critical
+            # figure, same wording as the dashboard card.
+            _ts = _b1_trapped_since.get(e.get("device_id")) if e.get("status") == "trapped" else None
+            if _ts:
+                try:
+                    _tdt = datetime.fromisoformat(str(_ts).replace("Z", "+00:00"))
+                    if _tdt.tzinfo is None:
+                        _tdt = _tdt.replace(tzinfo=timezone.utc)
+                    status_para = Paragraph(
+                        f"<b>{_html.escape(status_display)}</b><br/>"
+                        f"<font size=6 color='#666'>trapped for {_html.escape(_duration_words(_now_utc - _tdt))}</font>",
+                        cell_style,
+                    )
+                except (ValueError, TypeError):
+                    status_para = cell(status_display, cell_bold)
+            else:
+                status_para = cell(status_display, cell_bold)
 
             data.append([
-                cell(status_display, cell_bold),
+                status_para,
                 cell((e.get("severity") or "—")),
                 name_para,
                 cell(e.get("recorded_at") or ""),
@@ -2081,7 +2320,8 @@ async def casualty_report_operational_pdf(
         content=buf.getvalue(),
         media_type="application/pdf",
         headers={
-            "Content-Disposition": f'attachment; filename="CONFIDENTIAL-quakeangel-B1-operational{_suffix}-{datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")}.pdf"',
+            # Plain-language filename (issue #133) — "team-report", not "B1".
+            "Content-Disposition": f'attachment; filename="CONFIDENTIAL-quakeangel-team-report{_suffix}-{datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")}.pdf"',
             "X-Row-Count": str(counts["total_devices"]),
             # X-Report-Kind lets the dashboard sanity-check that clicking "B1"
             # actually returned a B1 (defense-in-depth against endpoint mixup).
@@ -2154,10 +2394,13 @@ async def casualty_report_public_pdf(
 
     story = [
         Paragraph("Public status report", title_style),
+        # Plain-words absolute coverage (1c) — press and families read this
+        # long after "the last 24 hours" has lost its meaning.
+        Paragraph(_covers_line(since_dt, until_dt), PS(
+            "B2Covers", parent=body_style, fontSize=10, spaceAfter=4,
+        )),
         Paragraph(
-            f"Window: {since_dt.strftime('%Y-%m-%d %H:%M')} to "
-            f"{until_dt.strftime('%Y-%m-%d %H:%M')} UTC &nbsp;·&nbsp; "
-            f"Issued: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC",
+            f"Issued: {datetime.now(timezone.utc).strftime('%d %B %Y, %H:%M').lstrip('0')} (UTC)",
             meta_style,
         ),
         # Issuer line (3a, 2026-08-13): names the SYSTEM and authority so
@@ -2171,6 +2414,12 @@ async def casualty_report_public_pdf(
         ),
         Paragraph("Current status of people using the Quake Angel app in the affected area:", body_style),
     ]
+    _gap = await _window_gap_warning(since_dt)
+    if _gap:
+        story.insert(3, Paragraph(_html.escape(_gap), PS(
+            "B2Warn", parent=body_style, fontSize=10,
+            textColor=colors.HexColor("#B0141A"), fontName="Helvetica-Bold", spaceAfter=6,
+        )))
 
     # Aggregate table — ONLY counts. Deliberately no "who" column, no
     # region column, no timestamp-of-latest-event column.
@@ -2246,7 +2495,8 @@ async def casualty_report_public_pdf(
         content=buf.getvalue(),
         media_type="application/pdf",
         headers={
-            "Content-Disposition": f'attachment; filename="quakeangel-B2-public-{datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")}.pdf"',
+            # Plain-language filename (issue #133) — "public-report", not "B2".
+            "Content-Disposition": f'attachment; filename="quakeangel-public-report-{datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")}.pdf"',
             # No X-Row-Count on B2 — the aggregate table IS the counts, and
             # exposing "N devices" in a header could be considered
             # identifiability-adjacent for very small N. Erring cautiously.
