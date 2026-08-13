@@ -237,7 +237,31 @@
        same reason; keeping desktop consistent. */
     border-left: 1px solid #e0e0e0;
   }
-  .stat-row { display: flex; gap: 10px; margin-bottom: 16px; flex-wrap: wrap; }
+  .stat-row { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-bottom: 16px; }
+  /* Odd count: let the last box span the full row instead of stranding. */
+  .stat-row .stat:last-child:nth-child(odd) { grid-column: 1 / -1; }
+  .stat-head { display: flex; justify-content: flex-end; margin-bottom: 6px; }
+  .stat-head button {
+    background: none; border: 1px solid var(--border, #cbd0d8); border-radius: 5px;
+    font-size: 11px; color: var(--text-muted, #667); padding: 3px 8px; cursor: pointer;
+  }
+  .qg-list-tools { margin-bottom: 8px; }
+  .qg-list-tools input {
+    width: 100%; box-sizing: border-box; padding: 7px 10px; font-size: 13px;
+    border: 1px solid var(--border, #cbd0d8); border-radius: 7px;
+    background: var(--surface, #fff); color: var(--text, #222);
+  }
+  .qg-list-tools .qg-sort-label { font-size: 10.5px; color: var(--text-muted, #889); margin-top: 4px; }
+  .qg-card-code { font-size: 19px; font-weight: 800; letter-spacing: 1px; color: var(--text, #16202a); }
+  .qg-card-code .qg-card-name { font-size: 13px; font-weight: 600; letter-spacing: 0; margin-left: 6px; }
+  .qg-card-fullid { font-size: 10px; color: var(--text-muted, #98a2ad); word-break: break-all; margin-bottom: 2px; }
+  .qg-card-trapped { font-size: 13.5px; font-weight: 700; margin: 2px 0; }
+  .qg-card-abs { font-size: 10px; color: var(--text-muted, #98a2ad); }
+  .qg-card-batt-low {
+    font-size: 12px; font-weight: 700; margin: 3px 0;
+    color: #7a1216; background: #fdecec; border: 1px solid #e5b4b7;
+    border-radius: 5px; padding: 3px 6px; display: inline-block;
+  }
   .stat {
     flex: 1 1 calc(50% - 5px);
     background: #fff;
@@ -1592,12 +1616,25 @@
     <div id="map"></div>
   </div>
   <div class="sidebar">
-    <div class="stat-row">
+    <!-- Item 7 (2026-08-13): collapsible, but DEFAULT OPEN on every load
+         and the collapsed state is deliberately NOT persisted anywhere —
+         no localStorage, no cookie. Core situational awareness must never
+         be silently hidden during a real incident. -->
+    <div class="stat-head">
+      <button type="button" id="qg-stats-toggle" aria-expanded="true">▾ Hide live counts</button>
+    </div>
+    <div class="stat-row" id="qg-stat-row">
       <div class="stat safe"><div class="stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg></div><div class="stat-text"><div class="num" id="count-safe">0</div><div class="label">Safe</div></div></div>
       <div class="stat trapped"><div class="stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg></div><div class="stat-text"><div class="num" id="count-trapped">0</div><div class="label">Trapped</div></div></div>
       <div class="stat waiting"><div class="stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><line x1="12" y1="17" x2="12.01" y2="17"></line></svg></div><div class="stat-text"><div class="num" id="count-waiting">0</div><div class="label">Unknown</div></div></div>
       <div class="stat danger"><div class="stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.68 13.31a16 16 0 0 0 3.41 2.6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 17.92z"></path><line x1="23" y1="1" x2="1" y2="23"></line></svg></div><div class="stat-text"><div class="num" id="count-danger">0</div><div class="label">Not Responding</div></div></div>
       <div class="stat rescued"><div class="stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path><path d="m9 12 2 2 4-4"></path></svg></div><div class="stat-text"><div class="num" id="count-rescued">0</div><div class="label">Rescued</div></div></div>
+    </div>
+    <div class="qg-list-tools">
+      <input id="qg-triage-search" type="search"
+             placeholder="Search code, name or device ID…"
+             aria-label="Search the triage list">
+      <div class="qg-sort-label">Longest waiting first — low battery breaks ties</div>
     </div>
     <div class="triage-groups" id="userlist"></div>
   </div>
@@ -2094,12 +2131,21 @@
   <div class="qg-export-bar" id="qg-export-bar" style="display:none">
     <div class="qg-export-shared">
       <label>Time range<br>
+        <!-- Shortest at the top — in an incident the operator reaches
+             upward. "Since the alert" anchors to the latest alert start
+             (item 1b) and is the default while an alert is active. -->
         <select class="qg-export-range" id="qg-export-range">
-          <option value="24">Last 24h</option>
-          <option value="168" selected>Last 7 days</option>
+          <option value="alert">Since the alert</option>
+          <option value="1">Last 1 hour</option>
+          <option value="3">Last 3 hours</option>
+          <option value="6">Last 6 hours</option>
+          <option value="12">Last 12 hours</option>
+          <option value="24">Last 24 hours</option>
+          <option value="168">Last 7 days</option>
           <option value="720">Last 30 days</option>
         </select>
       </label>
+      <div id="qg-window-warning" style="display:none; font-size:11.5px; font-weight:700; color:#fff; background:#b0141a; border-radius:6px; padding:6px 8px; line-height:1.4"></div>
       <label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer"
              title="Replaces operator emails with anonymous labels like operator-3 in the downloaded file (team-only files). The real mapping stays on the server for accountability.">
         <input type="checkbox" id="qg-export-pseudo"> Hide operator emails
@@ -2241,7 +2287,7 @@
         meta.textContent = "";
         return;
       }
-      var url = "/api/audit?limit=" + LIMIT;
+      var url = "/api/audit?limit=" + LIMIT + "&since=" + encodeURIComponent(window.qgWindowSinceISO ? window.qgWindowSinceISO() : new Date(Date.now() - 24 * 3600 * 1000).toISOString());
       var res;
       if (window.qaApi) { res = await window.qaApi(url, {cache: "no-store"}); }
       else { res = await fetch(QUAKEGUARD_BACKEND + url, {cache: "no-store"}); }
@@ -2283,6 +2329,77 @@
   // ─── Export toolbar (CSV + PDF + B1 + B2) ───────────────────────
   var exportBar = document.getElementById("qg-export-bar");
   var exportRange = document.getElementById("qg-export-range");
+
+  // ── Time windows (item 1, 2026-08-13) ────────────────────────────────
+  // "Since the alert" anchors to the latest alert start (from
+  // /api/public/summary.last_alert_at). An alert counts as ACTIVE for 72h
+  // — the data model has no explicit end-of-incident marker.
+  var ALERT_ACTIVE_MS = 72 * 3600 * 1000;
+
+  window.qgDurWords = function (ms) {
+    var m = Math.floor(ms / 60000);
+    if (m < 1) return "less than a minute";
+    var d = Math.floor(m / 1440), h = Math.floor((m % 1440) / 60), mi = m % 60;
+    var parts = [];
+    if (d) parts.push(d + (d === 1 ? " day" : " days"));
+    if (h) parts.push(h + (h === 1 ? " hour" : " hours"));
+    if (mi && !d) parts.push(mi + (mi === 1 ? " minute" : " minutes"));
+    if (!parts.length) parts.push(mi + " minutes");
+    return parts.length === 1 ? parts[0]
+      : parts.slice(0, -1).join(", ") + " and " + parts[parts.length - 1];
+  };
+
+  var windowDefaultApplied = false;
+  function applyDefaultWindow() {
+    if (windowDefaultApplied) return;
+    windowDefaultApplied = true;
+    var a = window.__qgLastAlertAt;
+    // Alert active → "Since the alert" is pre-selected; otherwise 24h.
+    // NEVER default to 7 days any more.
+    exportRange.value = (a && (Date.now() - new Date(a).getTime()) < ALERT_ACTIVE_MS)
+      ? "alert" : "24";
+  }
+
+  function windowSinceISO() {
+    if (exportRange.value === "alert" && window.__qgLastAlertAt) {
+      return window.__qgLastAlertAt;
+    }
+    var hours = parseInt(exportRange.value, 10) || 24;
+    return new Date(Date.now() - hours * 3600 * 1000).toISOString();
+  }
+  window.qgWindowSinceISO = windowSinceISO;
+
+  function updateWindowWarning() {
+    var el = document.getElementById("qg-window-warning");
+    if (!el) return;
+    var a = window.__qgLastAlertAt;
+    var sinceMs = new Date(windowSinceISO()).getTime();
+    if (a && sinceMs > new Date(a).getTime() + 60000) {
+      el.textContent = "⚠ This window starts after the alert. It leaves out the first " +
+        window.qgDurWords(sinceMs - new Date(a).getTime()) + ".";
+      el.style.display = "block";
+    } else {
+      el.style.display = "none";
+    }
+  }
+
+  async function refreshAlertAnchor() {
+    try {
+      var r = await fetch(QUAKEGUARD_BACKEND + "/api/public/summary", { cache: "no-store" });
+      if (r.ok) {
+        var j = await r.json();
+        window.__qgLastAlertAt = j.last_alert_at || null;
+      }
+    } catch (_) {}
+    applyDefaultWindow();
+    updateWindowWarning();
+  }
+  refreshAlertAnchor();
+  setInterval(refreshAlertAnchor, 60000);
+  exportRange.addEventListener("change", function () {
+    updateWindowWarning();
+    refresh();   // the activity feed filters by the same window
+  });
   var exportCsvBtn = document.getElementById("qg-export-csv");
   var exportPdfBtn = document.getElementById("qg-export-pdf");
   var exportMsg = document.getElementById("qg-export-msg");
@@ -2314,8 +2431,7 @@
         "It contains personal data: precise locations, device identifiers and operator notes.\n" +
         "Only download it if you are authorised and will store it securely.\n\n" +
         "Download the " + kind.toUpperCase() + "?")) return;
-    var hours = parseInt(exportRange.value, 10) || 168;
-    var since = new Date(Date.now() - hours * 3600 * 1000).toISOString();
+    var since = windowSinceISO();   // honours "Since the alert" (item 1b)
     var path = "/api/admin/audit-log/export." + kind + "?since=" + encodeURIComponent(since);
     var pseudoCb = document.getElementById("qg-export-pseudo");
     if (pseudoCb && pseudoCb.checked) path += "&pseudonymise=true";
@@ -2354,8 +2470,7 @@
         "Do NOT share it with press, families or anyone outside authorised emergency personnel.\n" +
         "For anything public, use the B2 Public report instead.\n\n" +
         "Download B1?")) return;
-    var hours = parseInt(exportRange.value, 10) || 168;
-    var since = new Date(Date.now() - hours * 3600 * 1000).toISOString();
+    var since = windowSinceISO();   // honours "Since the alert" (item 1b)
     var path = "/api/admin/casualty-report/" + kind + ".pdf" + "?since=" + encodeURIComponent(since);
     // Pseudonymisation + detail level apply to B1 only — B2 carries no
     // operator identity and no per-device table.
@@ -3457,6 +3572,7 @@ window.QuakeAngelRescue = (function () {
     box-shadow: 0 1px 2px rgba(0,0,0,0.4);
   }
   .qg-mrk .qg-mrk-tag.rescued { background: #1F8A3A; }
+  .qg-mrk .qg-mrk-tag.plain { background: rgba(22, 30, 40, 0.82); }
   /* ── Recentre control ── */
   .qg-recentre-btn {
     background: #fff; border: 2px solid rgba(0,0,0,0.25); border-radius: 6px;
@@ -3649,21 +3765,26 @@ window.QuakeAngelRescue = (function () {
     var v = markerVisual(u);
     var s = iconSizeForZoom(map.getZoom());
     if (v.kind === "immediate") s = Math.round(s * 1.3);
-    var tagH = v.tag ? 13 : 0;
-    var tag = v.tag
-      ? '<span class="qg-mrk-tag' + (v.kind === "rescued" ? " rescued" : "") + '">' + v.tag + "</span>"
-      : "";
+    // Every pin carries the person's short code (item 2) — the same
+    // string as the triage card and the team report table.
+    var code = qgCode(u);
+    var tagText = v.kind === "immediate" ? ("SOS " + code)
+      : v.kind === "rescued" ? ("\u2713 " + code)
+      : code;
+    var tagCls = v.kind === "immediate" ? "" : v.kind === "rescued" ? " rescued" : " plain";
+    var tagH = tagText ? 13 : 0;
+    var tag = tagText ? '<span class="qg-mrk-tag' + tagCls + '">' + tagText + "</span>" : "";
     return L.divIcon({
       className: "qg-mrk-wrap",
       html: '<div class="qg-mrk">' + svgShape(v.shape, v.color, s) + tag + "</div>",
-      iconSize: [Math.max(s, 46), s + tagH],
-      iconAnchor: [Math.max(s, 46) / 2, s / 2],
+      iconSize: [Math.max(s, 56), s + tagH],
+      iconAnchor: [Math.max(s, 56) / 2, s / 2],
     });
   }
 
   function iconSignature(u) {
     var v = markerVisual(u);
-    return v.kind + "|" + iconSizeForZoom(map.getZoom());
+    return v.kind + "|" + iconSizeForZoom(map.getZoom()) + "|" + qgCode(u);
   }
 
   map.on("zoomend", function () {
@@ -3681,6 +3802,9 @@ window.QuakeAngelRescue = (function () {
     return {
       deviceId: d.device_id,
       device_id: d.device_id, // QuakeAngelRescue widget expects this exact key
+      shortCode: d.short_code,       // collision-safe, server-derived (item 2)
+      displayName: d.display_name,
+      trappedSince: d.trapped_since, // start of the current trapped spell (item 3)
       status: d.status,
       severity: d.severity,
       mobility: d.mobility,
@@ -3843,6 +3967,16 @@ window.QuakeAngelRescue = (function () {
   }
   window.setFilter = setFilter;
 
+  function qgCode(u) {
+    return u.shortCode || String(u.deviceId || "").slice(-5).toUpperCase();
+  }
+
+  function agoWords(iso) {
+    var ms = Date.now() - new Date(iso).getTime();
+    if (ms < 60000) return "just now";
+    return window.qgDurWords(ms) + " ago";
+  }
+
   function popupHtml(u) {
     var mob = mobilityLabel(u.mobility);
     var showRescue = u.status === "trapped" || u.status === "rescued";
@@ -3852,7 +3986,13 @@ window.QuakeAngelRescue = (function () {
     var sevChip = (u.status === "trapped" && window.qgSeverityChip)
       ? "<br>" + window.qgSeverityChip(u.severity)
       : "";
-    return "<b>" + u.deviceId + "</b><br>" + statusLabel(u.status, u.severity) + sevChip +
+    var trappedLine = (u.status === "trapped" && u.trappedSince)
+      ? "<br><b>Trapped for " + window.qgDurWords(Date.now() - new Date(u.trappedSince).getTime()) + "</b>"
+      : "";
+    return '<span style="font-size:16px; font-weight:800; letter-spacing:1px">' + qgCode(u) + "</span>" +
+      (u.displayName ? " — " + u.displayName : "") +
+      '<br><span style="font-size:9px; color:#888">' + u.deviceId + "</span>" +
+      "<br>" + statusLabel(u.status, u.severity) + sevChip + trappedLine +
       (mob ? "<br>" + mob : "") + "<br>Battery: " + (u.batteryPercent != null ? u.batteryPercent : "?") + "%" + rescueSlot;
   }
 
@@ -3865,15 +4005,34 @@ window.QuakeAngelRescue = (function () {
     var bulkCheck = u.status === "trapped"
       ? '<label class="qg-bulk-check"><input type="checkbox" class="qg-bulk-checkbox" data-device-id="' + u.deviceId + '"> Select for group rescue</label>'
       : "";
-    return bulkCheck +
-      '<div class="id">' + u.deviceId +
+    // Short code leads, large and bold — the string an operator reads down
+    // a radio (item 2). The full device ID stays visible as the audit
+    // identifier, small and secondary.
+    var head =
+      '<div class="qg-card-code">' + qgCode(u) +
+      (u.displayName ? '<span class="qg-card-name">' + u.displayName + "</span>" : "") +
       (isUrgent(u.status, u.severity) ? '<span class="badge sos">SOS</span>' : "") +
       (u.status === "rescued" ? '<span class="badge rescued-badge">RESCUED</span>' : "") +
       "</div>" +
+      '<div class="qg-card-fullid">' + u.deviceId + "</div>";
+    // 'Trapped for …' — the operationally critical figure (item 3).
+    var trappedLine = (u.status === "trapped" && u.trappedSince)
+      ? '<div class="qg-card-trapped">Trapped for ' + window.qgDurWords(Date.now() - new Date(u.trappedSince).getTime()) + "</div>"
+      : "";
+    // Low battery = countdown to losing contact (item 4): icon + words,
+    // never colour alone. Devices at 20%+ look exactly as before.
+    var lowBatt = (u.batteryPercent != null && u.batteryPercent < 20);
+    var battLine = lowBatt
+      ? '<div class="qg-card-batt-low">⚠ Battery ' + u.batteryPercent + "% — low battery, may lose contact soon</div>"
+      : "";
+    var updLine = u.lastUpdated
+      ? '<div class="meta">Updated ' + agoWords(u.lastUpdated) + "</div>" +
+        '<div class="qg-card-abs">' + new Date(u.lastUpdated).toLocaleTimeString() + "</div>"
+      : '<div class="meta">Updated: —</div>';
+    return bulkCheck + head + trappedLine +
       '<div class="meta">' + statusLabel(u.status, u.severity) + (mob ? " · " + mob : "") +
-      " · Battery " + (u.batteryPercent != null ? u.batteryPercent : "?") + "%</div>" +
-      '<div class="meta">Updated: ' + (u.lastUpdated ? new Date(u.lastUpdated).toLocaleTimeString() : "—") + "</div>" +
-      rescueSlot;
+      (lowBatt ? "" : " · Battery " + (u.batteryPercent != null ? u.batteryPercent : "?") + "%") + "</div>" +
+      battLine + updLine + rescueSlot;
   }
 
   function wireRescueButtons(root, device) {
@@ -3928,13 +4087,13 @@ window.QuakeAngelRescue = (function () {
     }
   }
 
-  function buildGroup(title, cls, items, alwaysOpen, openState) {
+  function buildGroup(title, cls, items, defaultOpen, openState) {
     var details = document.createElement("details");
     details.className = "triage-group " + cls;
-    // Preserve the operator's manual open/closed choice across re-renders.
-    details.open = (openState && cls in openState)
-      ? openState[cls]
-      : (alwaysOpen || items.length > 0);
+    // Preserve the operator's manual open/closed choice across re-renders;
+    // otherwise use the group's default. Rescued defaults CLOSED (item 5):
+    // unresolved is always visible, resolved is available on request.
+    details.open = (openState && cls in openState) ? openState[cls] : defaultOpen;
 
     var summary = document.createElement("summary");
     summary.innerHTML = "<span>" + title + '</span><span class="group-count">' + items.length + "</span>";
@@ -3970,11 +4129,33 @@ window.QuakeAngelRescue = (function () {
   // case; (b) when it did change, preserve page scroll, group open/closed
   // state, and keyboard focus across the rebuild.
   var lastSidebarSig = null;
+  var searchTerm = "";
+  (function () {
+    var box = document.getElementById("qg-triage-search");
+    if (!box) return;
+    box.addEventListener("input", function () {
+      searchTerm = box.value.trim().toLowerCase();
+      if (lastUsers.length) renderSidebar(lastUsers);
+    });
+  })();
+
+  function matchesSearch(u) {
+    if (!searchTerm) return true;
+    return qgCode(u).toLowerCase().indexOf(searchTerm) !== -1 ||
+      String(u.deviceId || "").toLowerCase().indexOf(searchTerm) !== -1 ||
+      String(u.displayName || "").toLowerCase().indexOf(searchTerm) !== -1;
+  }
 
   function sidebarSignature(users) {
     return JSON.stringify(users.map(function (u) {
-      return [u.deviceId, u.status, u.severity, u.mobility, u.batteryPercent, u.lastUpdated];
-    })) + "|" + Array.from(selectedForRescue).sort().join(",");
+      return [u.deviceId, u.shortCode, u.displayName, u.status, u.severity,
+              u.mobility, u.batteryPercent, u.lastUpdated, u.trappedSince];
+    })) + "|" + Array.from(selectedForRescue).sort().join(",") +
+      "|" + searchTerm +
+      // Minute tick: the 'Trapped for' / 'Updated … ago' figures must keep
+      // counting up on the normal refresh cycle (item 3), so force one
+      // re-render per minute even when the data itself hasn't changed.
+      "|" + Math.floor(Date.now() / 60000);
   }
 
   function renderSidebar(users) {
@@ -4004,18 +4185,34 @@ window.QuakeAngelRescue = (function () {
     });
 
     var byRecency = function (a, b) { return new Date(b.lastUpdated || 0) - new Date(a.lastUpdated || 0); };
-    var red = users.filter(function (u) { return u.status === "trapped" && u.severity === "red"; }).sort(byRecency);
-    var yellow = users.filter(function (u) { return u.status === "trapped" && u.severity === "yellow"; }).sort(byRecency);
-    var green = users.filter(function (u) { return u.status === "trapped" && (u.severity === "green" || !u.severity); }).sort(byRecency);
-    var rescued = users.filter(function (u) { return u.status === "rescued"; }).sort(byRecency);
-    var other = users.filter(function (u) { return u.status !== "trapped" && u.status !== "rescued"; }).sort(byRecency);
+    // Item 6: within each trapped group, LONGEST WAITING FIRST — someone
+    // trapped four hours ranks above someone trapped ten minutes at the
+    // same severity. Low battery breaks ties (about to lose contact =
+    // more urgent to reach). The on-screen sort label states exactly this.
+    var byLongestTrapped = function (a, b) {
+      var ta = new Date(a.trappedSince || a.lastUpdated || 0).getTime();
+      var tb = new Date(b.trappedSince || b.lastUpdated || 0).getTime();
+      if (ta !== tb) return ta - tb;   // earliest trapped start = longest waiting = first
+      var ba = a.batteryPercent == null ? 101 : a.batteryPercent;
+      var bb = b.batteryPercent == null ? 101 : b.batteryPercent;
+      return ba - bb;                  // lower battery first
+    };
+    var visible = users.filter(matchesSearch);
+    var red = visible.filter(function (u) { return u.status === "trapped" && u.severity === "red"; }).sort(byLongestTrapped);
+    var yellow = visible.filter(function (u) { return u.status === "trapped" && u.severity === "yellow"; }).sort(byLongestTrapped);
+    var green = visible.filter(function (u) { return u.status === "trapped" && (u.severity === "green" || !u.severity); }).sort(byLongestTrapped);
+    var rescued = visible.filter(function (u) { return u.status === "rescued"; }).sort(byRecency);
+    var other = visible.filter(function (u) { return u.status !== "trapped" && u.status !== "rescued"; }).sort(byRecency);
 
     container.innerHTML = "";
     container.appendChild(buildGroup("🔴 IMMEDIATE — seriously injured / can't move", "group-red", red, true, openState));
     container.appendChild(buildGroup("🟡 SERIOUS — STABLE — hurt but stable", "group-yellow", yellow, true, openState));
     container.appendChild(buildGroup("🟢 MINOR — walking wounded", "group-green", green, true, openState));
+    // Item 5: Rescued defaults COLLAPSED — finished work must not push
+    // live cases off the bottom of the screen. Count stays visible in the
+    // summary; Undo Rescued still works inside once expanded.
     container.appendChild(buildGroup("✅ Rescued — confirmed found & safe", "group-rescued", rescued, false, openState));
-    container.appendChild(buildGroup("⚪ Other — Safe / Not Responding / Unknown", "group-other", other, false, openState));
+    container.appendChild(buildGroup("⚪ Other — Safe / Not Responding / Unknown", "group-other", other, true, openState));
 
     // Restore focus (checkboxes carry data-device-id) and scroll position.
     if (activeId) {
@@ -4052,8 +4249,34 @@ window.QuakeAngelRescue = (function () {
   }
 
   initBulkBar();
+
+  // Item 7: live-counts toggle — session-only, never persisted.
+  (function () {
+    var toggle = document.getElementById("qg-stats-toggle");
+    var row = document.getElementById("qg-stat-row");
+    if (!toggle || !row) return;
+    toggle.addEventListener("click", function () {
+      var hidden = row.style.display === "none";
+      row.style.display = hidden ? "" : "none";
+      toggle.textContent = hidden ? "▾ Hide live counts" : "▸ Show live counts";
+      toggle.setAttribute("aria-expanded", hidden ? "true" : "false");
+      if (typeof fixMapSize === "function") setTimeout(fixMapSize, 50);
+    });
+  })();
+
   refresh();
   setInterval(refresh, 4000);
+
+  // Headless-test hook: renders a synthetic device list through the real
+  // pipeline (normalize → map → sidebar). No effect unless explicitly
+  // called from the console.
+  window.__qgDebugRender = function (rawDevices) {
+    var users = rawDevices.map(normalizeDevice);
+    lastUsers = users;
+    renderMap(users);
+    applyFilterVisibility();
+    renderSidebar(users);
+  };
 })();
 
 /* ── Trigger button: confirm + broadcast, with prominent feedback ── */
