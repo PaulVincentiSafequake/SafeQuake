@@ -130,6 +130,21 @@
   .header-brand .qg-logo-slot .qg-divider {
     width: 1px; height: 28px; background: rgba(255,255,255,0.18);
   }
+  /* #128: the partner caption + logo live inside ONE bordered badge so
+     the label can never float disconnected from the mark it describes. */
+  .header-brand .qg-partner-badge {
+    display: inline-flex; flex-direction: column; align-items: center; gap: 3px;
+    padding: 4px 10px; border: 1px solid rgba(255,255,255,0.22);
+    border-radius: 8px; background: rgba(255,255,255,0.04);
+  }
+  .header-brand .qg-partner-badge .qg-partner-caption {
+    font-size: 9px; font-style: italic; color: #b7c2cc;
+    line-height: 1; white-space: nowrap;
+  }
+  .header-brand .qg-partner-badge img {
+    max-height: 26px; max-width: 140px; border-radius: 4px;
+    background: rgba(255,255,255,0.06); padding: 1px 4px;
+  }
   header h1 { font-size: 18px; margin: 0; font-weight: 700; letter-spacing: .2px; }
   header p { margin: 2px 0 0; font-size: 12px; color: #b7c2cc; }
   .header-actions {
@@ -666,7 +681,7 @@
               qaAuth.idle.expireNow() / .reset()  (test hooks)
               qaApi(path, options) -> raw Response, attaches Bearer JWT,
               clears local session on 401 before returning.
-     Also: automatic idle-timeout sign-out (15 min default, 60s warning
+     Also: automatic idle-timeout sign-out (60 min default, 60s warning
      modal). Set CONFIG.IDLE_TIMEOUT_MS = 0 to disable.
      ═════════════════════════════════════════════════════════════════════ -->
 
@@ -746,9 +761,19 @@
   // ── UI rendering ──────────────────────────────────────────────────────
   const CSS = `
     .qa-auth-root { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
-    .qa-signed-out { display: flex; align-items: center; gap: 12px; padding: 12px; background: #f8f8f8; border: 1px solid #e5e5e5; border-radius: 8px; }
-    .qa-signed-out h3 { margin: 0; font-size: 14px; color: #333; font-weight: 600; }
-    .qa-signed-out .g_id_signin { flex-shrink: 0; }
+    /* #134: signed-out state is ONE clear, active banner — bold brand-red
+       band at the very top with the sign-in button inside it. Every other
+       signed-out indicator on the page is a quiet one-liner pointing here. */
+    .qa-signed-out {
+      display: flex; align-items: center; flex-wrap: wrap; gap: 16px;
+      padding: 14px 20px; background: #B0141A; color: #fff;
+      border-bottom: 3px solid #7d0e13;
+    }
+    .qa-signed-out .qa-so-icon { font-size: 26px; line-height: 1; }
+    .qa-signed-out .qa-so-text { flex: 1 1 320px; min-width: 240px; }
+    .qa-signed-out h3 { margin: 0; font-size: 15px; color: #fff; font-weight: 800; }
+    .qa-signed-out p { margin: 3px 0 0; font-size: 12.5px; color: #ffd9db; line-height: 1.4; }
+    .qa-signed-out #qa-google-button { flex-shrink: 0; background: #fff; border-radius: 6px; padding: 3px; }
     .qa-chip { display: inline-flex; align-items: center; gap: 8px; padding: 6px 10px; background: #fff; border: 1px solid #e0e0e0; border-radius: 999px; font-size: 12px; color: #444; }
     .qa-chip b { color: #111; }
     .qa-chip .qa-role { background: #eef; color: #226; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; }
@@ -838,7 +863,11 @@
     const wrap = document.createElement("div");
     wrap.className = "qa-signed-out";
     wrap.innerHTML =
-      '<h3>Dashboard sign-in</h3>' +
+      '<span class="qa-so-icon" aria-hidden="true">🔒</span>' +
+      '<div class="qa-so-text">' +
+        '<h3>You are signed out — sign in to use the dashboard</h3>' +
+        '<p>Live triage detail, map markers, the activity feed and report downloads unlock after sign-in. The signed-out view shows overall numbers only.</p>' +
+      '</div>' +
       '<div id="qa-google-button"></div>';
     container.appendChild(wrap);
 
@@ -2157,7 +2186,7 @@
       <div class="qg-export-group-title">🔒 CONFIDENTIAL — for your team only</div>
       <div class="qg-export-cards">
         <button class="qg-export-card" id="qg-report-b1">
-          <span class="qg-ec-head">Today's report — for your team<span class="qg-ec-code">(B1)</span></span>
+          <span class="qg-ec-head">Today's report — for your team</span>
           <span class="qg-ec-desc">Names, locations and details. A printable page.</span>
         </button>
         <button class="qg-export-card" id="qg-export-pdf">
@@ -2171,10 +2200,12 @@
       </div>
       <label style="font-size:11px;color:#555;display:inline-flex;align-items:center;gap:6px">
         Team report size:
+        <!-- #130: summary is the DEFAULT — the per-device table can run
+             to many pages in a large incident and is opt-in only. -->
         <select class="qg-b1-detail" id="qg-b1-detail"
                 title="Summary only keeps the report short in a large incident; full detail adds one table row per device.">
-          <option value="full" selected>Full detail — with per-device table</option>
-          <option value="summary">Summary only — no per-device table</option>
+          <option value="summary" selected>Summary only — no per-device table</option>
+          <option value="full">Full detail — with per-device table</option>
         </select>
       </label>
     </div>
@@ -2183,7 +2214,7 @@
       <div class="qg-export-group-title">✅ Safe to share</div>
       <div class="qg-export-cards">
         <button class="qg-export-card" id="qg-report-b2">
-          <span class="qg-ec-head">Today's report — safe to share<span class="qg-ec-code">(B2)</span></span>
+          <span class="qg-ec-head">Today's report — safe to share</span>
           <span class="qg-ec-desc">Numbers only. No names, no locations, no one can be identified.</span>
         </button>
       </div>
@@ -2279,7 +2310,7 @@
       // this too as of 2026-08-13): the feed carries short codes,
       // severity, map links and operator emails.
       if (!(window.qaAuth && window.qaAuth.jwt && window.qaAuth.jwt())) {
-        var lockedMsg0 = '<div class="qg-audit-empty">🔒 Sign in to view the activity feed.</div>';
+        var lockedMsg0 = '<div class="qg-audit-empty">The activity feed is available after sign-in — use the banner at the top of the page.</div>';
         if (lockedMsg0 !== body.__qgLastHtml) {
           body.__qgLastHtml = lockedMsg0;
           body.innerHTML = lockedMsg0;
@@ -2294,7 +2325,7 @@
       if (res.status === 401 || res.status === 403) {
         // Feed is operator/admin gated server-side (2026-08-13) — it
         // carries short codes, severity, map links and operator emails.
-        var lockedMsg = '<div class="qg-audit-empty">🔒 Sign in to view the activity feed.</div>';
+        var lockedMsg = '<div class="qg-audit-empty">The activity feed is available after sign-in — use the banner at the top of the page.</div>';
         if (lockedMsg !== body.__qgLastHtml) {
           body.__qgLastHtml = lockedMsg;
           body.innerHTML = lockedMsg;
@@ -2463,26 +2494,28 @@
   }
   async function doCasualtyReport(kind /* "operational" | "public" */) {
     if (typeof window.qaApi !== "function") return;
-    // B1 carries names + GPS — same confirmation friction as the audit
-    // exports. B2 is aggregate-only and safe to share, so no dialog.
-    if (kind === "operational" && !confirm("The B1 Operational report is CONFIDENTIAL.\n\n" +
+    // The team report carries names + GPS — same confirmation friction as
+    // the audit exports. The public report is aggregate-only and safe to
+    // share, so no dialog. (#133: no B1/B2 jargon in operator-facing text.)
+    if (kind === "operational" && !confirm("The team report is CONFIDENTIAL.\n\n" +
         "It contains names, exact GPS positions and operator notes.\n" +
         "Do NOT share it with press, families or anyone outside authorised emergency personnel.\n" +
-        "For anything public, use the B2 Public report instead.\n\n" +
-        "Download B1?")) return;
+        "For anything public, use the \u201Csafe to share\u201D report instead.\n\n" +
+        "Download the team report?")) return;
     var since = windowSinceISO();   // honours "Since the alert" (item 1b)
     var path = "/api/admin/casualty-report/" + kind + ".pdf" + "?since=" + encodeURIComponent(since);
-    // Pseudonymisation + detail level apply to B1 only — B2 carries no
-    // operator identity and no per-device table.
+    // Pseudonymisation + detail level apply to the team report only — the
+    // public report carries no operator identity and no per-device table.
     if (kind === "operational") {
       var pseudoCb2 = document.getElementById("qg-export-pseudo");
       if (pseudoCb2 && pseudoCb2.checked) path += "&pseudonymise=true";
+      // #130: always send the choice explicitly; "summary" is the default.
       var detailSel = document.getElementById("qg-b1-detail");
-      if (detailSel && detailSel.value === "summary") path += "&detail=summary";
+      path += "&detail=" + (detailSel && detailSel.value === "full" ? "full" : "summary");
     }
     var btn = kind === "operational" ? reportB1Btn : reportB2Btn;
     btn.disabled = true;
-    showExportMsg("", "Preparing " + (kind === "operational" ? "B1 Operational" : "B2 Public") + "…");
+    showExportMsg("", "Preparing the " + (kind === "operational" ? "team report" : "public report") + "\u2026");
     try {
       var r = await window.qaApi(path);
       if (!r.ok) {
@@ -2508,7 +2541,7 @@
       a.href = url; a.download = filename;
       document.body.appendChild(a); a.click(); document.body.removeChild(a);
       setTimeout(function () { URL.revokeObjectURL(url); }, 5000);
-      showExportMsg("success", (kind === "operational" ? "B1 downloaded" : "B2 downloaded (safe to share externally)") + ".");
+      showExportMsg("success", (kind === "operational" ? "Team report downloaded." : "Public report downloaded (safe to share externally)."));
     } catch (e) {
       showExportMsg("error", "Report failed: " + (e && e.message ? e.message : e));
     } finally { btn.disabled = false; }
@@ -3233,13 +3266,13 @@ window.QuakeAngelRescue = (function () {
     <span id="qg-settings-caret">▸</span> Dashboard settings
   </h2>
   <div style="font-size:12px; color:var(--text-muted); margin-bottom:12px">
-    Org logo (shown in header + printed reports) and next-of-kin authority name (shown on B1/B2 PDFs). Admin-only.
+    Org logo (shown in header + printed reports) and next-of-kin authority name (shown on printed report footers). Admin-only.
   </div>
   <div id="qg-settings-body" style="display:none">
     <div id="qg-settings-msg" style="margin-bottom:12px"></div>
     <h3 style="font-size:13px; margin:0 0 6px 0; color:var(--text)">Organisation logo</h3>
     <div style="font-size:12px; color:var(--text-muted); margin-bottom:8px">
-      PNG or SVG. PNG max 200 KB, SVG max 100 KB. Appears in the header alongside Quake Angel and on B1/B2 PDF headers when print-support is added.
+      PNG or SVG. PNG max 200 KB, SVG max 100 KB. Appears in the header alongside Quake Angel and on printed report headers.
     </div>
     <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:16px">
       <input type="file" id="qg-logo-file" accept=".png,image/png,.svg,image/svg+xml" style="font-size:12px; color:var(--text)">
@@ -3250,7 +3283,7 @@ window.QuakeAngelRescue = (function () {
         <img id="qg-logo-preview" style="max-height:32px; max-width:120px; background:#111; padding:2px 4px; border-radius:3px">
       </span>
     </div>
-    <h3 style="font-size:13px; margin:0 0 6px 0; color:var(--text)">Authority name (on B1/B2 report footers)</h3>
+    <h3 style="font-size:13px; margin:0 0 6px 0; color:var(--text)">Authority name (on printed report footers)</h3>
     <div style="font-size:12px; color:var(--text-muted); margin-bottom:8px">
       The name of the organisation responsible for next-of-kin notification in this jurisdiction (e.g., "Malta Civil Protection Department"). Leave blank to use the generic "the responsible authorities" wording. Only set this when a formal agreement exists — the name will appear on distributable public PDFs.
     </div>
@@ -3359,7 +3392,48 @@ window.QuakeAngelRescue = (function () {
     } catch (_) { return null; }
   }
 
-  function renderOrgLogo(logoB64, mime) {
+  // #128: the uploaded "partner" logo must never duplicate Quake Angel's
+  // own mark in the header. Byte-identical uploads are caught by direct
+  // comparison; re-exports of the same artwork are caught by a 16×16
+  // downsampled pixel comparison (cheap, runs once per settings fetch).
+  function imageSig(src) {
+    return new Promise(function (resolve) {
+      var im = new Image();
+      im.onload = function () {
+        try {
+          var c = document.createElement('canvas');
+          c.width = 16; c.height = 16;
+          var ctx = c.getContext('2d');
+          // Composite onto the header's dark background first so a
+          // transparent-background re-export of the same artwork still
+          // matches the solid-background brand mark.
+          ctx.fillStyle = '#0f0f0f';
+          ctx.fillRect(0, 0, 16, 16);
+          ctx.drawImage(im, 0, 0, 16, 16);
+          resolve(ctx.getImageData(0, 0, 16, 16).data);
+        } catch (_) { resolve(null); }
+      };
+      im.onerror = function () { resolve(null); };
+      im.src = src;
+    });
+  }
+  async function looksLikeBrandMark(dataUri) {
+    var brandImg = document.getElementById('qg-brand-logo');
+    if (!brandImg) return false;
+    var brandSrc = brandImg.getAttribute('src');
+    if (brandSrc === dataUri) return true;
+    var sigs = await Promise.all([imageSig(brandSrc), imageSig(dataUri)]);
+    var a = sigs[0], b = sigs[1];
+    if (!a || !b || a.length !== b.length) return false;
+    var diff = 0, n = 0;
+    for (var i = 0; i < a.length; i += 4) {   // RGB only — alpha handled by compositing
+      diff += Math.abs(a[i] - b[i]) + Math.abs(a[i+1] - b[i+1]) + Math.abs(a[i+2] - b[i+2]);
+      n += 3;
+    }
+    return (diff / n) < 12;   // measured: same artwork ≈ 1.4, different logo ≈ 166
+  }
+
+  async function renderOrgLogo(logoB64, mime) {
     var slot = document.getElementById('qg-org-logo-slot');
     var img  = document.getElementById('qg-org-logo-img');
     var preview = document.getElementById('qg-logo-preview');
@@ -3370,8 +3444,11 @@ window.QuakeAngelRescue = (function () {
       return;
     }
     var dataUri = 'data:' + mime + ';base64,' + logoB64;
+    // Keep the admin preview either way (so a duplicate can be
+    // inspected and removed) but never render the duplicate badge.
+    var duplicatesBrand = await looksLikeBrandMark(dataUri);
     if (img) img.src = dataUri;
-    if (slot) slot.style.display = 'inline-flex';
+    if (slot) slot.style.display = duplicatesBrand ? 'none' : 'inline-flex';
     if (preview) preview.src = dataUri;
     if (previewWrap) previewWrap.style.display = 'inline-flex';
   }
@@ -3385,7 +3462,7 @@ window.QuakeAngelRescue = (function () {
     if (authInput && s.authority_name && !authInput.value) authInput.value = s.authority_name;
     if (authCurrent) {
       authCurrent.textContent = s.authority_name
-        ? 'Current: "' + s.authority_name + '" — appears on B1/B2 report footers.'
+        ? 'Current: "' + s.authority_name + '" — appears on printed report footers.'
         : 'Current: (unset) — reports use the generic "the responsible authorities" wording.';
     }
   }
@@ -3521,7 +3598,7 @@ window.QuakeAngelRescue = (function () {
         showSettingsMsg('error', 'Save failed: ' + detail);
       } else {
         showSettingsMsg('success', val
-          ? 'Authority set to "' + val + '". Future B1/B2 reports will use this name.'
+          ? 'Authority set to "' + val + '". Future printed reports will use this name.'
           : 'Authority cleared — reports revert to generic wording.'
         );
         await refreshSettings();
@@ -3647,19 +3724,38 @@ window.QuakeAngelRescue = (function () {
     if (!document.hidden) setTimeout(fixMapSize, 100);
   });
 
-  // ── Fix 1.4: Ctrl/Cmd + scroll zooms; plain scroll shows a hint ──────
+  // ── Fix 1.4 + #136: Ctrl/Cmd + scroll (and trackpad pinch) zooms ─────
+  // OS-aware hint: navigator.platform is deprecated and empty in some
+  // browsers — prefer userAgentData, fall back to platform/userAgent.
+  var isMac = (function () {
+    var p = (navigator.userAgentData && navigator.userAgentData.platform) ||
+            navigator.platform || navigator.userAgent || "";
+    return /mac|iphone|ipad|ipod/i.test(p);
+  })();
   var hint = document.createElement("div");
   hint.id = "qg-map-scroll-hint";
-  hint.innerHTML = "<span>Use " + (navigator.platform && navigator.platform.indexOf("Mac") !== -1 ? "\u2318 Cmd" : "Ctrl") + " + scroll to zoom the map</span>";
+  hint.innerHTML = "<span>Use " + (isMac ? "\u2318 Cmd" : "Ctrl") +
+    " + scroll (or pinch on a trackpad) to zoom the map</span>";
   if (mapWrap) mapWrap.appendChild(hint);
   var hintTimer = null;
+  // Trackpad pinch arrives as wheel events with ctrlKey=true — MANY per
+  // gesture, each with a small delta. Stepping the zoom ±1 per event made
+  // a pinch rocket between world and street view (#136). Accumulate the
+  // delta and step once per threshold instead: a mouse wheel notch
+  // (~±100) still steps immediately, a pinch takes a few events per step.
+  var zoomAccum = 0;
   mapEl.addEventListener("wheel", function (e) {
     if (e.ctrlKey || e.metaKey) {
-      e.preventDefault();
+      e.preventDefault();   // also stops the browser page-zoom on pinch
       hint.classList.remove("show");
-      var dir = e.deltaY < 0 ? 1 : -1;
-      map.setZoomAround(map.mouseEventToLatLng(e), map.getZoom() + dir);
+      zoomAccum += e.deltaY;
+      if (Math.abs(zoomAccum) >= 40) {
+        var dir = zoomAccum < 0 ? 1 : -1;
+        zoomAccum = 0;
+        map.setZoomAround(map.mouseEventToLatLng(e), map.getZoom() + dir);
+      }
     } else {
+      zoomAccum = 0;
       // Let the page scroll; briefly explain how to zoom.
       hint.classList.add("show");
       if (hintTimer) clearTimeout(hintTimer);
@@ -3855,10 +3951,11 @@ window.QuakeAngelRescue = (function () {
       selectedForRescue.clear();
       updateBulkBar();
       var container = document.getElementById("userlist");
+      // #134: quiet one-liner only — the single ACTIVE sign-in prompt is
+      // the red banner at the top of the page.
       container.innerHTML =
-        '<div style="padding:18px 14px; background:var(--surface, #fff); border:1px solid var(--border, #e0e0e0); border-radius:10px; font-size:13.5px; line-height:1.6; color:var(--text, #222)">' +
-        '🔒 <b>Sign in to see live triage detail.</b><br>' +
-        'The signed-out view shows overall numbers only — no names, codes, or locations.' +
+        '<div style="padding:10px 12px; font-size:12.5px; line-height:1.5; color:var(--text-dim, #888); border:1px dashed var(--border, #d0d0d0); border-radius:8px">' +
+        'Overall numbers only while signed out. Use the sign-in banner at the top of the page for live triage detail.' +
         '</div>';
     }
   }
