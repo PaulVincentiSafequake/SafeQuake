@@ -672,3 +672,24 @@ After EMSC Phase 1 and subscription lapse A+B. Ahead of QR feature and report ex
 Tests: 141 passing across export/report/gating/CORS/display-name suites. test_cors_iteration_24 + test_display_name_iteration_25 updated to authenticate against the newly gated endpoints.
 
 **DEPLOY STATE: backend changes awaiting Publish; dashboard changes staged in /app/memory/dashboard_build/index.html — LAST PUSH FAILED because the PAT expired. Ask Paul for a fresh PAT and push (single commit, message drafted).**
+
+---
+
+## 2026-08-13 (batch 2) — Paul's full findings list
+
+**Backend (DONE, tests: 144 passing — NEEDS PUBLISH):**
+- 1a: B1, B2 and audit PDFs all generate PORTRAIT A4 now (595×842). Tables re-fit: audit cols 186mm, B1 per-device cols 186mm @7pt, charts 182/170mm. Verified single-page renders.
+- 1b: CONFIDENTIAL band enlarged: 30pt band, 13pt bold "CONFIDENTIAL — personal data" + 7.5pt second line.
+- 3a: B2 issuer line "Issued by the Quake Angel emergency response system, in cooperation with {authority}." — system-level, never the operator.
+- 3b: B2 heading+chart+narrative are ONE KeepTogether block; fits one page.
+- 5b: B1 `?detail=summary` omits the per-device table ("Per-device detail omitted…" note, `-summary` filename suffix, CONFIDENTIAL treatment kept).
+- Polish: percentage/"Overall:" line REMOVED from B1 narrative (restated the split lines); watermark now fully behind content — opaque white bases on all tables + chart drawing; logo drawn on PDFs now carries an "In partnership with" caption.
+- Tests updated: portrait assertion, summary variant, issuer line, no-percentage-statistic; iteration_31 name test made wrap-tolerant.
+
+**Dashboard (STAGED in /app/memory/dashboard_build/index.html — PUSH PENDING, PAT expired again):**
+- 5a: export bar rebuilt as plain-language cards grouped by confidentiality: 🔒 "CONFIDENTIAL — for your team only" (Today's report — for your team (B1) / Full history — printable (audit PDF) / Full history — spreadsheet (audit CSV)) FIRST, then ✅ "Safe to share" (Today's report — safe to share (B2)). Icons+wording, never colour alone. Shared controls: time range, Hide operator emails, Team report size selector (full/summary → &detail=summary).
+- P2: header org logo now a labelled "In partnership with" badge; QA mark is permanent product branding (Paul's decision — only a code change may touch it).
+- P4: trigger button hidden signed-out (server 401 already enforced).
+- Commit message drafted (see git history intent); ask for fresh PAT and push single commit.
+
+**NEXT AFTER THIS BATCH: full dashboard restructure — spec in `dashboard-restructure-spec.md` in Paul's project folder (tabs Live/Reports/Admin/Testing, persistent status bar, search, pop-out map). Ask Paul to provide the spec file contents when starting.**

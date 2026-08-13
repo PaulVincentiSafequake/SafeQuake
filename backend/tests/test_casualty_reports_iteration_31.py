@@ -300,7 +300,10 @@ class TestB1Content:
         assert not missing, f"B1 missing markers {missing}\nText: {b1_text[:800]}"
 
     def test_b1_contains_trapped_display_name(self, b1_text):
-        assert TEST_TRAPPED_NAME in b1_text, (
+        # Portrait B1 (2026-08-13) wraps this long unbroken synthetic name
+        # across lines in the narrow Name column — strip newlines before
+        # matching; wrapping is presentation, not data loss.
+        assert TEST_TRAPPED_NAME in b1_text.replace("\n", ""), (
             f"B1 must include the seeded trapped person's display_name {TEST_TRAPPED_NAME}"
         )
 

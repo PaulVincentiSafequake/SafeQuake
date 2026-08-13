@@ -298,12 +298,40 @@ class TestPdfHardening:
         assert "Response over time" in text
         assert "This only counts people using the app." in text
 
-    def test_b1_percentage_always_states_base(self, seeded):
+    def test_b1_has_no_percentage_statistic(self, seeded):
+        # The former "Overall … (N%)" line restated the split narrative
+        # lines and was dropped at Paul's request (2026-08-13 polish).
+        # (Battery cells like "61%" are data, not statistics — allowed.)
         r = requests.get(B1_URL, headers=HEADERS, params=_window(), timeout=30)
         text = _pdf_text(r.content)
-        if "%" in text:
-            assert "counting app users who checked in only" in text, \
-                "B1 shows a percentage without stating its base"
+        assert "Overall:" not in text
+        assert "counting app users who checked in only" not in text
+
+    def test_all_reports_are_portrait(self, seeded):
+        # 1a (2026-08-13): landscape PDFs printed on default portrait paper
+        # scaled the CONFIDENTIAL band down to near-illegible.
+        from pypdf import PdfReader
+        for name, url in (("B1", B1_URL), ("B2", B2_URL), ("audit", PDF_URL)):
+            r = requests.get(url, headers=HEADERS, params=_window(), timeout=30)
+            box = PdfReader(_io.BytesIO(r.content)).pages[0].mediabox
+            assert float(box.width) < float(box.height), \
+                f"{name} PDF is landscape ({box.width}x{box.height}) — must be portrait"
+
+    def test_b1_summary_variant(self, seeded):
+        params = {**_window(), "detail": "summary"}
+        r = requests.get(B1_URL, headers=HEADERS, params=params, timeout=30)
+        assert r.status_code == 200
+        assert "-summary-" in r.headers.get("Content-Disposition", "")
+        text = _pdf_text(r.content)
+        assert "Per-device detail omitted" in text
+        assert "Harden Test Person" not in text, "summary version must not list devices"
+        assert "CONFIDENTIAL" in text, "summary version keeps the confidential treatment"
+
+    def test_b2_names_issuer_but_no_operator(self, seeded):
+        r = requests.get(B2_URL, headers=HEADERS, params=_window(), timeout=30)
+        text = _pdf_text(r.content)
+        assert "Issued by the Quake Angel emergency response system" in text
+        assert "@" not in text, "no personal email may appear on B2"
 
     def test_b2_has_timeline_but_no_percentage(self, seeded):
         r = requests.get(B2_URL, headers=HEADERS, params=_window(), timeout=30)

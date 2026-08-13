@@ -855,7 +855,7 @@ def _pdf_confidentiality_onpage(canvas_, doc_):
     canvas_.saveState()
     canvas_.translate(w / 2, h / 2)
     canvas_.rotate(30)
-    canvas_.setFont("Helvetica-Bold", 64)
+    canvas_.setFont("Helvetica-Bold", 56)
     try:
         canvas_.setFillAlpha(0.05)
     except Exception:
@@ -864,18 +864,19 @@ def _pdf_confidentiality_onpage(canvas_, doc_):
     canvas_.drawCentredString(0, -22, "CONFIDENTIAL")
     canvas_.restoreState()
 
-    banner_h = 22          # ~7.8mm
+    # Top band: 30pt tall with a 13pt bold CONFIDENTIAL — the single most
+    # important line on the document must be legible at a glance, even on
+    # a mis-scaled print (bug 1b, 2026-08-13; was 8pt in a 22pt band).
+    banner_h = 30
     canvas_.setFillColor(_rl_colors.HexColor("#B0141A"))
     canvas_.rect(0, h - banner_h, w, banner_h, fill=1, stroke=0)
     canvas_.setFillColor(_rl_colors.white)
-    canvas_.setFont("Helvetica-Bold", 8)
-    canvas_.drawString(12, h - 14, "CONFIDENTIAL")
-    canvas_.setFont("Helvetica", 7)
-    # Wrap-safe: this text is short enough for A4 landscape and portrait
-    # at 7pt; SimpleDocTemplate leaves top margin so body content won't
-    # collide with the banner.
-    canvas_.drawString(90, h - 14,
-        "personal data — do not share outside authorised emergency personnel. "
+    canvas_.setFont("Helvetica-Bold", 13)
+    canvas_.drawString(12, h - 14, "CONFIDENTIAL — personal data")
+    canvas_.setFont("Helvetica", 7.5)
+    # Fits a single line on portrait A4 at 7.5pt (verified).
+    canvas_.drawString(12, h - 25,
+        "Do not share outside authorised emergency personnel. "
         "For public use the B2 Public report."
     )
     # Footer band
@@ -1025,6 +1026,15 @@ def _draw_logo(canvas_, doc_, logo, top_offset_pt: float):
         lh = 26.0
         lw = iw * lh / float(ih or 1)
         page_w, page_h = doc_.pagesize
+        # Partnership caption (Paul, 2026-08-13): the uploaded org logo is
+        # a labelled partner badge — never an unlabelled second mark next
+        # to Quake Angel's own branding.
+        canvas_.saveState()
+        canvas_.setFont("Helvetica-Oblique", 5.5)
+        from reportlab.lib import colors as _rl_colors
+        canvas_.setFillColor(_rl_colors.HexColor("#777777"))
+        canvas_.drawRightString(page_w - 14, page_h - top_offset_pt + 2, "In partnership with")
+        canvas_.restoreState()
         canvas_.drawImage(
             logo, page_w - 14 - lw, page_h - top_offset_pt - lh,
             width=lw, height=lh, mask="auto", preserveAspectRatio=True,
@@ -1039,7 +1049,7 @@ def _make_confidential_onpage(logo=None):
     def _onpage(canvas_, doc_):
         _pdf_confidentiality_onpage(canvas_, doc_)
         if logo is not None:
-            _draw_logo(canvas_, doc_, logo, top_offset_pt=28)
+            _draw_logo(canvas_, doc_, logo, top_offset_pt=42)
     return _onpage
 
 
@@ -1047,7 +1057,7 @@ def _make_public_onpage(logo=None):
     """B2 Public: org logo top-right, no confidentiality chrome."""
     def _onpage(canvas_, doc_):
         if logo is not None:
-            _draw_logo(canvas_, doc_, logo, top_offset_pt=10)
+            _draw_logo(canvas_, doc_, logo, top_offset_pt=16)
     return _onpage
 
 
@@ -1101,6 +1111,9 @@ def _timeline_chart(buckets: list[dict], width_pt: float, height_pt: float):
     from reportlab.lib import colors as C
 
     d = Drawing(width_pt, height_pt)
+    # Opaque white base so the page watermark never bleeds through the
+    # plot area or legend (Paul, 2026-08-13 polish item).
+    d.add(Rect(0, 0, width_pt, height_pt, fillColor=C.white, strokeColor=None))
     chart = VerticalBarChart()
     chart.x, chart.y = 34, 30
     chart.width, chart.height = width_pt - 44, height_pt - 52
@@ -1183,14 +1196,16 @@ def _progress_figures(raw_rows: list[dict], latest_events: list[dict], counts: d
 
 
 def _plain_language_progress(raw_rows: list[dict], latest_events: list[dict],
-                             counts: dict, include_percentage: bool) -> list[str]:
-    """Short lines, one idea per line, no bare percentages, no jargon.
+                             counts: dict) -> list[str]:
+    """Short lines, one idea per line, no percentages, no jargon.
 
     HARD LOCKS (Paul, 2026-08-12/13):
     - "found by a rescue team" and "told us themselves they are safe" are
       two separate, separately-worded figures. Never merged into a single
       "found" number.
-    - Every percentage states its base on the same line.
+    - No percentages anywhere: the former B1 "Overall … (N%)" line merely
+      restated the split lines above it and was dropped 2026-08-13 at
+      Paul's request.
     - Singular/plural handled ("1 person … has", never "1 of the 1 … have").
     """
     f = _progress_figures(raw_rows, latest_events, counts)
@@ -1221,19 +1236,6 @@ def _plain_language_progress(raw_rows: list[dict], latest_events: list[dict],
         lines.append("No one is still recorded as trapped.")
     else:
         lines.append(f"{still} {_plural(still, 'person is', 'people are')} still recorded as trapped.")
-
-    if include_percentage:
-        pct = round(100.0 * f["resolved"] / total)
-        if total == 1:
-            base = ("The 1 person who told us they were trapped is now recorded as rescued or safe"
-                    if f["resolved"] >= 1
-                    else "The 1 person who told us they were trapped is not yet recorded as rescued or safe")
-            lines.append(f"{base} ({pct}% — counting app users who checked in only).")
-        else:
-            lines.append(
-                f"Overall: {f['resolved']} of the {total} who told us they were trapped are now recorded as "
-                f"rescued or safe ({pct}% — counting app users who checked in only)."
-            )
 
     lines.append("This only counts people using the app.")
     lines.append("Others may be affected who we cannot see.")
@@ -1598,11 +1600,15 @@ async def export_audit_log_pdf(
         data.append([_cell(at), _cell(kind_str), _cell(actor), _cell(details), _cell(meta)])
 
     # Column widths: at, kind, actor, details, meta.
-    # Sum ~= 270mm which fits landscape A4 (297mm - margins).
-    col_widths = [35*mm, 25*mm, 50*mm, 110*mm, 50*mm]
+    # Sum = 186mm which fits PORTRAIT A4 (210mm − 24mm margins). Portrait
+    # because these get printed on default printer settings — landscape
+    # PDFs were scaled down to near-illegible on portrait paper (1a).
+    col_widths = [28*mm, 18*mm, 34*mm, 76*mm, 30*mm]
 
     table = Table(data, colWidths=col_widths, repeatRows=1)
     table.setStyle(TableStyle([
+        # Opaque white base so the watermark never bleeds through data rows.
+        ("BACKGROUND",  (0, 0), (-1, -1), colors.white),
         ("BACKGROUND",  (0, 0), (-1, 0), colors.HexColor("#e6e6ea")),
         ("FONTNAME",    (0, 0), (-1, 0), "Helvetica-Bold"),
         ("FONTSIZE",    (0, 0), (-1, 0), 8),
@@ -1630,11 +1636,11 @@ async def export_audit_log_pdf(
     buf = _io.BytesIO()
     doc = SimpleDocTemplate(
         buf,
-        pagesize=landscape(A4),
+        pagesize=A4,   # PORTRAIT — printer-default friendly (1a, 2026-08-13)
         leftMargin=12*mm, rightMargin=12*mm,
-        # Top+bottom margins expanded to clear the confidentiality banner
-        # + footer drawn by _pdf_confidentiality_onpage (22pt each ≈ 8mm).
-        topMargin=20*mm, bottomMargin=15*mm,
+        # Top+bottom margins expanded to clear the 30pt confidentiality
+        # banner + footer drawn by _pdf_confidentiality_onpage.
+        topMargin=22*mm, bottomMargin=15*mm,
         title="Quake Angel Audit Log",
         author=principal.get("email", ""),
     )
@@ -1867,6 +1873,8 @@ async def casualty_report_operational_pdf(
     since: Optional[str] = Query(default=None, description="ISO 8601 start; default 24h ago."),
     until: Optional[str] = Query(default=None, description="ISO 8601 end; default now."),
     pseudonymise: bool = Query(default=False, description="Replace operator emails with stable pseudonyms (operator-N)."),
+    detail: str = Query(default="full", pattern="^(full|summary)$",
+                        description="'full' includes the per-device table; 'summary' is aggregate + timeline only."),
 ):
     """B1 — Operational casualty report. Admin+operator gated.
 
@@ -1935,6 +1943,8 @@ async def casualty_report_operational_pdf(
     ]
     summary_tbl = Table(summary_data, colWidths=[70*mm, 30*mm])
     summary_tbl.setStyle(TableStyle([
+        # Opaque white base so the watermark never bleeds through data rows.
+        ("BACKGROUND", (0,0), (-1,-1), colors.white),
         ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#e6e6ea")),
         ("FONTNAME",   (0,0), (-1,0), "Helvetica-Bold"),
         ("FONTSIZE",   (0,0), (-1,-1), 8),
@@ -1946,91 +1956,101 @@ async def casualty_report_operational_pdf(
     story.append(Spacer(0, 10))
 
     # ── Response over time ──────────────────────────────────────────
-    # Chart + plain-language progress. B1 may show a percentage because
-    # it is internal — but the base is ALWAYS stated on the same line.
+    # Chart + plain-language progress (no percentages — see
+    # _plain_language_progress hard locks).
     story.append(Paragraph("Response over time", h2_style))
     plain_style = PS("PL", parent=styles["Normal"], fontSize=9, leading=13, spaceAfter=1)
     buckets, _hourly = _bucket_timeline(raw_rows, since_dt, until_dt)
     if any(b["trapped"] or b["safe"] or b["rescued"] for b in buckets):
-        story.append(_timeline_chart(buckets, 240 * mm, 55 * mm))
+        story.append(_timeline_chart(buckets, 182 * mm, 55 * mm))
         story.append(Spacer(0, 6))
     from reportlab.platypus import KeepTogether as _KT
     story.append(_KT([
         Paragraph(_html.escape(line), plain_style)
-        for line in _plain_language_progress(raw_rows, events, counts, include_percentage=True)
+        for line in _plain_language_progress(raw_rows, events, counts)
     ]))
     story.append(Spacer(0, 10))
 
-    story.append(Paragraph("Per-device detail", h2_style))
-    header = ["Latest status", "Sev", "Name / code", "Latest at (UTC)", "Location", "Battery", "Platform", "Notes"]
+    if detail == "full":
+        story.append(Paragraph("Per-device detail", h2_style))
+        header = ["Latest status", "Sev", "Name / code", "Latest at (UTC)", "Location", "Battery", "Platform", "Notes"]
 
-    def _sort_key(e):
-        # Sort: trapped > rescued > safe; within status, red > yellow > green > unknown; then newest first.
-        rank_status = {"trapped": 0, "rescued": 1, "safe": 2}.get(e.get("status"), 3)
-        rank_sev = {"red": 0, "yellow": 1, "green": 2}.get((e.get("severity") or "").lower(), 3)
-        # Recorded_at is an ISO 8601 string — lexicographic desc sort by
-        # negating via a tuple companion is cleanest without parsing.
-        return (rank_status, rank_sev, "" if e.get("recorded_at") is None else e["recorded_at"])
+        def _sort_key(e):
+            # Sort: trapped > rescued > safe; within status, red > yellow > green > unknown; then newest first.
+            rank_status = {"trapped": 0, "rescued": 1, "safe": 2}.get(e.get("status"), 3)
+            rank_sev = {"red": 0, "yellow": 1, "green": 2}.get((e.get("severity") or "").lower(), 3)
+            # Recorded_at is an ISO 8601 string — lexicographic desc sort by
+            # negating via a tuple companion is cleanest without parsing.
+            return (rank_status, rank_sev, "" if e.get("recorded_at") is None else e["recorded_at"])
 
-    # Sort by (rank_status, rank_sev, recorded_at) ascending on the ranks
-    # and DESCENDING on recorded_at (newest first within each group).
-    events_sorted = sorted(events, key=_sort_key)
-    events_sorted.sort(key=lambda e: e.get("recorded_at") or "", reverse=True)
-    events_sorted.sort(key=lambda e: (
-        {"trapped": 0, "rescued": 1, "safe": 2}.get(e.get("status"), 3),
-        {"red": 0, "yellow": 1, "green": 2}.get((e.get("severity") or "").lower(), 3),
-    ))
-    data = [header]
-    for e in events_sorted:
-        lat = e.get("latitude"); lon = e.get("longitude")
-        loc = "—"
-        if lat is not None and lon is not None:
-            loc = f"{_round5(lat)}, {_round5(lon)}"
-            if e.get("accuracy_m"):
-                loc += f" ±{e.get('accuracy_m'):.0f}m"
-        batt = "—"
-        if e.get("battery_pct") is not None:
-            batt = f"{e.get('battery_pct')}%"
-            if e.get("battery_state"):
-                batt += f" ({e.get('battery_state')})"
-        name = e.get("display_name") or "(anonymous)"
-        code = _short_code(e.get("device_id"))
-        # Escape the VALUES, not the markup — passing the composed string
-        # through cell() double-escaped it and printed literal "<br/>"
-        # tags on the PDF (bug #3.1, 2026-08-12).
-        name_para = Paragraph(
-            f"{_html.escape(str(name))}<br/>"
-            f"<font size=6 color='#666'>{_html.escape(str(code or ''))}</font>",
-            cell_style,
-        )
+        # Sort by (rank_status, rank_sev, recorded_at) ascending on the ranks
+        # and DESCENDING on recorded_at (newest first within each group).
+        events_sorted = sorted(events, key=_sort_key)
+        events_sorted.sort(key=lambda e: e.get("recorded_at") or "", reverse=True)
+        events_sorted.sort(key=lambda e: (
+            {"trapped": 0, "rescued": 1, "safe": 2}.get(e.get("status"), 3),
+            {"red": 0, "yellow": 1, "green": 2}.get((e.get("severity") or "").lower(), 3),
+        ))
+        data = [header]
+        for e in events_sorted:
+            lat = e.get("latitude"); lon = e.get("longitude")
+            loc = "—"
+            if lat is not None and lon is not None:
+                loc = f"{_round5(lat)}, {_round5(lon)}"
+                if e.get("accuracy_m"):
+                    loc += f" ±{e.get('accuracy_m'):.0f}m"
+            batt = "—"
+            if e.get("battery_pct") is not None:
+                batt = f"{e.get('battery_pct')}%"
+                if e.get("battery_state"):
+                    batt += f" ({e.get('battery_state')})"
+            name = e.get("display_name") or "(anonymous)"
+            code = _short_code(e.get("device_id"))
+            # Escape the VALUES, not the markup — passing the composed string
+            # through cell() double-escaped it and printed literal "<br/>"
+            # tags on the PDF (bug #3.1, 2026-08-12).
+            name_para = Paragraph(
+                f"{_html.escape(str(name))}<br/>"
+                f"<font size=6 color='#666'>{_html.escape(str(code or ''))}</font>",
+                cell_style,
+            )
 
-        status_display = e.get("status") or "?"
-        if e.get("rescue_reverted"):
-            status_display = f"{status_display} (reverted)"
+            status_display = e.get("status") or "?"
+            if e.get("rescue_reverted"):
+                status_display = f"{status_display} (reverted)"
 
-        data.append([
-            cell(status_display, cell_bold),
-            cell((e.get("severity") or "—")),
-            name_para,
-            cell(e.get("recorded_at") or ""),
-            cell(loc),
-            cell(batt),
-            cell(e.get("platform") or "—"),
-            cell(e.get("notes") or "—"),
-        ])
+            data.append([
+                cell(status_display, cell_bold),
+                cell((e.get("severity") or "—")),
+                name_para,
+                cell(e.get("recorded_at") or ""),
+                cell(loc),
+                cell(batt),
+                cell(e.get("platform") or "—"),
+                cell(e.get("notes") or "—"),
+            ])
 
-    col_widths = [22*mm, 12*mm, 40*mm, 40*mm, 45*mm, 22*mm, 20*mm, 70*mm]
-    tbl = Table(data, colWidths=col_widths, repeatRows=1)
-    tbl.setStyle(TableStyle([
-        ("BACKGROUND",   (0,0), (-1,0), colors.HexColor("#e6e6ea")),
-        ("FONTNAME",     (0,0), (-1,0), "Helvetica-Bold"),
-        ("FONTSIZE",     (0,0), (-1,0), 8),
-        ("GRID",         (0,0), (-1,-1), 0.3, colors.HexColor("#c9ccd2")),
-        ("VALIGN",       (0,0), (-1,-1), "TOP"),
-        ("LEFTPADDING",  (0,0), (-1,-1), 4),
-        ("RIGHTPADDING", (0,0), (-1,-1), 4),
-    ]))
-    story.append(tbl)
+        # Column widths sum to 186mm — PORTRAIT A4 (210mm − 24mm margins).
+        col_widths = [17*mm, 10*mm, 28*mm, 27*mm, 34*mm, 17*mm, 14*mm, 39*mm]
+        tbl = Table(data, colWidths=col_widths, repeatRows=1)
+        tbl.setStyle(TableStyle([
+            # Opaque white base so the watermark never bleeds through rows.
+            ("BACKGROUND",   (0,0), (-1,-1), colors.white),
+            ("BACKGROUND",   (0,0), (-1,0), colors.HexColor("#e6e6ea")),
+            ("FONTNAME",     (0,0), (-1,0), "Helvetica-Bold"),
+            ("FONTSIZE",     (0,0), (-1,0), 7),
+            ("GRID",         (0,0), (-1,-1), 0.3, colors.HexColor("#c9ccd2")),
+            ("VALIGN",       (0,0), (-1,-1), "TOP"),
+            ("LEFTPADDING",  (0,0), (-1,-1), 3),
+            ("RIGHTPADDING", (0,0), (-1,-1), 3),
+        ]))
+        story.append(tbl)
+    else:
+        story.append(Paragraph(
+            "Per-device detail omitted — this is the summary version. "
+            "Download the full version for the per-device table.",
+            meta_style,
+        ))
 
     if counts["total_devices"] == 0:
         story.append(Spacer(0, 20))
@@ -2046,21 +2066,22 @@ async def casualty_report_operational_pdf(
     buf = _io.BytesIO()
     doc = r["SimpleDocTemplate"](
         buf,
-        pagesize=r["landscape"](r["A4"]),
+        pagesize=r["A4"],   # PORTRAIT — printer-default friendly (1a, 2026-08-13)
         leftMargin=12*mm, rightMargin=12*mm,
-        # Expanded top+bottom margins to clear the confidentiality banner
-        # + footer drawn by _pdf_confidentiality_onpage.
-        topMargin=20*mm, bottomMargin=15*mm,
+        # Expanded top+bottom margins to clear the 30pt confidentiality
+        # banner + footer drawn by _pdf_confidentiality_onpage.
+        topMargin=22*mm, bottomMargin=15*mm,
         title="Quake Angel B1 Operational Report",
         author=principal.get("email", ""),
     )
     _onpage = _make_confidential_onpage(await _get_logo_image_reader())
     doc.build(story, onFirstPage=_onpage, onLaterPages=_onpage)
+    _suffix = "-summary" if detail == "summary" else ""
     return Response(
         content=buf.getvalue(),
         media_type="application/pdf",
         headers={
-            "Content-Disposition": f'attachment; filename="CONFIDENTIAL-quakeangel-B1-operational-{datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")}.pdf"',
+            "Content-Disposition": f'attachment; filename="CONFIDENTIAL-quakeangel-B1-operational{_suffix}-{datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")}.pdf"',
             "X-Row-Count": str(counts["total_devices"]),
             # X-Report-Kind lets the dashboard sanity-check that clicking "B1"
             # actually returned a B1 (defense-in-depth against endpoint mixup).
@@ -2139,6 +2160,15 @@ async def casualty_report_public_pdf(
             f"Issued: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC",
             meta_style,
         ),
+        # Issuer line (3a, 2026-08-13): names the SYSTEM and authority so
+        # the document is attributable to Quake Angel's official output —
+        # never the individual operator (no personal email on a document
+        # going to press and families).
+        Paragraph(
+            f"Issued by the Quake Angel emergency response system, "
+            f"in cooperation with {authority}.",
+            meta_style,
+        ),
         Paragraph("Current status of people using the Quake Angel app in the affected area:", body_style),
     ]
 
@@ -2156,6 +2186,8 @@ async def casualty_report_public_pdf(
     ]
     summary_tbl = Table(summary_data, colWidths=[110*mm, 30*mm])
     summary_tbl.setStyle(TableStyle([
+        # Opaque white base so nothing bleeds through on print.
+        ("BACKGROUND", (0,0), (-1,-1), colors.white),
         ("FONTNAME",   (0,0), (-1,-1), "Helvetica"),
         ("FONTSIZE",   (0,0), (-1,-1), 10),
         ("BACKGROUND", (0,-1), (-1,-1), colors.HexColor("#f0f2f6")),
@@ -2173,20 +2205,22 @@ async def casualty_report_public_pdf(
     # quoted by press as 68% of everyone caught in the earthquake, when
     # the denominator is only app users who checked in. Locked with
     # Paul 2026-08-12; see PRD "Legal / privacy locks".
+    #
+    # The heading, chart AND its plain-language explanation are ONE
+    # KeepTogether block (3b, 2026-08-13): a reader must never have to
+    # turn the page to find out what the chart means.
     story.append(Spacer(0, 12))
-    story.append(Paragraph("How the situation has changed over time", h2_style))
     buckets, _hourly = _bucket_timeline(raw_rows, since_dt, until_dt)
-    if any(b["trapped"] or b["safe"] or b["rescued"] for b in buckets):
-        story.append(_timeline_chart(buckets, 220 * mm, 55 * mm))
-        story.append(Spacer(0, 6))
-    # KeepTogether: the caveat lines ("Others may be affected who we cannot
-    # see.") must never be stranded alone on the next page, split from the
-    # figures they qualify.
     from reportlab.platypus import KeepTogether as _KT
-    story.append(_KT([
+    timeline_block = [Paragraph("How the situation has changed over time", h2_style)]
+    if any(b["trapped"] or b["safe"] or b["rescued"] for b in buckets):
+        timeline_block.append(_timeline_chart(buckets, 170 * mm, 50 * mm))
+        timeline_block.append(Spacer(0, 6))
+    timeline_block.extend(
         Paragraph(_html.escape(line), body_style)
-        for line in _plain_language_progress(raw_rows, events, counts, include_percentage=False)
-    ]))
+        for line in _plain_language_progress(raw_rows, events, counts)
+    )
+    story.append(_KT(timeline_block))
 
     story.append(Spacer(0, 14))
     story.append(Paragraph(
@@ -2200,7 +2234,7 @@ async def casualty_report_public_pdf(
     buf = _io.BytesIO()
     doc = r["SimpleDocTemplate"](
         buf,
-        pagesize=r["landscape"](r["A4"]),
+        pagesize=r["A4"],   # PORTRAIT — printer-default friendly (1a, 2026-08-13)
         leftMargin=18*mm, rightMargin=18*mm,
         topMargin=15*mm, bottomMargin=15*mm,
         title="Quake Angel Public Status Report",
