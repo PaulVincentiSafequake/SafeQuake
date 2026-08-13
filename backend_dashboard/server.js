@@ -86,7 +86,11 @@ function serveStatic(req, res, pathname) {
     // when nothing actually changed.
     const etag = '"' + crypto.createHash("md5").update(content).digest("hex") + '"';
     const cacheHeaders = { "Cache-Control": "no-cache, must-revalidate", ETag: etag };
-    if (req.headers["if-none-match"] === etag) {
+    // Render's CDN rewrites our ETag to a weak validator (W/"...") on the
+    // way out, so browsers echo back the W/ prefix. Strip it before
+    // comparing or the 304 path never fires.
+    const inm = String(req.headers["if-none-match"] || "").replace(/^W\//, "");
+    if (inm === etag) {
       res.writeHead(304, cacheHeaders);
       return res.end();
     }
