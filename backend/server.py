@@ -816,6 +816,23 @@ def _pdf_confidentiality_onpage(canvas_, doc_):
     from reportlab.lib import colors as _rl_colors
     canvas_.saveState()
     w, h = doc_.pagesize   # width, height in points
+
+    # Diagonal watermark on EVERY page — large, translucent, painted
+    # before the flowables so content sits on top. Added 2026-08-12
+    # after Paul flagged that the banner alone was too easy to overlook
+    # on a document holding precise locations and device identifiers.
+    canvas_.saveState()
+    canvas_.translate(w / 2, h / 2)
+    canvas_.rotate(30)
+    canvas_.setFont("Helvetica-Bold", 64)
+    try:
+        canvas_.setFillAlpha(0.08)
+    except Exception:
+        pass  # very old reportlab without alpha — banner still carries
+    canvas_.setFillColor(_rl_colors.HexColor("#B0141A"))
+    canvas_.drawCentredString(0, -22, "CONFIDENTIAL")
+    canvas_.restoreState()
+
     banner_h = 22          # ~7.8mm
     canvas_.setFillColor(_rl_colors.HexColor("#B0141A"))
     canvas_.rect(0, h - banner_h, w, banner_h, fill=1, stroke=0)
@@ -842,6 +859,290 @@ def _pdf_confidentiality_onpage(canvas_, doc_):
 
 
 
+
+
+def _round5(v):
+    """GDPR data-minimisation: coordinates leave the system at 5 decimal
+    places (~1 m). Device-reported accuracy is 5–19 m, so further digits
+    carry no information — only privacy risk."""
+    try:
+        return round(float(v), 5)
+    except (TypeError, ValueError):
+        return v
+
+
+async def _backfill_display_names(events: list[dict]) -> None:
+    """Fill missing `display_name` on export rows from the device's
+    CURRENT record. Historical status_events predate display_name being
+    snapshotted onto every event, so exports showed a permanently blank
+    column — which reads as data loss."""
+    missing = {e["device_id"] for e in events
+               if e.get("device_id") and not e.get("display_name")}
+    if not missing:
+        return
+    rows = await db.device_status.find(
+        {"device_id": {"$in": list(missing)}},
+        {"_id": 0, "device_id": 1, "display_name": 1},
+    ).to_list(len(missing))
+    names = {r["device_id"]: r["display_name"] for r in rows if r.get("display_name")}
+    for e in events:
+        if not e.get("display_name") and e.get("device_id") in names:
+            e["display_name"] = names[e["device_id"]]
+
+
+# ─── Operator pseudonymisation on export ────────────────────────────────
+# Optional (query param `pseudonymise=true`): operator emails in
+# triggered_by / rescued_by / reverted_by become stable aliases like
+# "operator-3". The real mapping lives server-side in
+# `operator_pseudonyms` so accountability is preserved — an admin can
+# always resolve who operator-3 is, but a leaked export can't.
+
+async def _operator_alias(identity: str) -> str:
+    row = await db.operator_pseudonyms.find_one({"identity": identity}, {"_id": 0, "alias": 1})
+    if row:
+        return row["alias"]
+    n = await db.operator_pseudonyms.count_documents({})
+    alias = f"operator-{n + 1}"
+    try:
+        await db.operator_pseudonyms.insert_one({
+            "identity": identity,
+            "alias": alias,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        })
+    except Exception:
+        row = await db.operator_pseudonyms.find_one({"identity": identity}, {"_id": 0, "alias": 1})
+        if row:
+            return row["alias"]
+    return alias
+
+
+async def _pseudonymise_events(events: list[dict]) -> None:
+    """In-place: replace personal operator identities (anything with an
+    '@') with stable server-side aliases. Non-personal attributions like
+    'dashboard' pass through unchanged."""
+    cache: dict = {}
+    for e in events:
+        for f in ("triggered_by", "rescued_by", "reverted_by"):
+            v = e.get(f)
+            if isinstance(v, str) and "@" in v:
+                if v not in cache:
+                    cache[v] = await _operator_alias(v)
+                e[f] = cache[v]
+
+
+# ─── Credential detection for free-text notes ───────────────────────────
+# An admin password leaked into a rescue note previously, forcing an
+# urgent rotation + audit redaction. Server-side gate: reject anything
+# resembling a credential BEFORE it is stored. Deliberately errs on the
+# side of caution — a false rejection costs a reworded note; a false
+# accept costs another credential rotation.
+_CREDENTIAL_KEYWORD_RE = _re.compile(
+    r"(?i)\b(password|passwd|pwd|passphrase|api[_ -]?key|secret|token|bearer|credentials?)\b"
+    r"\s*(?:is|was|[:=])?\s*(\S{6,})"
+)
+_CREDENTIAL_TOKEN_RES = [
+    _re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}"),                 # JWT
+    _re.compile(r"\bAKIA[0-9A-Z]{16}\b"),                                     # AWS access key
+    _re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),                       # PEM key
+    _re.compile(r"\b(?:sk|pk|rk|ghp|gho|xox[abps])[_-][A-Za-z0-9_-]{16,}\b"), # common API-key prefixes
+]
+
+
+def _looks_like_credential(text: str) -> Optional[str]:
+    """Returns a human-readable reason if `text` appears to contain a
+    credential, else None."""
+    for rx in _CREDENTIAL_TOKEN_RES:
+        if rx.search(text):
+            return "contains what looks like an API key, token or private key"
+    m = _CREDENTIAL_KEYWORD_RE.search(text)
+    if m:
+        tail = m.group(2)
+        # Only fire when the token after the keyword looks secret-shaped
+        # (digits/symbols or mixed case) — "asked for the password" must pass.
+        if _re.search(r"[0-9!@#$%^&*_\-+=/\\]", tail) or (
+            tail != tail.lower() and tail != tail.upper() and len(tail) >= 8
+        ):
+            return f"looks like a credential following the word '{m.group(1)}'"
+    for tok in _re.findall(r"\S{24,}", text):
+        if (_re.search(r"[a-z]", tok) and _re.search(r"[A-Z]", tok)
+                and _re.search(r"[0-9]", tok)):
+            return "contains a long random-looking string"
+    return None
+
+
+# ─── Org logo on PDF headers ─────────────────────────────────────────────
+
+async def _get_logo_image_reader():
+    """PNG org logo as a reportlab ImageReader, or None. SVG cannot be
+    rasterised by reportlab, so an SVG logo appears on the dashboard but
+    not on PDFs (documented limitation)."""
+    s = await _get_dashboard_settings()
+    b64, mime = s.get("logo_b64"), s.get("logo_mime")
+    if not b64 or mime != "image/png":
+        return None
+    import base64
+    from reportlab.lib.utils import ImageReader
+    try:
+        return ImageReader(_io.BytesIO(base64.b64decode(b64)))
+    except Exception:
+        return None
+
+
+def _draw_logo(canvas_, doc_, logo, top_offset_pt: float):
+    try:
+        iw, ih = logo.getSize()
+        lh = 26.0
+        lw = iw * lh / float(ih or 1)
+        page_w, page_h = doc_.pagesize
+        canvas_.drawImage(
+            logo, page_w - 14 - lw, page_h - top_offset_pt - lh,
+            width=lw, height=lh, mask="auto", preserveAspectRatio=True,
+        )
+    except Exception:
+        pass  # a broken logo must never block an emergency report
+
+
+def _make_confidential_onpage(logo=None):
+    """Banner + watermark + footer on every page, plus the org logo
+    (below the banner) when one is configured."""
+    def _onpage(canvas_, doc_):
+        _pdf_confidentiality_onpage(canvas_, doc_)
+        if logo is not None:
+            _draw_logo(canvas_, doc_, logo, top_offset_pt=28)
+    return _onpage
+
+
+def _make_public_onpage(logo=None):
+    """B2 Public: org logo top-right, no confidentiality chrome."""
+    def _onpage(canvas_, doc_):
+        if logo is not None:
+            _draw_logo(canvas_, doc_, logo, top_offset_pt=10)
+    return _onpage
+
+
+# ─── Response-over-time chart (B1 + B2) ─────────────────────────────────
+
+def _bucket_timeline(raw_rows: list[dict], since_dt: datetime, until_dt: datetime):
+    """Bucket status_events into hourly (window ≤ 48h) or daily buckets.
+    Counts per bucket: trapped reports, safe check-ins, rescues."""
+    hourly = (until_dt - since_dt).total_seconds() <= 48 * 3600
+    step = timedelta(hours=1) if hourly else timedelta(days=1)
+    start = since_dt.replace(minute=0, second=0, microsecond=0)
+    if not hourly:
+        start = start.replace(hour=0)
+    buckets: list[dict] = []
+    index: dict = {}
+    t = start
+    while t <= until_dt:
+        label = t.strftime("%d %b %H:%M") if hourly else t.strftime("%d %b")
+        index[t] = len(buckets)
+        buckets.append({"t": t, "label": label, "trapped": 0, "safe": 0, "rescued": 0})
+        t += step
+    for row in raw_rows:
+        ra = row.get("recorded_at")
+        try:
+            dt = datetime.fromisoformat(str(ra).replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        key = dt.replace(minute=0, second=0, microsecond=0)
+        if not hourly:
+            key = key.replace(hour=0)
+        i = index.get(key)
+        if i is None:
+            continue
+        st = row.get("status")
+        if st == "trapped":
+            buckets[i]["trapped"] += 1
+        elif st == "safe":
+            buckets[i]["safe"] += 1
+        elif st == "rescued" and not row.get("rescue_reverted"):
+            buckets[i]["rescued"] += 1
+    return buckets, hourly
+
+
+def _timeline_chart(buckets: list[dict], width_pt: float, height_pt: float):
+    """Grouped bar chart Drawing: trapped / rescued / safe per bucket,
+    with a manual legend (plain words, no jargon)."""
+    from reportlab.graphics.shapes import Drawing, Rect, String
+    from reportlab.graphics.charts.barcharts import VerticalBarChart
+    from reportlab.lib import colors as C
+
+    d = Drawing(width_pt, height_pt)
+    chart = VerticalBarChart()
+    chart.x, chart.y = 34, 30
+    chart.width, chart.height = width_pt - 44, height_pt - 52
+    s_trap = [b["trapped"] for b in buckets]
+    s_resc = [b["rescued"] for b in buckets]
+    s_safe = [b["safe"] for b in buckets]
+    chart.data = [s_trap, s_resc, s_safe]
+    chart.bars[0].fillColor = C.HexColor("#C21818")
+    chart.bars[1].fillColor = C.HexColor("#1F8A3A")
+    chart.bars[2].fillColor = C.HexColor("#7A8CA0")
+    chart.bars.strokeColor = None
+    chart.groupSpacing = 5
+    chart.barSpacing = 1
+    max_v = max([1] + s_trap + s_resc + s_safe)
+    chart.valueAxis.valueMin = 0
+    chart.valueAxis.valueMax = max_v + 1
+    chart.valueAxis.valueStep = max(1, (max_v + 1) // 5)
+    chart.valueAxis.labels.fontSize = 6
+    labels = [b["label"] for b in buckets]
+    if len(labels) > 16:
+        keep = max(1, len(labels) // 12)
+        labels = [l if i % keep == 0 else "" for i, l in enumerate(labels)]
+    chart.categoryAxis.categoryNames = labels
+    chart.categoryAxis.labels.fontSize = 6
+    chart.categoryAxis.labels.angle = 45
+    chart.categoryAxis.labels.boxAnchor = "ne"
+    d.add(chart)
+    lx = 34.0
+    for label, color in (
+        ("Told us they are trapped", "#C21818"),
+        ("Marked found / rescued", "#1F8A3A"),
+        ("Checked in safe", "#7A8CA0"),
+    ):
+        d.add(Rect(lx, height_pt - 11, 7, 7, fillColor=C.HexColor(color), strokeColor=None))
+        s = String(lx + 10, height_pt - 10, label)
+        s.fontSize = 7
+        d.add(s)
+        lx += 10 + len(label) * 3.6 + 18
+    return d
+
+
+def _rescue_progress(raw_rows: list[dict], latest_events: list[dict]) -> tuple[int, int]:
+    """(total_trapped, found): distinct devices that reported trapped in
+    the window, and how many of those now read rescued or safe."""
+    trapped_ids = {r["device_id"] for r in raw_rows
+                   if r.get("status") == "trapped" and r.get("device_id")}
+    found = sum(
+        1 for e in latest_events
+        if e.get("device_id") in trapped_ids and e.get("status") in ("rescued", "safe")
+    )
+    return len(trapped_ids), found
+
+
+def _plain_language_progress(found: int, total: int, include_percentage: bool) -> list[str]:
+    """Short lines, one idea per line, no bare percentages. The base is
+    stated ON THE SAME LINE as any percentage — a bare '68% rescued'
+    would be read by press as 68% of everyone caught in the earthquake.
+    HARD REQUIREMENT locked with Paul 2026-08-12."""
+    if total == 0:
+        return [
+            "No one has told us they are trapped in this time window.",
+            "This only counts people using the app.",
+            "Others may be affected who we cannot see.",
+        ]
+    lines = [f"{found} of the {total} people who told us they were trapped have now been found."]
+    if include_percentage:
+        pct = round(100.0 * found / total)
+        lines.append(
+            f"That is {pct}% — of app users who checked in, not of everyone affected by the earthquake."
+        )
+    lines.append("This only counts people using the app.")
+    lines.append("Others may be affected who we cannot see.")
+    return lines
 
 
 def _parse_iso_or_none(s: Optional[str]) -> Optional[datetime]:
@@ -947,13 +1248,20 @@ async def _fetch_audit_for_export(
                     events.append({**base, "kind": "status"})
 
     events.sort(key=lambda e: e.get("at") or "", reverse=True)
-    return events[:limit]
+    events = events[:limit]
+    await _backfill_display_names(events)
+    # GDPR data-minimisation: 5 dp (~1 m) is already beyond device accuracy.
+    for e in events:
+        for k in ("latitude", "longitude"):
+            if e.get(k) is not None:
+                e[k] = _round5(e[k])
+    return events
 
 
 # Column order for CSV. Locked here so the header is stable across
 # releases — analytics scripts and archival tooling can rely on it.
 _CSV_COLUMNS = [
-    "at", "kind",
+    "at", "at_simple", "kind",
     # Trigger fields
     "idempotency_key", "triggered_by", "magnitude",
     "recipients_total", "ios_count", "android_count",
@@ -975,6 +1283,7 @@ async def export_audit_log_csv(
     since: Optional[str] = Query(default=None, description="ISO 8601 start (inclusive). Default: 7 days ago."),
     until: Optional[str] = Query(default=None, description="ISO 8601 end (inclusive). Default: now."),
     kind: Optional[str] = Query(default=None, description="Optional filter: trigger|status|rescued|rescue_reverted"),
+    pseudonymise: bool = Query(default=False, description="Replace operator emails with stable pseudonyms (operator-N)."),
     limit: int = Query(default=MAX_EXPORT_ROWS, ge=1),
 ):
     """Downloadable CSV of audit events in the given window. Admin-only."""
@@ -992,37 +1301,68 @@ async def export_audit_log_csv(
     require_role(principal, "admin", "operator")
 
     events = await _fetch_audit_for_export(since, until, kind, limit)
+    if pseudonymise:
+        await _pseudonymise_events(events)
+
+    since_dt = _parse_iso_or_none(since) or datetime.now(timezone.utc) - timedelta(days=7)
+    until_dt = _parse_iso_or_none(until) or datetime.now(timezone.utc)
+    generated_by = principal.get("email", "?")
+    if pseudonymise and "@" in generated_by:
+        generated_by = await _operator_alias(generated_by)
+
+    # Every row — including the warning and metadata rows — is padded to
+    # the full column count so strict parsers (pandas, R) don't reject
+    # the file as ragged/malformed. Line endings are CRLF throughout
+    # (csv module default is CRLF; the old hand-written warning row used
+    # bare LF, producing a mixed-endings file).
+    ncols = len(_CSV_COLUMNS)
+
+    def _pad(row: list) -> list:
+        return (row + [""] * ncols)[:ncols]
 
     buf = _io.StringIO()
-    # First non-data row: a single-cell confidentiality warning. Sits
-    # above the header row so any tool that pastes the CSV into a
-    # spreadsheet shows the warning as the first thing the operator sees
-    # (Excel/Sheets treat it as a merged-looking first line since it's a
-    # single quoted string). Using a `# ` prefix is deliberately NOT done
-    # because most CSV parsers don't honour comments and would treat it
-    # as data — better to expose it as a labelled first row that stands
-    # out because subsequent rows have the CSV_COLUMNS header layout.
-    buf.write(f'"{CONFIDENTIALITY_TEXT}"\n')
+    writer = _csv.writer(buf, lineterminator="\r\n")
+    writer.writerow(_pad([CONFIDENTIALITY_TEXT]))
+    # Export metadata — a CSV on its own must be identifiable (the PDF
+    # states its window + generator; the CSV now does too).
+    writer.writerow(_pad(["export_window_start_utc", since_dt.isoformat()]))
+    writer.writerow(_pad(["export_window_end_utc", until_dt.isoformat()]))
+    writer.writerow(_pad(["generated_at_utc", datetime.now(timezone.utc).isoformat()]))
+    writer.writerow(_pad(["generated_by", generated_by]))
+    writer.writerow(_pad(["row_count", str(len(events))]))
+    writer.writerow(_CSV_COLUMNS)
 
-    writer = _csv.DictWriter(buf, fieldnames=_CSV_COLUMNS, extrasaction="ignore")
-    writer.writeheader()
     for ev in events:
-        # Normalize datetime → ISO string. csv.DictWriter would str() it
-        # otherwise, which produces "datetime.datetime(...)" for naive
-        # datetimes — ugly and hard to parse.
-        row = {}
+        row = []
         for col in _CSV_COLUMNS:
+            if col == "at_simple":
+                # Plain second timestamp Excel can sort ("2026-08-06 13:51")
+                # alongside the precise ISO column.
+                v = ev.get("at")
+                if isinstance(v, datetime):
+                    v = v.isoformat()
+                try:
+                    dtv = datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+                    row.append(dtv.strftime("%Y-%m-%d %H:%M"))
+                except (ValueError, TypeError):
+                    row.append("")
+                continue
             v = ev.get(col)
             if isinstance(v, datetime):
-                row[col] = v.isoformat()
+                row.append(v.isoformat())
+            elif isinstance(v, bool):
+                # Excel understands TRUE/FALSE; Python's True/False reads as text.
+                row.append("TRUE" if v else "FALSE")
             elif v is None:
-                row[col] = ""
+                row.append("")
             else:
-                row[col] = v
+                row.append(v)
         writer.writerow(row)
 
-    csv_text = buf.getvalue()
-    filename = f"quakeangel-audit-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.csv"
+    # UTF-8 BOM so Excel decodes the em-dash in the warning row correctly —
+    # without it Excel falls back to a legacy codepage and shows mojibake.
+    csv_text = "\ufeff" + buf.getvalue()
+    filename = f"CONFIDENTIAL-quakeangel-audit-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.csv"
     return Response(
         content=csv_text,
         media_type="text/csv; charset=utf-8",
@@ -1039,6 +1379,7 @@ async def export_audit_log_pdf(
     since: Optional[str] = Query(default=None),
     until: Optional[str] = Query(default=None),
     kind: Optional[str] = Query(default=None),
+    pseudonymise: bool = Query(default=False, description="Replace operator emails with stable pseudonyms (operator-N)."),
     limit: int = Query(default=MAX_EXPORT_ROWS, ge=1),
 ):
     """Downloadable PDF of audit events. Admin-only. Uses ReportLab.
@@ -1058,6 +1399,11 @@ async def export_audit_log_pdf(
     require_role(principal, "admin", "operator")
 
     events = await _fetch_audit_for_export(since, until, kind, limit)
+    if pseudonymise:
+        await _pseudonymise_events(events)
+    generated_by = principal.get("email", "?")
+    if pseudonymise and "@" in generated_by:
+        generated_by = await _operator_alias(generated_by)
 
     # Lazy-import ReportLab so we never pay the ~200ms cold-start cost
     # on non-PDF requests.
@@ -1093,7 +1439,7 @@ async def export_audit_log_pdf(
             f"Window: {since_str} → {until_str} (UTC) &nbsp;·&nbsp; "
             f"Events: {len(events)} &nbsp;·&nbsp; "
             f"Generated: {generated_at} &nbsp;·&nbsp; "
-            f"By: {principal.get('email', '?')}",
+            f"By: {generated_by}",
             meta_style,
         ),
     ]
@@ -1196,7 +1542,7 @@ async def export_audit_log_pdf(
               onLaterPages=_pdf_confidentiality_onpage)
     pdf_bytes = buf.getvalue()
 
-    filename = f"quakeangel-audit-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.pdf"
+    filename = f"CONFIDENTIAL-quakeangel-audit-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.pdf"
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
@@ -1351,7 +1697,9 @@ async def _gather_devices_in_report_window(
     # follow-up event. For the report we want the *effective current
     # status* — which is exactly what the latest event says, since
     # a revert reinstates the prior_status on that same event row.
-    return list(by_device.values()), since_dt, until_dt
+    # `rows` (uncollapsed) is returned too — the response-over-time chart
+    # needs every event, not just the latest per device.
+    return list(by_device.values()), since_dt, until_dt, rows
 
 
 def _bucket_by_status(events: list[dict]) -> dict:
@@ -1417,6 +1765,7 @@ async def casualty_report_operational_pdf(
     request: Request,
     since: Optional[str] = Query(default=None, description="ISO 8601 start; default 24h ago."),
     until: Optional[str] = Query(default=None, description="ISO 8601 end; default now."),
+    pseudonymise: bool = Query(default=False, description="Replace operator emails with stable pseudonyms (operator-N)."),
 ):
     """B1 — Operational casualty report. Admin+operator gated.
 
@@ -1431,9 +1780,13 @@ async def casualty_report_operational_pdf(
     )
     require_role(principal, "admin", "operator")
 
-    events, since_dt, until_dt = await _gather_devices_in_report_window(since, until)
+    events, since_dt, until_dt, raw_rows = await _gather_devices_in_report_window(since, until)
     counts = _bucket_by_status(events)
     authority = await _get_authority_name()   # for the footer copy — never hard-coded
+    await _backfill_display_names(events)
+    generated_by = principal.get("email", "?")
+    if pseudonymise and "@" in generated_by:
+        generated_by = await _operator_alias(generated_by)
 
     r = _pdf_common_setup()
     colors, mm = r["colors"], r["mm"]
@@ -1463,7 +1816,7 @@ async def casualty_report_operational_pdf(
             f"Window: {since_dt.isoformat()} → {until_dt.isoformat()} (UTC) &nbsp;·&nbsp; "
             f"Total devices reporting: {counts['total_devices']} &nbsp;·&nbsp; "
             f"Generated: {datetime.now(timezone.utc).isoformat()} &nbsp;·&nbsp; "
-            f"By: {principal.get('email', '?')}",
+            f"By: {generated_by}",
             meta_style,
         ),
         Paragraph("Aggregate", h2_style),
@@ -1491,6 +1844,20 @@ async def casualty_report_operational_pdf(
     story.append(summary_tbl)
     story.append(Spacer(0, 10))
 
+    # ── Response over time ──────────────────────────────────────────
+    # Chart + plain-language progress. B1 may show a percentage because
+    # it is internal — but the base is ALWAYS stated on the same line.
+    story.append(Paragraph("Response over time", h2_style))
+    plain_style = PS("PL", parent=styles["Normal"], fontSize=9, leading=13, spaceAfter=1)
+    buckets, _hourly = _bucket_timeline(raw_rows, since_dt, until_dt)
+    if any(b["trapped"] or b["safe"] or b["rescued"] for b in buckets):
+        story.append(_timeline_chart(buckets, 240 * mm, 55 * mm))
+        story.append(Spacer(0, 6))
+    total_trapped, found = _rescue_progress(raw_rows, events)
+    for line in _plain_language_progress(found, total_trapped, include_percentage=True):
+        story.append(Paragraph(_html.escape(line), plain_style))
+    story.append(Spacer(0, 10))
+
     story.append(Paragraph("Per-device detail", h2_style))
     header = ["Latest status", "Sev", "Name / code", "Latest at (UTC)", "Location", "Battery", "Platform", "Notes"]
 
@@ -1515,7 +1882,7 @@ async def casualty_report_operational_pdf(
         lat = e.get("latitude"); lon = e.get("longitude")
         loc = "—"
         if lat is not None and lon is not None:
-            loc = f"{lat:.4f}, {lon:.4f}"
+            loc = f"{_round5(lat)}, {_round5(lon)}"
             if e.get("accuracy_m"):
                 loc += f" ±{e.get('accuracy_m'):.0f}m"
         batt = "—"
@@ -1525,7 +1892,14 @@ async def casualty_report_operational_pdf(
                 batt += f" ({e.get('battery_state')})"
         name = e.get("display_name") or "(anonymous)"
         code = _short_code(e.get("device_id"))
-        name_block = f"{name}<br/><font size=6 color='#666'>{code}</font>"
+        # Escape the VALUES, not the markup — passing the composed string
+        # through cell() double-escaped it and printed literal "<br/>"
+        # tags on the PDF (bug #3.1, 2026-08-12).
+        name_para = Paragraph(
+            f"{_html.escape(str(name))}<br/>"
+            f"<font size=6 color='#666'>{_html.escape(str(code or ''))}</font>",
+            cell_style,
+        )
 
         status_display = e.get("status") or "?"
         if e.get("rescue_reverted"):
@@ -1534,7 +1908,7 @@ async def casualty_report_operational_pdf(
         data.append([
             cell(status_display, cell_bold),
             cell((e.get("severity") or "—")),
-            cell(name_block),
+            name_para,
             cell(e.get("recorded_at") or ""),
             cell(loc),
             cell(batt),
@@ -1577,14 +1951,13 @@ async def casualty_report_operational_pdf(
         title="Quake Angel B1 Operational Report",
         author=principal.get("email", ""),
     )
-    doc.build(story,
-              onFirstPage=_pdf_confidentiality_onpage,
-              onLaterPages=_pdf_confidentiality_onpage)
+    _onpage = _make_confidential_onpage(await _get_logo_image_reader())
+    doc.build(story, onFirstPage=_onpage, onLaterPages=_onpage)
     return Response(
         content=buf.getvalue(),
         media_type="application/pdf",
         headers={
-            "Content-Disposition": f'attachment; filename="quakeangel-B1-operational-{datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")}.pdf"',
+            "Content-Disposition": f'attachment; filename="CONFIDENTIAL-quakeangel-B1-operational-{datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")}.pdf"',
             "X-Row-Count": str(counts["total_devices"]),
             # X-Report-Kind lets the dashboard sanity-check that clicking "B1"
             # actually returned a B1 (defense-in-depth against endpoint mixup).
@@ -1621,7 +1994,7 @@ async def casualty_report_public_pdf(
     )
     require_role(principal, "admin", "operator")
 
-    events, since_dt, until_dt = await _gather_devices_in_report_window(since, until)
+    events, since_dt, until_dt, raw_rows = await _gather_devices_in_report_window(since, until)
     counts = _bucket_by_status(events)
     authority = await _get_authority_name()   # configurable, never hard-coded
 
@@ -1692,6 +2065,21 @@ async def casualty_report_public_pdf(
     ]))
     story.append(summary_tbl)
 
+    # ── How the situation has changed over time ─────────────────────
+    # Counts only — NO percentages on B2. A bare "68% rescued" would be
+    # quoted by press as 68% of everyone caught in the earthquake, when
+    # the denominator is only app users who checked in. Locked with
+    # Paul 2026-08-12; see PRD "Legal / privacy locks".
+    story.append(Spacer(0, 12))
+    story.append(Paragraph("How the situation has changed over time", h2_style))
+    buckets, _hourly = _bucket_timeline(raw_rows, since_dt, until_dt)
+    if any(b["trapped"] or b["safe"] or b["rescued"] for b in buckets):
+        story.append(_timeline_chart(buckets, 220 * mm, 55 * mm))
+        story.append(Spacer(0, 6))
+    total_trapped, found = _rescue_progress(raw_rows, events)
+    for line in _plain_language_progress(found, total_trapped, include_percentage=False):
+        story.append(Paragraph(_html.escape(line), body_style))
+
     story.append(Spacer(0, 14))
     story.append(Paragraph(
         "Notes: These counts reflect app users who have checked in via Quake Angel during the "
@@ -1710,7 +2098,8 @@ async def casualty_report_public_pdf(
         title="Quake Angel Public Status Report",
         author=principal.get("email", ""),
     )
-    doc.build(story)
+    _onpage = _make_public_onpage(await _get_logo_image_reader())
+    doc.build(story, onFirstPage=_onpage, onLaterPages=_onpage)
     return Response(
         content=buf.getvalue(),
         media_type="application/pdf",
@@ -2354,6 +2743,19 @@ async def mark_rescued(
     if not device_id:
         raise HTTPException(400, "deviceId is required")
     notes = payload.get("notes")
+    # Server-side credential gate — an admin password leaked into this
+    # field once before (urgent rotation + audit redaction). Reject
+    # anything credential-shaped BEFORE it reaches the audit trail.
+    if notes:
+        _cred_reason = _looks_like_credential(str(notes))
+        if _cred_reason:
+            raise HTTPException(
+                422,
+                f"Note not saved — it {_cred_reason}. Notes are stored in the "
+                "audit log and appear in exports, so passwords and keys must "
+                "never go here. Remove the secret and describe the rescue in "
+                "plain words. If a real credential was typed here, rotate it now.",
+            )
     # The body-supplied `rescued_by` is IGNORED — we trust the authenticated
     # principal, not client input. This is a deliberate change from the
     # pre-#9 behavior where a caller could put anything in `rescued_by`.

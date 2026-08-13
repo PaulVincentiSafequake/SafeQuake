@@ -619,3 +619,28 @@ After EMSC Phase 1 and subscription lapse A+B. Ahead of QR feature and report ex
 - **Owner:** Assign at Android-launch planning.
 - **Not for iOS-first release:** iOS renders correctly. This is filed here so it can't get lost.
 
+
+---
+
+## 2026-08-12 — Export hardening + dashboard map/UX batch (Paul's bf1354f verification list)
+
+**Backend (needs "Publish" on Emergent to go live):**
+- **2.1** All exports round coordinates to 5 decimal places (~1 m) — GDPR data-minimisation. Device accuracy is 5–19 m; 12-dp storage stays internal, never exported.
+- **2.2** `?pseudonymise=true` on CSV / audit PDF / B1: operator emails become stable `operator-N` aliases. Real mapping kept server-side in `operator_pseudonyms` collection for accountability. Dashboard exposes it as a "Hide operator emails" checkbox.
+- **2.3** Server-side credential guard on rescue notes (`_looks_like_credential`): rejects password/key/token-shaped notes with 422 + plain-language message BEFORE storage. Client-side live warning under the notes textarea mirrors it.
+- **2.4** B1 + audit PDFs: large diagonal CONFIDENTIAL watermark on EVERY page (banner already on all pages), `CONFIDENTIAL-` filename prefix, and a confirmation dialog on the dashboard before downloading B1/audit exports. B2 exempt (aggregate-only, shareable).
+- **3.1** B1 Name/code column now renders via Paragraph markup — no more literal `<br/><font>` text.
+- **3.2/3.3** CSV: UTF-8 BOM (Excel em-dash fix), CRLF-only line endings, ALL rows padded to 29 columns (no ragged first row), new `at_simple` column (`YYYY-MM-DD HH:MM`, Excel-sortable), `delivered` as TRUE/FALSE, `display_name` backfilled from device records, metadata rows (window start/end, generated-at, generated-by, row_count) before the header.
+- **P4** Response-over-time bar chart (hourly ≤48h window, else daily) on B1 AND B2 + plain-language progress lines. HARD LOCKS: (a) never a bare percentage — B1 states the base on the same line ("of app users who checked in, not of everyone affected"), B2 shows counts only, NO percentage ever; (b) short lines, one idea per line ("3 of the 5 people who told us they were trapped have now been found. / This only counts people using the app. / Others may be affected who we cannot see.").
+- Logo (PNG only — reportlab can't rasterise SVG) now drawn on B1 (below banner) and B2 (top-right) page headers.
+- Tests: `tests/test_export_hardening.py` (new, 16 tests) + `tests/test_audit_log_export.py` updated for the new CSV shape. 63 export/report tests pass.
+
+**Dashboard (staged in /app/memory/dashboard_build/index.html, deployed via GitHub push):**
+- **1.2** `dashboard-v3.js` folded inline into index.html (fetched from the live site — it was public). Its duplicate audit-log widget (double-polling #qg-audit-body) was dropped. The external file should be DELETED from the repo on next push.
+- **1.3** `map.invalidateSize()` wired: on load, delayed retries, ResizeObserver on #map-wrap, visibilitychange.
+- **1.4** `scrollWheelZoom: false`; Ctrl/Cmd+scroll zooms (with on-map hint overlay); "⌂ Recentre on Malta" control (top-right).
+- **1.5** No more 4-second scroll jumps: sidebar render skips DOM writes when data unchanged (signature check), preserves page scroll + group open/closed state + focus when it does rebuild; audit widget only rewrites on content change; count pills updated in place.
+- Map markers now accessible shape+colour+label divIcons matching qgSeverityChip (circle=IMMEDIATE+SOS tag, triangle=SERIOUS, square=MINOR, ✓-circle=rescued, diamond=not-responding) and **scale with zoom** (13px at world view → 26px at street view) (3.4).
+- **1.1** caching: to be fixed at the repo during the next push (Cache-Control headers / server config — inspect `backend_dashboard` server when cloned).
+
+**DB additions:** `operator_pseudonyms {identity, alias, created_at}`.

@@ -29,7 +29,7 @@ MONGO_URL = os.environ.get("MONGO_URL") or "mongodb://localhost:27017"
 DB_NAME = os.environ.get("DB_NAME") or "test_database"
 
 EXPECTED_COLUMNS = [
-    "at", "kind", "idempotency_key", "triggered_by", "magnitude",
+    "at", "at_simple", "kind", "idempotency_key", "triggered_by", "magnitude",
     "recipients_total", "ios_count", "android_count", "delivered", "error",
     "device_id", "short_code", "display_name", "status", "severity",
     "mobility", "latitude", "longitude", "accuracy_m", "battery_pct",
@@ -126,6 +126,18 @@ def _auth_headers():
     return {"X-Admin-Token": ADMIN_TOKEN}
 
 
+# New export format (2026-08-12): UTF-8 BOM, then a padded warning row and
+# 5 padded metadata rows, THEN the column header, then data rows.
+N_PREAMBLE_ROWS = 6
+
+
+def _parse_export_csv(text: str):
+    rows = list(_csv.reader(_io.StringIO(text.lstrip("\ufeff"))))
+    header = rows[N_PREAMBLE_ROWS]
+    data = [dict(zip(header, r)) for r in rows[N_PREAMBLE_ROWS + 1:]]
+    return header, data
+
+
 def _wide_window_params(seeded_events):
     """A ~10-minute window that spans the seed rows but stays well under 30d."""
     now = datetime.now(timezone.utc)
@@ -212,27 +224,26 @@ class TestCsvResponseShape:
         assert "attachment" in disp
         assert "filename=" in disp
         assert r.headers.get("X-Row-Count") is not None
-        reader = _csv.DictReader(_io.StringIO(r.text))
-        rows = list(reader)
+        _, rows = _parse_export_csv(r.text)
         assert str(len(rows)) == r.headers["X-Row-Count"]
 
     def test_csv_header_columns(self, seeded_events):
         r = requests.get(CSV_URL, headers=_auth_headers(),
                          params=_wide_window_params(seeded_events), timeout=15)
         assert r.status_code == 200
-        first_line = r.text.splitlines()[0]
-        reader = _csv.reader(_io.StringIO(first_line))
-        header = next(reader)
+        header, _ = _parse_export_csv(r.text)
         assert header == EXPECTED_COLUMNS, f"Got {header}"
-        assert len(header) == 28
+        assert len(header) == 29
+        # Warning row comes first, before the header.
+        first_line = r.text.lstrip("\ufeff").splitlines()[0]
+        assert "CONFIDENTIAL" in first_line
 
     def test_csv_rows_are_dictreader_parseable(self, seeded_events):
         r = requests.get(CSV_URL, headers=_auth_headers(),
                          params=_wide_window_params(seeded_events), timeout=15)
         assert r.status_code == 200
-        reader = _csv.DictReader(_io.StringIO(r.text))
-        rows = list(reader)
-        assert reader.fieldnames == EXPECTED_COLUMNS
+        header, rows = _parse_export_csv(r.text)
+        assert header == EXPECTED_COLUMNS
         # Round-trip: writing rows back should not raise.
         buf = _io.StringIO()
         w = _csv.DictWriter(buf, fieldnames=EXPECTED_COLUMNS)
@@ -245,8 +256,7 @@ class TestCsvResponseShape:
         r = requests.get(CSV_URL, headers=_auth_headers(),
                          params=_wide_window_params(seeded_events), timeout=15)
         assert r.status_code == 200
-        reader = _csv.DictReader(_io.StringIO(r.text))
-        rows = list(reader)
+        _, rows = _parse_export_csv(r.text)
         seed_rows = [r for r in rows if SEED_TAG in (
             (r.get("idempotency_key") or "") + (r.get("device_id") or "") + (r.get("triggered_by") or "") + (r.get("rescued_by") or "")
         )]
@@ -327,7 +337,7 @@ class TestFilterValidation:
         assert r.status_code in (200, 422), r.text
         if r.status_code == 200:
             # If it does clamp, verify row cap
-            rows = list(_csv.DictReader(_io.StringIO(r.text)))
+            _, rows = _parse_export_csv(r.text)
             assert len(rows) <= 500
 
 
@@ -341,7 +351,7 @@ class TestKindAndLimitFilters:
         params["kind"] = "trigger"
         r = requests.get(CSV_URL, headers=_auth_headers(), params=params, timeout=15)
         assert r.status_code == 200
-        rows = list(_csv.DictReader(_io.StringIO(r.text)))
+        _, rows = _parse_export_csv(r.text)
         kinds = {row["kind"] for row in rows}
         assert kinds.issubset({"trigger"}), f"Expected only 'trigger', got {kinds}"
         # And our seeded trigger must appear
@@ -352,7 +362,7 @@ class TestKindAndLimitFilters:
         params["kind"] = "rescued"
         r = requests.get(CSV_URL, headers=_auth_headers(), params=params, timeout=15)
         assert r.status_code == 200
-        rows = list(_csv.DictReader(_io.StringIO(r.text)))
+        _, rows = _parse_export_csv(r.text)
         kinds = {row["kind"] for row in rows}
         assert kinds.issubset({"rescued"}), f"Expected only 'rescued', got {kinds}"
         assert any(row.get("device_id") == f"{SEED_TAG}-dev-1" for row in rows)
@@ -362,7 +372,7 @@ class TestKindAndLimitFilters:
         params["limit"] = 1
         r = requests.get(CSV_URL, headers=_auth_headers(), params=params, timeout=15)
         assert r.status_code == 200
-        rows = list(_csv.DictReader(_io.StringIO(r.text)))
+        _, rows = _parse_export_csv(r.text)
         assert len(rows) <= 1, f"limit=1 returned {len(rows)} rows"
 
 
@@ -376,11 +386,10 @@ class TestEmptyResultSet:
         r = requests.get(CSV_URL, headers=_auth_headers(),
                          params={"since": now, "until": now}, timeout=15)
         assert r.status_code == 200
-        rows = list(_csv.DictReader(_io.StringIO(r.text)))
+        header, rows = _parse_export_csv(r.text)
         assert rows == []
         assert r.headers.get("X-Row-Count") == "0"
-        first_line = r.text.splitlines()[0]
-        assert first_line.split(",") == EXPECTED_COLUMNS
+        assert header == EXPECTED_COLUMNS
 
     def test_pdf_empty_window_shows_no_events(self):
         now = datetime.now(timezone.utc).isoformat()
