@@ -447,6 +447,116 @@ async def get_devices(
     }
 
 
+# ---------- Per-person full history (B3, 2026-08-17) ----------
+@api_router.get("/admin/device-history/{device_id}")
+async def get_device_history(
+    device_id: str,
+    request: Request,
+    limit: int = Query(default=500, ge=1, le=2000),
+    since: Optional[str] = Query(default=None, description="ISO-8601 — only events on/after this instant."),
+):
+    """Complete per-person ledger for one device, oldest context first
+    in `last_known`, events newest-first.
+
+    Includes EVERY status event — reconfirmations of the same status are
+    their own dated rows, never collapsed ("reconfirmed still trapped
+    every hour for three days" must be distinguishable from "phone died
+    three days ago"). Battery and location are per-event snapshots from
+    the append-only `status_events` ledger, plus every alert broadcast
+    (`push_events`) so the record shows when alerts went out to the
+    device. Admin/operator gated — this is a legal-record surface."""
+    principal = await resolve_principal(
+        request, request.headers.get("x-admin-token"), ADMIN_TRIGGER_PASSWORD, db
+    )
+    require_role(principal, "admin", "operator")
+    is_admin = principal.get("role") == "admin"
+
+    sq: dict = {"device_id": device_id}
+    tq: dict = {}
+    if since:
+        sq["recorded_at"] = {"$gte": since}
+        tq["created_at"] = {"$gte": since}
+
+    rows = await db.status_events.find(sq, {"_id": 0}).sort("recorded_at", 1).to_list(limit)
+    alerts = await db.push_events.find(tq, {"_id": 0}).sort("created_at", 1).to_list(limit)
+    latest = await db.device_status.find_one({"device_id": device_id}, {"_id": 0})
+
+    events: List[dict] = []
+    for a in alerts:
+        events.append({
+            "kind": "alert_sent",
+            "at": a.get("created_at"),
+            "triggered_by": a.get("triggered_by") or "dashboard",
+            "magnitude": a.get("magnitude"),
+            "recipients_total": a.get("recipients_total") or 0,
+        })
+
+    # Reconfirmation detection: an event whose (status, severity, mobility)
+    # triple matches the CHRONOLOGICALLY PREVIOUS status event is a
+    # reconfirmation — same situation, re-reported. It still gets its own
+    # row; the flag only labels it for the reader.
+    prev_triple = None
+    for r in rows:
+        triple = (r.get("status"), r.get("severity"), r.get("mobility"))
+        is_plain_status = not r.get("rescue_reverted") and r.get("status") != "rescued"
+        ev = {
+            "kind": ("rescue_reverted" if r.get("rescue_reverted")
+                     else "rescued" if r.get("status") == "rescued"
+                     else "status"),
+            "at": r.get("recorded_at") or r.get("updated_at"),
+            "status": r.get("status"),
+            "severity": r.get("severity"),
+            "mobility": r.get("mobility"),
+            "latitude": r.get("latitude"),
+            "longitude": r.get("longitude"),
+            "accuracy_m": r.get("accuracy_m"),
+            "battery_pct": r.get("battery_pct"),
+            "battery_state": r.get("battery_state"),
+            "reconfirmation": is_plain_status and triple == prev_triple,
+        }
+        if ev["kind"] == "rescued":
+            ev["rescued_by"] = r.get("rescued_by") or "dashboard"
+            if is_admin and r.get("notes"):
+                ev["notes"] = r.get("notes")
+        prev_triple = triple
+        events.append(ev)
+
+    events.sort(key=lambda e: e.get("at") or "", reverse=True)
+
+    now = datetime.now(timezone.utc)
+    silent_seconds = None
+    if latest and latest.get("updated_at"):
+        try:
+            last_dt = datetime.fromisoformat(str(latest["updated_at"]).replace("Z", "+00:00"))
+            if last_dt.tzinfo is None:
+                last_dt = last_dt.replace(tzinfo=timezone.utc)
+            silent_seconds = max(0, int((now - last_dt).total_seconds()))
+        except ValueError:
+            pass
+
+    return {
+        "device_id": device_id,
+        "short_code": _short_code(device_id),
+        "display_name": (latest or {}).get("display_name"),
+        "generated_at": now.isoformat(),
+        "last_known": {
+            "status": (latest or {}).get("status"),
+            "severity": (latest or {}).get("severity"),
+            "mobility": (latest or {}).get("mobility"),
+            "latitude": (latest or {}).get("latitude"),
+            "longitude": (latest or {}).get("longitude"),
+            "battery_pct": (latest or {}).get("battery_pct"),
+            "updated_at": (latest or {}).get("updated_at"),
+            "silent_seconds": silent_seconds,
+            # >30 min of silence = treat position/status as LAST KNOWN,
+            # not current. The dashboard labels it accordingly.
+            "is_stale": silent_seconds is not None and silent_seconds > 1800,
+        },
+        "count": len(events),
+        "events": events,
+    }
+
+
 # ---------- Legacy status-check demo endpoint (unused; kept for compat) ----------
 @api_router.get("/status", response_model=List[StatusCheck])
 async def get_status_checks():
@@ -841,7 +951,7 @@ CONFIDENTIALITY_TEXT = (
     "CONFIDENTIAL — contains personal data including precise locations "
     "and device identifiers. Do not share outside authorised emergency "
     "personnel. Handling is subject to GDPR. For public, press or family "
-    "communication use the B2 Public report instead."
+    "communication use the public \u201Csafe to share\u201D report instead."
 )
 
 
@@ -901,12 +1011,12 @@ def _pdf_confidentiality_onpage(canvas_, doc_):
     # Fits a single line on portrait A4 at 7.5pt (verified).
     canvas_.drawString(12, h - 25,
         "Do not share outside authorised emergency personnel. "
-        "For public use the B2 Public report."
+        "For public use the \u201Csafe to share\u201D public report."
     )
     # Footer band
     canvas_.setFillColor(_rl_colors.HexColor("#B0141A"))
     canvas_.setFont("Helvetica-Bold", 7)
-    canvas_.drawString(12, 8, "CONFIDENTIAL · GDPR-protected · use B2 Public for external distribution")
+    canvas_.drawString(12, 8, "CONFIDENTIAL · GDPR-protected · use the \u201Csafe to share\u201D public report for external distribution")
     # Page number on the right — trivial but reviewers ask for it
     canvas_.setFont("Helvetica", 7)
     canvas_.setFillColor(_rl_colors.HexColor("#666666"))
@@ -1028,10 +1138,37 @@ def _looks_like_credential(text: str) -> Optional[str]:
 
 # ─── Org logo on PDF headers ─────────────────────────────────────────────
 
+def _logo_is_brand_duplicate(logo_bytes: bytes) -> bool:
+    """True when an uploaded org logo is visually the Quake Angel mark
+    itself (issue A2): re-exports of our own artwork used to print the
+    mark TWICE on report headers. Mirrors the dashboard's check
+    (looksLikeBrandMark in index.html): composite both onto the dark
+    header colour at 16×16, compare RGB, mean-abs-diff < 12
+    (measured: same artwork ≈ 1.4, a real partner logo ≈ 166)."""
+    try:
+        import base64
+        from PIL import Image
+
+        def _sig(data: bytes) -> bytes:
+            im = Image.open(_io.BytesIO(data)).convert("RGBA")
+            bg = Image.new("RGBA", (16, 16), (15, 15, 15, 255))
+            bg.alpha_composite(im.resize((16, 16)))
+            return bg.convert("RGB").tobytes()
+
+        a = _sig(logo_bytes)
+        b = _sig(base64.b64decode(_QA_LOGO_B64))
+        diff = sum(abs(x - y) for x, y in zip(a, b)) / len(a)
+        return diff < 12
+    except Exception:
+        return False   # if in doubt keep the logo — never hide a real partner
+
+
 async def _get_logo_image_reader():
     """PNG org logo as a reportlab ImageReader, or None. SVG cannot be
     rasterised by reportlab, so an SVG logo appears on the dashboard but
-    not on PDFs (documented limitation)."""
+    not on PDFs (documented limitation). A logo that visually duplicates
+    the Quake Angel mark is treated as absent (A2) — same rule the
+    dashboard header applies."""
     s = await _get_dashboard_settings()
     b64, mime = s.get("logo_b64"), s.get("logo_mime")
     if not b64 or mime != "image/png":
@@ -1039,7 +1176,10 @@ async def _get_logo_image_reader():
     import base64
     from reportlab.lib.utils import ImageReader
     try:
-        return ImageReader(_io.BytesIO(base64.b64decode(b64)))
+        raw = base64.b64decode(b64)
+        if _logo_is_brand_duplicate(raw):
+            return None
+        return ImageReader(_io.BytesIO(raw))
     except Exception:
         return None
 
@@ -1844,9 +1984,11 @@ async def export_audit_log_pdf(
         title="Quake Angel Audit Log",
         author=principal.get("email", ""),
     )
-    doc.build(story,
-              onFirstPage=_pdf_confidentiality_onpage,
-              onLaterPages=_pdf_confidentiality_onpage)
+    # A2 (2026-08-17): audit PDF carries the same header marks as the
+    # casualty reports — permanent Quake Angel logo, labelled partner
+    # logo when a real one is configured.
+    _onpage = _make_confidential_onpage(await _get_logo_image_reader())
+    doc.build(story, onFirstPage=_onpage, onLaterPages=_onpage)
     pdf_bytes = buf.getvalue()
 
     filename = f"CONFIDENTIAL-quakeangel-audit-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.pdf"
@@ -2117,7 +2259,7 @@ async def casualty_report_operational_pdf(
         return Paragraph(_html.escape(str(s)), style)
 
     story = [
-        Paragraph("B1 — Operational casualty report", title_style),
+        Paragraph("Team report — operational casualty report", title_style),
         Paragraph(
             f"CONFIDENTIAL — INTERNAL USE ONLY. Contains personally identifiable information. "
             f"Not for public distribution.",
@@ -2296,7 +2438,7 @@ async def casualty_report_operational_pdf(
         story.append(Paragraph("No devices reported in the specified window.", meta_style))
 
     story.append(Paragraph(
-        "END OF B1 OPERATIONAL REPORT — For public communications, use the B2 Public report which "
+        "END OF TEAM REPORT — For public communications, use the \u201Csafe to share\u201D public report which "
         "exposes aggregate numbers only. Do NOT share this document publicly, with press, or with "
         f"next-of-kin before {authority} has completed formal notification.",
         footer_style,
@@ -2310,7 +2452,7 @@ async def casualty_report_operational_pdf(
         # Expanded top+bottom margins to clear the 30pt confidentiality
         # banner + footer drawn by _pdf_confidentiality_onpage.
         topMargin=22*mm, bottomMargin=15*mm,
-        title="Quake Angel B1 Operational Report",
+        title="Quake Angel Team Report (operational casualty report)",
         author=principal.get("email", ""),
     )
     _onpage = _make_confidential_onpage(await _get_logo_image_reader())

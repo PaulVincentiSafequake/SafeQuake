@@ -723,3 +723,24 @@ Outstanding backlog (Paul's list): #128 logo/branding duplicates, #130 B1 defaul
 
 Deferred (Paul's call): Android dashed-circle `lineDashPattern` workaround in MapCanvas.native.tsx.
 NOTE: full pytest run shows 116 pre-existing failures ALL in legacy push/debug suites (schema drift, e.g. `/api/status` now requires `status` field — tests predate it). Unrelated to this batch; candidates for cleanup during the server.py refactor task.
+
+---
+
+## 2026-08-17 (batch 4 / Neo) — A1–A3 fixes, B1 investigation, B2 verification, B3 history
+
+**A1 (server.py — PDF body jargon):** all literal B1/B2 removed from VISIBLE PDF text: `CONFIDENTIALITY_TEXT`, `_pdf_confidentiality_onpage` banner + footer, team title ("Team report — operational casualty report"), closing note ("END OF TEAM REPORT … use the 'safe to share' public report"), PDF metadata title. `X-Report-Kind: b1-operational/b2-public` response headers deliberately unchanged (dashboard contract, not visible text). Tests: `test_batch4_polish.py::TestA1JargonFreePdfs` (team full/summary, public, audit).
+
+**A2 (server.py — PDF logo dedup):** `_logo_is_brand_duplicate()` mirrors dashboard's looksLikeBrandMark (16×16 on #0f0f0f, RGB diff <12); `_get_logo_image_reader()` returns None for duplicates. Audit PDF now uses `_make_confidential_onpage(logo)` too, so all three PDFs carry the QA mark + labelled partner rules. Caption only drawn when a real partner logo exists. Tests: `TestA2SingleQuakeAngelMark` (dup hidden / none = no caption / real = labelled, on all 3 PDFs).
+
+**A3 (index.html — export cards):** real button affordance: 1.5px border, shadow, hover lift + colour, :active press, cursor pointer, circled ↓ download icon (::after, U+2193), head 12.5→14.5px, desc 11→12.5px. "A printable page." → "A printable doc." (2×).
+
+**B1 (investigation only, PROD numbers 2026-08-17 ~09:10Z):** poller RUNNING (EMSC+USGS last success 09:08Z; task up since the 08-13 publish). Ingest ≈1,200 events/day (4,530 since 08-13 restart; listing endpoint caps at 500). Preview mode ACTIVE, allowlist = Paul's current device (re-registered 08:56Z today). Radius: base MT poll 600 km; preview override 3,000 km (set by Paul 08-15, expires 08-22 14:57Z). Last 15h: 500 decisions = 488 beyond-radius + 12 below-threshold, 0 sent; closest event 4,829 km. Last DELIVERED previews: 2026-08-15 10:26Z & 10:47Z (EMSC 20260815_0000344, M3.4/3.6). Verdict: silence is genuine seismic quiet, filters healthy. Flag: Paul should confirm he RECEIVED the two 08-15 previews.
+
+**B2 (no code change + version bump):** mobility-skip (#51) verified correct in current code via web preview: RED submits directly (mobility defaulted to trapped/pinned), GREEN submits directly, YELLOW asks. Paul's build 1022 predates 2026-07-31 (his repro used the OLD label "I can walk, I'm not badly hurt" + old post-red flow). app.json version bumped 1.0.22 → **1.0.23**; ALL app-side fixes land in the first build generated after next deploy. **Build-audit finding: expo version had been stuck at 1.0.22 since 07-22, so builds were indistinguishable.** In-code-but-not-in-build-1022: #51 labels+skip (07-31), Apple Watch note (07-31), check-in reminders rework (08-04), push registration changes (08-05), quake detail screen + notification settings screen (08-06), seismic map #107 (08-06), EntitlementBanner (08-06).
+
+**B3 (server.py + index.html):** ANSWER: reconfirmations were ALREADY logged — `status_events` is an append-only ledger; every POST /api/status inserts a row (same-status re-reports included) with per-event battery + location. Gap closed: per-person surface. NEW `GET /api/admin/device-history/{device_id}` (admin/operator): alerts sent (push_events) + every status event, `reconfirmation` flag (same status+severity+mobility as previous), last_known block with `is_stale` (>30 min silent). Dashboard: "📜 Full history" button per triage card (event delegation on #userlist) → modal `openHistoryModal()` with stale warning, reconfirmed badges, per-event battery/map links. Exports: audit CSV/PDF already contain every event (pre-existing). GDPR flag for #75: legal-record use argues for LONGER retention of status_events — flagged, not decided. Tests: `TestB3PerPersonHistory` (5, incl. auth gate; cleans up after itself).
+
+**B4:** design written to `/app/memory/zones-design.md` — DESIGN ONLY, build with #116. Open auth question for Paul (field logins vs coordinator-only) asked in report.
+**B5:** plan written to `/app/memory/load-test-plan.md` — PLAN ONLY, awaiting approval. Safety: synthetic devices never enter token collections (structurally unpushable), all rows flagged synthetic+run_id (ties into #146).
+
+Tests: 115 passing (105 existing export/report/user suites + 10 new batch-4). Legacy push/debug suites still stale (pre-existing, see 08-13 note).

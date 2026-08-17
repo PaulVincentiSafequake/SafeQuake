@@ -296,7 +296,7 @@ class TestB1Content:
         return _extract_pdf_text(r.content)
 
     def test_b1_contains_required_markers(self, b1_text):
-        required = ["CONFIDENTIAL", "Per-device detail", "END OF B1 OPERATIONAL REPORT"]
+        required = ["CONFIDENTIAL", "Per-device detail", "END OF TEAM REPORT"]
         missing = [m for m in required if m not in b1_text]
         assert not missing, f"B1 missing markers {missing}\nText: {b1_text[:800]}"
 
