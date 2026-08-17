@@ -1,4 +1,6 @@
-# B5 — Load test plan: 10k–30k alerts (2026-08-17, PLAN ONLY — not yet run)
+# B5 — Load test plan: 10k–30k alerts (2026-08-17)
+# STATUS: stage 1 RUN — results in /app/memory/load-test-results.md.
+# Harness: /app/backend/scripts/load_test_seed.py + load_test_measure.py
 
 ## Hard safety guarantee #1 — no real push can ever fire
 - The seeder writes ONLY to `device_status` / `status_events` via direct DB

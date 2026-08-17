@@ -43,8 +43,11 @@ status/location changes reassign automatically.
 - Map: polygon fill at low opacity in zone colour; pins inherit a small zone
   colour tag; Unassigned pins get a distinct hatched badge.
 
-## Open question for Paul (blocks auth scope, not the map/database design)
-Does "Team North" need its own **field login** to see just its zone, or is this
-coordinator-facing only (operator radios the team)? Field logins mean a new
-role + scoped views (#94 extension); coordinator-only means zero auth work.
-The data model above supports both — the answer only changes UI/auth scope.
+## Auth scope — DECIDED (Paul, 2026-06)
+**Coordinator-only. No field logins in B4.** The operator sees all zones and
+radios each team; teams get no account and no scoped view. That means **zero
+auth work** for this task — no new role, no scoped views, nothing on #94.
+
+Field-team logins belong to the separate **responder field app (#98)**, not
+here. The data model above already supports it (zone_id + contact per zone), so
+when #98 is built it only adds a role and a scoped read — no migration.

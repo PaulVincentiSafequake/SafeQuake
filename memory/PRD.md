@@ -744,3 +744,38 @@ NOTE: full pytest run shows 116 pre-existing failures ALL in legacy push/debug s
 **B5:** plan written to `/app/memory/load-test-plan.md` — PLAN ONLY, awaiting approval. Safety: synthetic devices never enter token collections (structurally unpushable), all rows flagged synthetic+run_id (ties into #146).
 
 Tests: 115 passing (105 existing export/report/user suites + 10 new batch-4). Legacy push/debug suites still stale (pre-existing, see 08-13 note).
+
+---
+
+## 2026-06 (batch 5 kickoff) — B4 auth decision, B5 stage 1 run, 1.0.23 build
+
+**B4 zones — auth question ANSWERED by Paul: coordinator-only.** No field logins,
+no new role, zero auth work in B4; operator sees all zones and radios teams.
+Field-team scoped logins belong to the separate **responder field app (#98)**.
+`zones-design.md` updated (open question section replaced with the decision).
+Still DESIGN ONLY — builds with the #116 dashboard restructure.
+
+**B5 load test — stage 1 EXECUTED (approved by Paul).** New harness:
+- `/app/backend/scripts/load_test_seed.py` — `seed --count N --hours H`,
+  `count`, `clear [--dry-run]`. Direct DB inserts to `device_status` /
+  `status_events` only; never touches `push_devices` or any send path, so
+  synthetic devices are structurally unpushable. Every row carries
+  `synthetic: true`, `load_test_run_id`, device_id prefix `qg-loadtest-`
+  (same flag proposed for #146).
+- `/app/backend/scripts/load_test_measure.py` — read-only median-of-3 timing of
+  /api/devices, /api/public/summary, both casualty PDFs, audit CSV + PDF.
+Stage 1 = 100 devices / 240 status events on PREVIEW. **Nothing degraded**
+(slowest surface: audit PDF 0.21 s; /api/devices 0.01 s / 52.8 KB). Key scaling
+read: /api/devices ≈ 0.46 KB per device ⇒ 30k ≈ 14 MB payload, which breaches
+the 5 MB worry line long before latency does — pagination/field-trimming will be
+the first required change. Synthetic rows cleared after measuring (dry-run
+counted 100/240, delete removed exactly 100/240, 14 real rows untouched).
+Results table: `/app/memory/load-test-results.md`. Dashboard render / Leaflet FPS
+/ Mongo CPU deferred to stage 3 (only meaningful at 10k+, and needs the
+dashboard pointed at preview).
+
+**App build:** no new app-side code this session. app.json remains
+**version 1.0.23**; iOS build number / Android versionCode are assigned by the
+Emergent build pipeline at publish time (auto-increment). The 1.0.23 build is the
+first to contain the #51 mobility-skip fix plus everything listed as
+"in-code-but-not-in-build-1022" above.
