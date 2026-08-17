@@ -353,6 +353,44 @@
   }
 
   ul.userlist { list-style: none; padding: 0; margin: 0; }
+  /* B3: per-person history button + modal */
+  .qg-hist-btn {
+    margin-top: 6px; padding: 4px 10px; font-size: 11.5px; font-weight: 600;
+    background: transparent; color: var(--accent, #2f5fd0);
+    border: 1px solid currentColor; border-radius: 6px; cursor: pointer;
+  }
+  .qg-hist-btn:hover { background: rgba(47,95,208,0.1); }
+  #qg-hist-overlay {
+    position: fixed; inset: 0; background: rgba(10,14,20,0.55);
+    display: flex; align-items: center; justify-content: center; z-index: 9500;
+  }
+  #qg-hist-modal {
+    background: var(--surface, #fff); color: var(--text, #1a2230);
+    width: min(680px, 92vw); max-height: 84vh; overflow-y: auto;
+    border-radius: 12px; padding: 18px 20px; box-shadow: 0 12px 40px rgba(0,0,0,0.4);
+  }
+  #qg-hist-close {
+    float: right; border: 1px solid var(--border, #cbd0d8); background: transparent;
+    color: inherit; border-radius: 6px; padding: 4px 10px; cursor: pointer; font-size: 12px;
+  }
+  .qg-hist-head { font-size: 15px; margin-bottom: 4px; }
+  .qg-hist-code { font-weight: 800; font-size: 17px; letter-spacing: 0.5px; }
+  .qg-hist-devid { font-size: 10.5px; color: var(--text-dim, #889); word-break: break-all; }
+  .qg-hist-lastknown { font-size: 13px; margin: 6px 0; }
+  .qg-hist-stale {
+    background: #fdf3e7; border: 1px solid #e0b36a; color: #7a4d00;
+    border-radius: 8px; padding: 8px 10px; font-size: 12.5px; margin: 6px 0;
+  }
+  .qg-hist-count { font-size: 11.5px; color: var(--text-dim, #889); margin: 6px 0 10px; }
+  .qg-hist-row {
+    display: flex; gap: 10px; padding: 6px 0; font-size: 12.5px; line-height: 1.45;
+    border-top: 1px solid var(--border, #e4e7ec);
+  }
+  .qg-hist-time { flex: 0 0 150px; color: var(--text-dim, #778); font-variant-numeric: tabular-nums; }
+  .qg-hist-reconf {
+    background: #e8f1fb; color: #1d4f91; border-radius: 5px;
+    padding: 1px 6px; font-size: 11px; font-weight: 600;
+  }
   ul.userlist li {
     padding: 10px;
     border-radius: 8px;
@@ -2124,16 +2162,38 @@
   #qg-audit .qg-export-group.confidential .qg-export-group-title { color: #8a1a1a; }
   #qg-audit .qg-export-group.shareable    .qg-export-group-title { color: #1a6b30; }
   #qg-audit .qg-export-cards { display: flex; gap: 8px; flex-wrap: wrap; }
+  /* A3 (2026-08-17): the cards must read as BUTTONS, not description
+     boxes — visible boundary, shadow, hover lift, pressed state, pointer
+     and an explicit download icon. Text enlarged for at-a-glance reading
+     under incident pressure. */
   #qg-audit .qg-export-card {
-    background: #fff; border: 1px solid #cbd0d8; border-radius: 6px;
-    padding: 7px 10px; font-family: inherit; text-align: left; cursor: pointer;
-    max-width: 220px; flex: 1; min-width: 170px;
+    background: #fff; border: 1.5px solid #7e8898; border-radius: 8px;
+    padding: 10px 38px 10px 12px; font-family: inherit; text-align: left; cursor: pointer;
+    max-width: 250px; flex: 1; min-width: 200px;
+    box-shadow: 0 1px 3px rgba(20,30,50,0.18);
+    transition: background 0.12s, border-color 0.12s, box-shadow 0.12s, transform 0.05s;
+    position: relative;
   }
-  #qg-audit .qg-export-card:hover:not(:disabled) { background: #f0f2f6; border-color: #a8b0bd; }
+  #qg-audit .qg-export-card::after {
+    content: "\2193"; /* ↓ download icon — removes all doubt this is a download button */
+    position: absolute; top: 9px; right: 10px;
+    font-size: 14px; color: #3d4a5c;
+    border: 1.5px solid currentColor; border-radius: 50%;
+    width: 22px; height: 22px; line-height: 21px; text-align: center;
+  }
+  #qg-audit .qg-export-card:hover:not(:disabled) {
+    background: #eef2f9; border-color: #2f5fd0;
+    box-shadow: 0 3px 9px rgba(30,60,140,0.28);
+  }
+  #qg-audit .qg-export-card:hover:not(:disabled)::after { color: #2f5fd0; }
+  #qg-audit .qg-export-card:active:not(:disabled) {
+    transform: translateY(1px);
+    box-shadow: inset 0 1px 3px rgba(30,60,140,0.3);
+  }
   #qg-audit .qg-export-card:disabled { opacity: 0.5; cursor: not-allowed; }
-  #qg-audit .qg-export-card .qg-ec-head { font-size: 12.5px; font-weight: 700; color: #222; }
-  #qg-audit .qg-export-card .qg-ec-code { font-size: 10px; font-weight: 400; color: #888; margin-left: 4px; }
-  #qg-audit .qg-export-card .qg-ec-desc { font-size: 11px; color: #555; margin-top: 3px; line-height: 1.35; }
+  #qg-audit .qg-export-card .qg-ec-head { font-size: 14.5px; font-weight: 700; color: #16202e; }
+  #qg-audit .qg-export-card .qg-ec-code { font-size: 11px; font-weight: 400; color: #888; margin-left: 4px; }
+  #qg-audit .qg-export-card .qg-ec-desc { font-size: 12.5px; color: #444; margin-top: 4px; line-height: 1.4; display: block; }
   #qg-audit .qg-export-range, #qg-audit .qg-b1-detail {
     padding: 4px 8px; border: 1px solid #cbd0d8; border-radius: 4px; font-size: 12px; font-family: inherit;
   }
@@ -2187,11 +2247,11 @@
       <div class="qg-export-cards">
         <button class="qg-export-card" id="qg-report-b1">
           <span class="qg-ec-head">Today's report — for your team</span>
-          <span class="qg-ec-desc">Names, locations and details. A printable page.</span>
+          <span class="qg-ec-desc">Names, locations and details. A printable doc.</span>
         </button>
         <button class="qg-export-card" id="qg-export-pdf">
           <span class="qg-ec-head">Full history — printable<span class="qg-ec-code">(audit PDF)</span></span>
-          <span class="qg-ec-desc">Every event in the time range. Names and locations. A printable page.</span>
+          <span class="qg-ec-desc">Every event in the time range. Names and locations. A printable doc.</span>
         </button>
         <button class="qg-export-card" id="qg-export-csv">
           <span class="qg-ec-head">Full history — spreadsheet<span class="qg-ec-code">(audit CSV)</span></span>
@@ -4126,11 +4186,96 @@ window.QuakeAngelRescue = (function () {
       ? '<div class="meta">Updated ' + agoWords(u.lastUpdated) + "</div>" +
         '<div class="qg-card-abs">' + new Date(u.lastUpdated).toLocaleTimeString() + "</div>"
       : '<div class="meta">Updated: —</div>';
+    // B3 (2026-08-17): per-person full history — every alert sent, every
+    // response INCLUDING reconfirmations, battery + location per event.
+    var histBtn = '<button class="qg-hist-btn" data-device-id="' + u.deviceId + '" title="Every alert, response, battery level and location for this person">📜 Full history</button>';
     return bulkCheck + head + trappedLine +
       '<div class="meta">' + statusLabel(u.status, u.severity) + (mob ? " · " + mob : "") +
       (lowBatt ? "" : " · Battery " + (u.batteryPercent != null ? u.batteryPercent : "?") + "%") + "</div>" +
-      battLine + updLine + rescueSlot;
+      battLine + updLine + rescueSlot + histBtn;
   }
+
+  // ── B3: per-person full history modal ────────────────────────────────
+  function histMapLink(e) {
+    if (e.latitude == null || e.longitude == null) return "";
+    return ' · <a href="https://www.google.com/maps/place/' +
+      encodeURIComponent(e.latitude + "," + e.longitude) +
+      '" target="_blank" rel="noopener">📍 map</a>';
+  }
+
+  function histEventHtml(e) {
+    var t = e.at ? new Date(e.at).toLocaleString() : "—";
+    var body;
+    if (e.kind === "alert_sent") {
+      body = "🔔 <b>Alert broadcast</b>" +
+        (e.magnitude != null ? " (M" + e.magnitude + ")" : "") +
+        " — sent to " + e.recipients_total + " device" + (e.recipients_total === 1 ? "" : "s");
+    } else if (e.kind === "rescued") {
+      body = "✅ <b>Marked rescued</b> by " + (e.rescued_by || "dashboard") +
+        (e.notes ? ' · <i>note: ' + String(e.notes).replace(/</g, "&lt;") + "</i>" : "");
+    } else if (e.kind === "rescue_reverted") {
+      body = "↩ <b>Rescue mark undone</b> — restored to " + statusLabel(e.status, e.severity);
+    } else {
+      body = "<b>" + statusLabel(e.status, e.severity) + "</b>" +
+        (e.mobility ? " · " + (e.mobility === "trapped" ? "can't move" : "can move") : "") +
+        (e.reconfirmation ? ' <span class="qg-hist-reconf">reconfirmed — same status, re-reported</span>' : "") +
+        (e.battery_pct != null ? " · 🔋 " + e.battery_pct + "%" : "") +
+        histMapLink(e);
+    }
+    return '<div class="qg-hist-row"><span class="qg-hist-time">' + t + "</span><span>" + body + "</span></div>";
+  }
+
+  async function openHistoryModal(deviceId) {
+    var overlay = document.getElementById("qg-hist-overlay");
+    if (!overlay) {
+      overlay = document.createElement("div");
+      overlay.id = "qg-hist-overlay";
+      overlay.innerHTML = '<div id="qg-hist-modal" role="dialog" aria-modal="true">' +
+        '<button id="qg-hist-close" aria-label="Close history">✕ Close</button>' +
+        '<div id="qg-hist-body">Loading…</div></div>';
+      document.body.appendChild(overlay);
+      overlay.addEventListener("click", function (e) {
+        if (e.target === overlay || e.target.id === "qg-hist-close") overlay.style.display = "none";
+      });
+    }
+    overlay.style.display = "flex";
+    var bodyEl = document.getElementById("qg-hist-body");
+    bodyEl.innerHTML = "Loading…";
+    try {
+      var r = await window.qaApi("/api/admin/device-history/" + encodeURIComponent(deviceId) + "?limit=500");
+      if (!r.ok) { bodyEl.innerHTML = "Could not load history (HTTP " + r.status + ")."; return; }
+      var d = await r.json();
+      var lk = d.last_known || {};
+      var staleNote = lk.is_stale
+        ? '<div class="qg-hist-stale">⚠ No update for ' + window.qgDurWords((lk.silent_seconds || 0) * 1000) +
+          " — the status and location below are <b>last known</b>, not current.</div>"
+        : "";
+      var header =
+        '<div class="qg-hist-head"><span class="qg-hist-code">' + (d.short_code || "") + "</span>" +
+        (d.display_name ? " · <b>" + d.display_name + "</b>" : "") +
+        ' <span class="qg-hist-devid">' + d.device_id + "</span></div>" +
+        '<div class="qg-hist-lastknown">' + (lk.is_stale ? "Last known: " : "Current: ") +
+        statusLabel(lk.status, lk.severity) +
+        (lk.battery_pct != null ? " · 🔋 " + lk.battery_pct + "%" : "") +
+        (lk.updated_at ? " · updated " + agoWords(lk.updated_at) : "") +
+        histMapLink(lk) + "</div>" + staleNote +
+        '<div class="qg-hist-count">' + d.count + " events, newest first — reconfirmations shown as their own entries</div>";
+      bodyEl.innerHTML = header + (d.events || []).map(histEventHtml).join("") +
+        ((d.events || []).length === 0 ? '<div class="qg-hist-row">No recorded events.</div>' : "");
+    } catch (err) {
+      bodyEl.innerHTML = "Could not load history: " + err;
+    }
+  }
+
+  // Event delegation — cards re-render every poll, the container doesn't.
+  (function () {
+    var container = document.getElementById("userlist");
+    if (!container) return;
+    container.addEventListener("click", function (e) {
+      var btn = e.target && e.target.closest ? e.target.closest(".qg-hist-btn") : null;
+      if (btn) openHistoryModal(btn.getAttribute("data-device-id"));
+    });
+  })();
 
   function wireRescueButtons(root, device) {
     if (!window.QuakeAngelRescue || !root) return;
