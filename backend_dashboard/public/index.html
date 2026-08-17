@@ -514,9 +514,33 @@
 <style>
   #qg-trigger-wrap {
     position: relative;
-    display: inline-block;
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   }
+  #qg-stop-reminders-btn {
+    background: #1f2937;
+    color: #e6ebf3;
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.6px;
+    border: 1.5px solid #7e8898;
+    border-radius: 12px;
+    padding: 12px 16px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 44px;
+  }
+  #qg-stop-reminders-btn:hover:not(:disabled) {
+    background: #2b3a4f;
+    border-color: #2f5fd0;
+  }
+  #qg-stop-reminders-btn:active:not(:disabled) { transform: translateY(1px); }
+  #qg-stop-reminders-btn:disabled { opacity: 0.5; cursor: not-allowed; }
   #qg-trigger-btn {
     background: #FF3B30;
     color: #fff;
@@ -1618,6 +1642,16 @@
   <button id="qg-trigger-btn" type="button" aria-label="Trigger earthquake alert">
     <span aria-hidden="true">⚠️</span>
     Trigger Earthquake Alert
+  </button>
+  <!-- False-alarm recovery (batch 5, B1). Every alert arms 8 local check-in
+       reminders on each phone over 11½ minutes; they live ON the device, so
+       before this button nothing server-side could stop them. Sends a SILENT
+       push, so it never adds a 9th notification to cancel the other 8. -->
+  <button id="qg-stop-reminders-btn" type="button"
+          aria-label="Stop reminder notifications on all phones"
+          title="Cancels the repeating 'Are you safe?' reminders on every phone. Silent — users hear nothing.">
+    <span aria-hidden="true">🔇</span>
+    Stop reminder notifications
   </button>
 </div>
 
@@ -4664,6 +4698,64 @@ window.QuakeAngelRescue = (function () {
     if (!confirmed) return;
     sendTriggerAlert();
   });
+
+  // ── False-alarm recovery: stop the repeating check-in reminders ─────────
+  var stopBtn = document.getElementById("qg-stop-reminders-btn");
+
+  async function sendStopReminders() {
+    if (!window.qaApi) {
+      showBanner("err", "Auth not loaded — reload the page.", 8000);
+      return;
+    }
+    if (!window.qaAuth || !window.qaAuth.jwt()) {
+      showBanner("err", "Please sign in first.", 6000);
+      if (window.qaAuth) window.qaAuth.signIn();
+      return;
+    }
+    stopBtn.disabled = true;
+    showBanner("ok", "Cancelling reminders…", 0);
+    try {
+      var res = await window.qaApi("/api/admin/reminders/cancel", { method: "POST" });
+      if (res.status === 401) {
+        showBanner("err", "Session expired — please sign in again.", 6000);
+        if (window.qaAuth) window.qaAuth.signIn();
+        return;
+      }
+      if (res.status === 403) {
+        showBanner("err", "Your account isn't allowed to do this.", 8000);
+        return;
+      }
+      if (!res.ok) {
+        showBanner("err", "Server error (" + res.status + "). Reminders NOT cancelled.");
+        return;
+      }
+      var data = await res.json();
+      showBanner(
+        "ok",
+        "Reminders cancelled — sent silently to " + (data.delivered || 0) +
+        " of " + (data.targeted || 0) + " phones. Users hear nothing.",
+        8000
+      );
+    } catch (e) {
+      showBanner("err", "Network error: " + (e && e.message ? e.message : e));
+    } finally {
+      stopBtn.disabled = false;
+    }
+  }
+
+  if (stopBtn) {
+    stopBtn.addEventListener("click", function onStopClick() {
+      var ok = window.confirm(
+        "Stop the repeating 'Are you safe?' reminders on every phone?\n\n" +
+        "Use this after a false alarm. It is sent SILENTLY — nobody gets " +
+        "another notification, the reminders simply stop.\n\n" +
+        "The original alert is not recalled, and anyone who has already " +
+        "answered is unaffected."
+      );
+      if (!ok) return;
+      sendStopReminders();
+    });
+  }
 })();
 </script>
 </body>
