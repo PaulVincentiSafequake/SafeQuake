@@ -267,6 +267,25 @@
     background: var(--surface, #fff); color: var(--text, #222);
   }
   .qg-list-tools .qg-sort-label { font-size: 10.5px; color: var(--text-muted, #889); margin-top: 4px; }
+  /* #146 — test-entry controls */
+  .qg-test-toggle {
+    display: flex; align-items: center; gap: 7px; margin-top: 7px;
+    font-size: 11.5px; color: var(--text-muted, #778); cursor: pointer;
+    min-height: 28px;
+  }
+  .qg-test-toggle input { width: auto; min-height: 0; margin: 0; cursor: pointer; }
+  .qg-test-btn {
+    margin-top: 6px; margin-left: 6px; padding: 4px 10px; font-size: 11.5px;
+    font-weight: 600; background: transparent; color: var(--text-muted, #7a8393);
+    border: 1px solid currentColor; border-radius: 6px; cursor: pointer;
+  }
+  .qg-test-btn:hover { background: rgba(122,131,147,0.12); }
+  .qg-row-test { opacity: 0.72; }
+  .qg-test-tag {
+    display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 4px;
+    font-size: 10px; font-weight: 700; letter-spacing: 0.4px;
+    background: #7a8393; color: #fff; vertical-align: middle;
+  }
   .qg-card-code { font-size: 19px; font-weight: 800; letter-spacing: 1px; color: var(--text, #16202a); }
   .qg-card-code .qg-card-name { font-size: 13px; font-weight: 600; letter-spacing: 0; margin-left: 6px; }
   .qg-card-fullid { font-size: 10px; color: var(--text-muted, #98a2ad); word-break: break-all; margin-bottom: 2px; }
@@ -1735,6 +1754,13 @@
       <input id="qg-triage-search" type="search"
              placeholder="Search code, name or device ID…"
              aria-label="Search the triage list">
+      <!-- #146: test entries are hidden by default so they can't be mistaken
+           for real casualties, but they are never silently destroyed — this
+           toggle brings them back into view, labelled. -->
+      <label class="qg-test-toggle" id="qg-test-toggle-wrap" hidden>
+        <input type="checkbox" id="qg-show-tests">
+        <span id="qg-test-toggle-label">Show test entries</span>
+      </label>
       <div class="qg-sort-label">Longest waiting first — low battery breaks ties</div>
     </div>
     <div class="triage-groups" id="userlist"></div>
@@ -4008,6 +4034,10 @@ window.QuakeAngelRescue = (function () {
       pre_rescue_status: d.pre_rescue_status,
       pre_rescue_severity: d.pre_rescue_severity,
       pre_rescue_mobility: d.pre_rescue_mobility,
+      // #146: server-computed. True for recognised test/synthetic device ids
+      // and for rows an operator has tagged by hand (our own test check-ins
+      // come from a real phone, so no id pattern can catch them).
+      isTest: d.is_test === true,
     };
   }
 
@@ -4075,7 +4105,14 @@ window.QuakeAngelRescue = (function () {
         signedOutMode = false;
         lastSidebarSig = null;   // force one full sidebar rebuild after sign-in
       }
-      var users = (data.devices || []).map(normalizeDevice);
+      var allUsers = (data.devices || []).map(normalizeDevice);
+      // #146: test entries are excluded from the live triage list, the map
+      // and the counts by default — an operator must never have to work out
+      // whether a pin is a real person. Nothing is deleted; the toggle
+      // below the search box brings them back, clearly tagged.
+      var testCount = allUsers.filter(function (u) { return u.isTest; }).length;
+      updateTestToggle(testCount);
+      var users = showTestEntries ? allUsers : allUsers.filter(function (u) { return !u.isTest; });
       lastUsers = users;
       renderMap(users);
       applyFilterVisibility();
@@ -4084,6 +4121,61 @@ window.QuakeAngelRescue = (function () {
       console.error("Failed to refresh dashboard:", e);
     }
   }
+
+  // ── #146: test-entry visibility + tagging ─────────────────────────────
+  var showTestEntries = false;
+
+  function updateTestToggle(count) {
+    var wrap = document.getElementById("qg-test-toggle-wrap");
+    var label = document.getElementById("qg-test-toggle-label");
+    if (!wrap || !label) return;
+    // Only appear when there is actually something to reveal.
+    wrap.hidden = count === 0 && !showTestEntries;
+    label.textContent = "Show test entries (" + count + ")";
+  }
+
+  (function wireTestToggle() {
+    var box = document.getElementById("qg-show-tests");
+    if (!box) return;
+    box.addEventListener("change", function () {
+      showTestEntries = box.checked;
+      refresh();
+    });
+  })();
+
+  // The banner helper lives in the trigger-button block; fall back to a
+  // plain alert if that block hasn't initialised yet.
+  function banner(kind, msg, ms) {
+    if (typeof window.qgShowBanner === "function") window.qgShowBanner(kind, msg, ms);
+    else window.alert(msg);
+  }
+
+  // Tag / untag one person as a test entry. Reversible, audited server-side.
+  async function markAsTest(deviceId, isTest) {
+    if (isTest && !window.confirm(
+      "Hide " + deviceId + " from the triage list as a TEST entry?\n\n" +
+      "Nothing is deleted and this is reversible — tick “Show test entries” " +
+      "to see it again. Only do this if you are certain it is not a real person."
+    )) return;
+    try {
+      var res = await window.qaApi(
+        "/api/admin/devices/" + encodeURIComponent(deviceId) + "/mark-test",
+        { method: "POST", body: JSON.stringify({ is_test: isTest }) }
+      );
+      if (!res.ok) { banner("err", "Could not update (HTTP " + res.status + ")"); return; }
+      banner("ok", isTest ? "Marked as a test entry." : "Restored as a real entry.", 5000);
+      lastSidebarSig = null;
+      refresh();
+    } catch (e) {
+      banner("err", "Network error: " + (e && e.message ? e.message : e));
+    }
+  }
+
+  document.addEventListener("click", function (ev) {
+    var btn = ev.target.closest && ev.target.closest(".qg-test-btn");
+    if (!btn) return;
+    markAsTest(btn.dataset.deviceId, btn.dataset.isTest !== "true");
+  });
 
   function renderMap(users) {
     var seen = new Set();
@@ -4204,6 +4296,7 @@ window.QuakeAngelRescue = (function () {
       (u.displayName ? '<span class="qg-card-name">' + u.displayName + "</span>" : "") +
       (isUrgent(u.status, u.severity) ? '<span class="badge sos">SOS</span>' : "") +
       (u.status === "rescued" ? '<span class="badge rescued-badge">RESCUED</span>' : "") +
+      (u.isTest ? '<span class="qg-test-tag">TEST</span>' : "") +
       "</div>" +
       '<div class="qg-card-fullid">' + u.deviceId + "</div>";
     // 'Trapped for …' — the operationally critical figure (item 3).
@@ -4223,10 +4316,18 @@ window.QuakeAngelRescue = (function () {
     // B3 (2026-08-17): per-person full history — every alert sent, every
     // response INCLUDING reconfirmations, battery + location per event.
     var histBtn = '<button class="qg-hist-btn" data-device-id="' + u.deviceId + '" title="Every alert, response, battery level and location for this person">📜 Full history</button>';
+    // #146: tag a leftover test check-in so it stops competing for attention
+    // with real casualties. Reversible, and audited server-side.
+    var testBtn = '<button class="qg-test-btn" data-device-id="' + u.deviceId +
+      '" data-is-test="' + (u.isTest ? "true" : "false") +
+      '" title="' + (u.isTest
+        ? "This is hidden from the live list by default. Put it back as a real entry."
+        : "Hide this from the live triage list as a test entry. Reversible.") +
+      '">' + (u.isTest ? "↩︎ Not a test" : "🧪 Mark as test") + "</button>";
     return bulkCheck + head + trappedLine +
       '<div class="meta">' + statusLabel(u.status, u.severity) + (mob ? " · " + mob : "") +
       (lowBatt ? "" : " · Battery " + (u.batteryPercent != null ? u.batteryPercent : "?") + "%") + "</div>" +
-      battLine + updLine + rescueSlot + histBtn;
+      battLine + updLine + rescueSlot + histBtn + testBtn;
   }
 
   // ── B3: per-person full history modal ────────────────────────────────
@@ -4605,6 +4706,9 @@ window.QuakeAngelRescue = (function () {
       bannerTimer = setTimeout(hideBanner, autoDismissMs);
     }
   }
+  // Shared with the triage-list blocks (#146 test-entry controls).
+  window.qgShowBanner = showBanner;
+
   function hideBanner() {
     banner.classList.remove("show");
     if (bannerTimer) { clearTimeout(bannerTimer); bannerTimer = null; }
