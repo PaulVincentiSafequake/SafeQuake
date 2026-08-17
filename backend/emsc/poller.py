@@ -35,7 +35,7 @@ import httpx
 
 from .evaluator import ThresholdSet, evaluate_event_against_country
 from .intensity import compute_intensity_estimates, effective_mmi_for_tier_decision
-from .preview import dispatch_preview_if_needed
+from .preview import dispatch_place_notices, dispatch_preview_if_needed
 from .providers import EMSCProvider, Provider, RawEvent, USGSProvider
 
 
@@ -324,6 +324,23 @@ class EMSCPoller:
                 except Exception as e:
                     log.warning(
                         "Preview dispatch failed for %s/%s (country=%s): %s",
+                        ev.provider, ev.external_id,
+                        cfg.get("country_code"), e,
+                    )
+                # B8 — informational notices for the user's saved places.
+                # Separate try/except: a bug in the places path must never
+                # take down the own-location notice above it, and neither
+                # can touch the critical-alert path (different module).
+                try:
+                    await dispatch_place_notices(
+                        db=self.db,
+                        apns_send_preview=self.apns_send_preview,
+                        emsc_event=doc,
+                        country_config=cfg,
+                    )
+                except Exception as e:
+                    log.warning(
+                        "Place-notice dispatch failed for %s/%s (country=%s): %s",
                         ev.provider, ev.external_id,
                         cfg.get("country_code"), e,
                     )

@@ -1,6 +1,7 @@
 import { Stack, useRouter } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
 import * as Notifications from "expo-notifications";
+import * as TaskManager from "expo-task-manager";
 import * as Linking from "expo-linking";
 import { setAudioModeAsync } from "expo-audio";
 import { useEffect } from "react";
@@ -10,8 +11,52 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 
 import { useIconFonts } from "@/src/hooks/use-icon-fonts";
 import { registerForPushNotifications } from "@/src/utils/push";
+import {
+  cancelCheckInReminders,
+  ensureNotificationSetup,
+  scheduleCheckInReminders,
+} from "@/src/utils/reminders";
 
 const ONBOARDING_DONE_KEY = "quakeguard_onboarding_done";
+
+// Notification categories (batch 5, B9).
+//
+// TREMOR_INFO carries the two action buttons for INFORMATIONAL tremor
+// notices only. The critical earthquake alert deliberately has NO category
+// at all — during a real event nothing may compete with I'M SAFE /
+// I'M TRAPPED, and a separate category id is the structural guarantee that
+// the two can never share configuration.
+const TREMOR_CATEGORY_ID = "TREMOR_INFO";
+const ACTION_VIEW_MAP = "VIEW_MAP";
+const ACTION_CLOSE = "CLOSE";
+
+// Background handler for the operator's "cancel all pending reminders" kill
+// switch (batch 5, B1). The backend sends a SILENT push (content-available,
+// no alert, no sound) so stopping a false alarm never costs the user another
+// loud notification. Registered as a background task so it works with the
+// app killed or backgrounded, not only in the foreground.
+const CANCEL_REMINDERS_TASK = "quakeangel-cancel-reminders";
+
+if (Platform.OS !== "web") {
+  TaskManager.defineTask(CANCEL_REMINDERS_TASK, async ({ data, error }) => {
+    if (error) return;
+    try {
+      const payload: any = (data as any)?.notification ?? data;
+      const body =
+        payload?.data?.body ??
+        payload?.request?.content?.data ??
+        payload?.data ??
+        payload;
+      const kind = String(body?.kind ?? "").trim();
+      if (kind === "cancel_reminders") {
+        await cancelCheckInReminders();
+        console.log("[QuakeAngel] reminders cancelled by operator kill switch");
+      }
+    } catch (e) {
+      console.log("[QuakeAngel] cancel-reminders task err:", (e as Error)?.message);
+    }
+  });
+}
 
 // Disable logbox errors etc so that users can see the app
 // and agent works as expected.
@@ -61,6 +106,25 @@ if (Platform.OS !== "web") {
   }).catch((e) =>
     console.log("[QuakeGuard] cold-start setAudioModeAsync err:", e?.message),
   );
+}
+
+// Register the tremor-notice category + the silent-push background task.
+// Both are fire-and-forget: failures degrade the feature, never the app.
+if (Platform.OS !== "web") {
+  Notifications.setNotificationCategoryAsync(TREMOR_CATEGORY_ID, [
+    {
+      identifier: ACTION_VIEW_MAP,
+      buttonTitle: "See location on map",
+      options: { opensAppToForeground: true },
+    },
+    {
+      identifier: ACTION_CLOSE,
+      buttonTitle: "Close",
+      options: { opensAppToForeground: false, isDestructive: false },
+    },
+  ]).catch(() => {});
+
+  Notifications.registerTaskAsync(CANCEL_REMINDERS_TASK).catch(() => {});
 }
 
 export default function RootLayout() {
@@ -156,21 +220,23 @@ export default function RootLayout() {
         return;
       }
 
-      // Explicit informational deep-link (non-/alert). Web URLs still open externally.
+      // External web links still open in the browser.
       const explicit = data.action_url || data.deeplink;
-      if (explicit && typeof explicit === "string" && explicit !== "/alert") {
-        if (explicit.startsWith("http")) {
-          Linking.openURL(explicit).catch(() => {});
-        } else {
-          router.push(explicit as any);
-        }
+      if (explicit && typeof explicit === "string" && explicit.startsWith("http")) {
+        Linking.openURL(explicit).catch(() => {});
         return;
       }
 
-      // Preview or unknown kind → informational detail screen (fail-safe).
-      // A siren on a mistaken tap destroys trust permanently; a missed
-      // siren is recoverable because the notification itself carried
+      // Preview / tremor notice / unknown kind → informational detail screen
+      // (fail-safe). A siren on a mistaken tap destroys trust permanently; a
+      // missed siren is recoverable because the notification itself carried
       // sound+haptics if it was truly critical.
+      //
+      // NOTE (batch 5, B3): every event field in the payload is forwarded as
+      // a query param. This branch used to be short-circuited by an
+      // `action_url === "/quake/<unid>"` check that navigated WITHOUT any
+      // params, which is why the detail screen showed "—" for distance,
+      // depth and coordinates when opened from a notification.
       const params = new URLSearchParams();
       Object.entries(data).forEach(([k, v]) => {
         if (v != null && k !== "kind" && k !== "action_url" && k !== "deeplink" && k !== "aps") {
@@ -178,16 +244,46 @@ export default function RootLayout() {
         }
       });
       const qs = params.toString();
-      const path = unid ? `/quake/${encodeURIComponent(unid)}` : "/quake/unknown";
+      const path = unid
+        ? `/quake/${encodeURIComponent(unid)}`
+        : typeof explicit === "string" && explicit !== "/alert"
+          ? explicit
+          : "/quake/unknown";
       router.push((path + (qs ? "?" + qs : "")) as any);
     };
 
     const tapSub = Notifications.addNotificationResponseReceivedListener(
       (response) => {
         const data = (response.notification.request.content.data ?? {}) as any;
+        // Action buttons on tremor notices (batch 5, B9). "Close" must do
+        // nothing at all — no navigation, no app launch. Tapping the
+        // notification body behaves exactly like "See location on map",
+        // which is what users expect.
+        if (response.actionIdentifier === ACTION_CLOSE) return;
         handleTap(data);
       },
     );
+
+    // Reminders + operator kill switch while the app is running (batch 5, B1).
+    //   - a genuine critical alert arriving now arms the reminder sequence
+    //     even before the user taps the notification;
+    //   - the operator's silent "cancel reminders" push clears them.
+    const recvSub = Notifications.addNotificationReceivedListener((n) => {
+      const data = (n.request.content.data ?? {}) as any;
+      const kind = String(data.kind ?? "").trim();
+      if (kind === "cancel_reminders") {
+        cancelCheckInReminders().catch(() => {});
+        return;
+      }
+      if (kind === "critical_alert") {
+        (async () => {
+          const ok = await ensureNotificationSetup();
+          if (!ok) return;
+          await cancelCheckInReminders();
+          await scheduleCheckInReminders();
+        })().catch(() => {});
+      }
+    });
 
     // Cold-start tap (app was killed when notification arrived)
     Notifications.getLastNotificationResponseAsync().then((response) => {
@@ -199,6 +295,7 @@ export default function RootLayout() {
     return () => {
       try {
         tapSub.remove();
+        recvSub.remove();
       } catch {
         // web shim
       }

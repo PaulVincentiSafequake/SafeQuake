@@ -27,9 +27,32 @@
  * destroys trust permanently.
  */
 import { useLocalSearchParams, useRouter } from "expo-router";
+import { useEffect, useState } from "react";
 import { View, Text, ScrollView, StyleSheet, TouchableOpacity, Linking } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
+import * as Location from "expo-location";
+
+// Fallback reference point when we have no user location: the Malta/Gozo
+// archipelago centre (same coordinates as the MT country_config on the
+// backend). ALWAYS labelled as such on screen — never silently substituted
+// for the user's own position (batch 5, B3).
+const MALTA_CENTER = { lat: 35.9375, lon: 14.3754 };
+const MALTA_LABEL = "Malta";
+
+function haversineKm(
+  lat1: number, lon1: number, lat2: number, lon2: number,
+): number {
+  const R = 6371;
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLon = ((lon2 - lon1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos((lat1 * Math.PI) / 180) *
+      Math.cos((lat2 * Math.PI) / 180) *
+      Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
 
 const colors = {
   bg: "#0B1220",
@@ -75,6 +98,77 @@ export default function QuakeDetailScreen() {
   const lat = params.latitude ?? null;
   const lon = params.longitude ?? null;
 
+  // ── Distance (batch 5, B3) ───────────────────────────────────────────
+  // Was rendering "—" whenever the screen was opened from the in-app
+  // seismic map (map.tsx passes no distance_km), which ALSO left the
+  // plain-language sentence with a hole in the middle of it.
+  //
+  // Resolution order, each labelled honestly on screen:
+  //   1. Distance from the user's own position — only if location
+  //      permission is ALREADY granted. This screen never prompts; it is
+  //      informational and a permission dialog here would be ambush-y.
+  //   2. Distance from Malta, explicitly stated as such.
+  //   3. Nothing at all — the row is omitted and the sentence drops the
+  //      distance clause entirely. It must never render with a gap.
+  const [distance, setDistance] = useState<{ km: number; from: string } | null>(
+    null,
+  );
+
+  useEffect(() => {
+    const eLat = lat != null ? Number(lat) : NaN;
+    const eLon = lon != null ? Number(lon) : NaN;
+    let cancelled = false;
+
+    (async () => {
+      if (!Number.isFinite(eLat) || !Number.isFinite(eLon)) {
+        // No epicentre coords — fall back to whatever the notification
+        // payload carried (that value is measured from Malta).
+        const fromPayload = distanceKm != null ? Number(distanceKm) : NaN;
+        if (Number.isFinite(fromPayload) && !cancelled) {
+          setDistance({ km: fromPayload, from: MALTA_LABEL });
+        }
+        return;
+      }
+
+      try {
+        const perm = await Location.getForegroundPermissionsAsync();
+        if (perm.granted) {
+          const pos =
+            (await Location.getLastKnownPositionAsync({ maxAge: 600_000 })) ??
+            (await Location.getCurrentPositionAsync({
+              accuracy: Location.Accuracy.Balanced,
+            }));
+          if (pos && !cancelled) {
+            setDistance({
+              km: haversineKm(
+                pos.coords.latitude, pos.coords.longitude, eLat, eLon,
+              ),
+              from: "you",
+            });
+            return;
+          }
+        }
+      } catch {
+        // fall through to the Malta fallback
+      }
+
+      if (!cancelled) {
+        setDistance({
+          km: haversineKm(MALTA_CENTER.lat, MALTA_CENTER.lon, eLat, eLon),
+          from: MALTA_LABEL,
+        });
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [lat, lon, distanceKm]);
+
+  const distanceLabel = distance
+    ? `${Math.round(distance.km)} km from ${distance.from}`
+    : null;
+
   return (
     <SafeAreaView style={styles.container} edges={["top"]}>
       <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
@@ -115,7 +209,7 @@ export default function QuakeDetailScreen() {
         {/* Details grid */}
         <View style={styles.card}>
           <Row label="Magnitude" value={magnitude ?? "—"} />
-          <Row label="Distance" value={distanceKm != null ? `${distanceKm} km` : "—"} />
+          {distanceLabel && <Row label="Distance" value={distanceLabel} />}
           <Row label="Depth" value={depthKm != null ? `${depthKm} km` : "—"} />
           <Row
             label="Location"
@@ -133,14 +227,18 @@ export default function QuakeDetailScreen() {
           )}
         </View>
 
-        {/* Plain-language explanation */}
+        {/* Plain-language explanation. The distance clause is either fully
+            present or fully absent — it must never render as a gap
+            ("...was approximately  from your location"), which is what
+            happened when distance_km was missing (batch 5, B3). */}
         <Text style={styles.section}>What this means</Text>
         <Text style={styles.explainer}>
-          The epicentre — where the earthquake started underground — was approximately
-          {distanceKm ? ` ${distanceKm} km ` : " "}
-          from your location. The magnitude number describes how much energy
-          was released at the source. Whether people feel it depends on
-          magnitude, distance, and depth together.
+          {distance
+            ? `The epicentre — where the earthquake started underground — was approximately ${Math.round(distance.km)} km ${distance.from === "you" ? "from your location" : `from ${distance.from}`}. `
+            : "The epicentre is where the earthquake started underground. "}
+          The magnitude number describes how much energy was released at the
+          source. Whether people feel it depends on magnitude, distance, and
+          depth together.
         </Text>
 
         {/* EMSC attribution — licence condition */}

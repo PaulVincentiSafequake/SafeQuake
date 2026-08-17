@@ -2,7 +2,7 @@
   "expo": {
     "name": "Quake Angel",
     "slug": "frontend",
-    "version": "1.0.23",
+    "version": "1.0.24",
     "orientation": "portrait",
     "icon": "./assets/icons/quake_angel_ios_v3.png",
     "scheme": "frontend",
@@ -16,6 +16,9 @@
         "com.apple.developer.usernotifications.critical-alerts": true
       },
       "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false,
+        "CFBundleDisplayName": "Quake Angel",
+        "UIBackgroundModes": ["remote-notification"],
         "NSLocationWhenInUseUsageDescription": "Share your location to report you are safe",
         "NSLocationAlwaysAndWhenInUseUsageDescription": "Share your location to report you are safe"
       }

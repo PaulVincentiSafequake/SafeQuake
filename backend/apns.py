@@ -197,6 +197,12 @@ def _fingerprint(token: str) -> str:
     return f"{token[:8]}…{token[-8:]}"
 
 
+# Notification-actions category id for INFORMATIONAL tremor notices only
+# (batch 5, B9). Must match the category registered by the mobile app in
+# app/_layout.tsx. The critical-alert payload never carries a category.
+TREMOR_CATEGORY_ID = "TREMOR_INFO"
+
+
 def _build_critical_payload(
     title: str,
     body: str,
@@ -299,6 +305,14 @@ def _build_preview_payload(
             "alert": {"title": title, "body": body},
             "sound": "default",
             "interruption-level": "active",
+            # Notification-actions category (batch 5, B9). Carries the
+            # "See location on map" / "Close" buttons registered on the
+            # mobile side as TREMOR_INFO. INFORMATIONAL NOTICES ONLY —
+            # _build_critical_payload deliberately sets no category at
+            # all, so nothing can ever compete for attention with
+            # I'M SAFE / I'M TRAPPED during a real event. The two paths
+            # cannot share configuration because they don't share an id.
+            "category": TREMOR_CATEGORY_ID,
         },
         # kind is REQUIRED — mobile tap handler distinguishes preview
         # from real alert. Missing kind → informational fallback.
@@ -327,6 +341,8 @@ async def _send_one(
     idempotency_key: str,
     environment: str = "production",
     apns_priority: str = "10",   # "10" = immediate delivery (critical alerts); "5" = power-efficient (regular pushes)
+    push_type: str = "alert",    # "alert" | "background" (silent, data-only)
+    apns_expiration: str = "0",  # "0" = one delivery attempt only
 ) -> ApnsResult:
     """Send one push and return the diagnostic result. On 400 BadDeviceToken
     against production, transparently retries once against sandbox and
@@ -346,9 +362,9 @@ async def _send_one(
         headers = {
             "authorization": f"bearer {_build_jwt(cfg)}",
             "apns-topic": cfg.bundle_id,
-            "apns-push-type": "alert",
+            "apns-push-type": push_type,
             "apns-priority": apns_priority,
-            "apns-expiration": "0",
+            "apns-expiration": apns_expiration,
             "apns-id": apns_id,
             "apns-collapse-id": idempotency_key[:64],
         }
@@ -375,6 +391,8 @@ async def _send_one(
                 cfg, user_id, device_token, payload, idempotency_key,
                 environment="sandbox",
                 apns_priority=apns_priority,
+                push_type=push_type,
+                apns_expiration=apns_expiration,
             )
             return fallback
 
@@ -567,6 +585,85 @@ async def send_preview_alerts(
                 payload=payload,
                 idempotency_key=idempotency_key,
                 apns_priority="5",   # regular / power-efficient delivery
+            )
+
+    results = await asyncio.gather(*(_guarded(d) for d in devices))
+    return {
+        "payload": payload,
+        "events": [r.as_dict() for r in results],
+    }
+
+
+# ---------- Silent (data-only) send: reminder kill switch ----------
+async def send_silent_cancel_reminders(
+    db: AsyncIOMotorDatabase,
+    devices: list[dict],  # each: {user_id, device_token}
+    idempotency_key: str,
+    reason: Optional[str] = None,
+) -> dict:
+    """Send a SILENT background push telling the app to cancel every pending
+    check-in reminder (batch 5, B1 — the operator's false-alarm kill switch).
+
+    Why silent matters: the whole point is to stop unwanted noise. Using an
+    alert push to say "stop making noise" would add a ninth notification to
+    the eight we're cancelling. So:
+      - payload carries `content-available: 1` and NO alert / sound / badge;
+      - `apns-push-type: background` and `apns-priority: 5`, which Apple
+        requires for silent pushes (an alert-type push with no alert body is
+        rejected, and a priority-10 background push is rejected too);
+      - `apns-expiration` is set ~10 minutes out so a phone that is briefly
+        offline still gets the cancel when it reconnects — reminders run for
+        11½ minutes, so a late delivery is still useful.
+
+    The app handles it in a registered background task (see
+    CANCEL_REMINDERS_TASK in app/_layout.tsx) so it works with the app
+    backgrounded or killed, not just in the foreground.
+    """
+    if not devices:
+        return {"payload": None, "events": []}
+
+    cfg = await load_apns_config(db)
+    if cfg is None:
+        return {
+            "payload": None,
+            "events": [
+                {
+                    "user_id": d.get("user_id") or "",
+                    "token_fingerprint": _fingerprint(d.get("device_token") or ""),
+                    "environment": "n/a",
+                    "status_code": None,
+                    "apns_id": None,
+                    "apns_unique_id": None,
+                    "reason": "APNS_NOT_CONFIGURED",
+                    "delivered": False,
+                    "duration_ms": 0,
+                    "error": "APNs auth key not uploaded.",
+                }
+                for d in devices
+            ],
+        }
+
+    payload: dict = {
+        "aps": {"content-available": 1},
+        "kind": "cancel_reminders",
+    }
+    if reason:
+        payload["reason"] = reason
+
+    expiration = str(int(time.time()) + 600)
+    sem = asyncio.Semaphore(CONCURRENCY)
+
+    async def _guarded(d: dict) -> ApnsResult:
+        async with sem:
+            return await _send_one(
+                cfg,
+                user_id=d.get("user_id") or "",
+                device_token=d.get("device_token") or "",
+                payload=payload,
+                idempotency_key=idempotency_key,
+                apns_priority="5",
+                push_type="background",
+                apns_expiration=expiration,
             )
 
     results = await asyncio.gather(*(_guarded(d) for d in devices))

@@ -13,11 +13,20 @@
  * that plainly, in language a stressed non-technical user cannot
  * misread.
  *
- * The four presets (per PRD, locked 2026-08-06):
- *   - Off             : no informational notifications at all
- *   - Significant only: predicted MMI IV+ ("only events I'd properly feel")
- *   - Noticeable      : predicted MMI III+ (default — "anything I might notice")
- *   - Everything nearby: every event inside country radius
+ * The three choices (batch 5, B4 — merged from four on 2026-08-17):
+ *   - Off              : no informational notifications at all
+ *   - Only what I'd
+ *     likely feel      : predicted MMI III+ (recommended default)
+ *   - Everything nearby: every event inside country radius, including
+ *                        tremors too small to feel
+ *
+ * "Significant only" (MMI IV+) and "Noticeable" (MMI III+) were one point
+ * apart on an intensity scale and indistinguishable to lay users — Paul,
+ * who commissioned the feature, could not tell them apart. They are merged
+ * into the middle option at the MMI III floor (the previous default, so
+ * behaviour is preserved). Devices still stored as "significant" are
+ * migrated to "noticeable" on first open of this screen, so the stored
+ * value always matches what the UI says.
  *
  * Also detects the OS-level Critical-Alerts permission and shows a
  * persistent (non-dismissable) banner if it has been revoked. Someone
@@ -25,7 +34,7 @@
  */
 import { useEffect, useState } from "react";
 import {
-  View, Text, StyleSheet, TouchableOpacity, ScrollView, ActivityIndicator, Linking, Alert,
+  View, Text, StyleSheet, TouchableOpacity, ScrollView, ActivityIndicator, Linking, Alert, Pressable,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
@@ -35,10 +44,18 @@ import { getDeviceId } from "@/src/utils/checkin";
 
 const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL ?? "";
 
+// Wire values understood by the backend. "significant" is legacy-only: the
+// UI no longer offers it, and any device still on it is migrated to
+// "noticeable" (same MMI III floor as the merged middle option).
 type Preset = "off" | "significant" | "noticeable" | "everything";
+// What the user actually chooses from, post-merge.
+type Choice = "off" | "noticeable" | "everything";
+
+const toChoice = (p: Preset): Choice =>
+  p === "significant" ? "noticeable" : (p as Choice);
 
 const PRESET_OPTIONS: {
-  value: Preset;
+  value: Choice;
   title: string;
   subtitle: string;
   helper: string;
@@ -50,30 +67,24 @@ const PRESET_OPTIONS: {
     helper: "You'll still receive critical earthquake alerts — those cannot be switched off.",
   },
   {
-    value: "significant",
-    title: "Significant only",
-    subtitle: "Only events I'd properly feel",
-    helper: "You'll be notified about tremors likely to be felt clearly indoors (predicted intensity IV or above).",
-  },
-  {
     value: "noticeable",
-    title: "Noticeable",
-    subtitle: "Anything I might notice",
+    title: "Only what I'd likely feel",
+    subtitle: "Tremors you'd probably notice",
     helper: "Recommended. Notifications for tremors likely to be felt at all (predicted intensity III or above).",
   },
   {
     value: "everything",
     title: "Everything nearby",
-    subtitle: "Every tremor in the region",
-    helper: "Frequent — a few notifications a day. Useful for people who want to know about all regional activity.",
+    subtitle: "Including tremors too small to feel",
+    helper: "Every recorded tremor in the region, including ones you will not feel at all. Expect a few notifications a day.",
   },
 ];
 
 export default function NotificationSettingsScreen() {
   const router = useRouter();
-  const [preset, setPreset] = useState<Preset>("noticeable");
+  const [preset, setPreset] = useState<Choice>("noticeable");
   const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState<Preset | null>(null);
+  const [saving, setSaving] = useState<Choice | null>(null);
   const [criticalAlertsRevoked, setCriticalAlertsRevoked] = useState(false);
 
   // Load current preset + check OS-level Critical Alerts permission.
@@ -85,7 +96,14 @@ export default function NotificationSettingsScreen() {
         if (r.ok) {
           const data = await r.json();
           if (data.preset && ["off","significant","noticeable","everything"].includes(data.preset)) {
-            setPreset(data.preset as Preset);
+            const stored = data.preset as Preset;
+            setPreset(toChoice(stored));
+            // One-way migration of the retired "significant" tier. Never
+            // lands anyone on Off — it moves them to the merged middle
+            // option, which is what the screen now shows them.
+            if (stored === "significant") {
+              save("noticeable", { silent: true });
+            }
           }
         }
       } catch { /* offline is fine — keep default */ }
@@ -105,8 +123,8 @@ export default function NotificationSettingsScreen() {
     })();
   }, []);
 
-  const save = async (next: Preset) => {
-    setSaving(next);
+  const save = async (next: Choice, opts?: { silent?: boolean }) => {
+    if (!opts?.silent) setSaving(next);
     try {
       const did = await getDeviceId();
       const r = await fetch(`${BACKEND_URL}/api/devices/notification-preset`, {
@@ -116,10 +134,12 @@ export default function NotificationSettingsScreen() {
       });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       setPreset(next);
-    } catch (e) {
-      Alert.alert("Could not save", "Please check your connection and try again.");
+    } catch {
+      if (!opts?.silent) {
+        Alert.alert("Could not save", "Please check your connection and try again.");
+      }
     } finally {
-      setSaving(null);
+      if (!opts?.silent) setSaving(null);
     }
   };
 
@@ -154,7 +174,7 @@ export default function NotificationSettingsScreen() {
                 Critical Alerts turned OFF
               </Text>
               <Text style={styles.criticalBannerBody}>
-                You'll miss earthquake alerts even in silent mode. Tap to re-enable in iOS Settings.
+                You&apos;ll miss earthquake alerts even in silent mode. Tap to re-enable in iOS Settings.
               </Text>
             </View>
             <Ionicons name="chevron-forward" size={20} color="#8A0F0F" />
@@ -210,9 +230,26 @@ export default function NotificationSettingsScreen() {
           </View>
         )}
 
+        <Pressable
+          onPress={() => router.push("/settings/places" as any)}
+          style={({ pressed }) => [styles.placesLink, pressed && { opacity: 0.85 }]}
+          testID="places-link"
+          accessibilityRole="button"
+        >
+          <Ionicons name="location-outline" size={22} color="#5DB1FF" />
+          <View style={{ flex: 1 }}>
+            <Text style={styles.placesLinkTitle}>Places I care about</Text>
+            <Text style={styles.placesLinkBody}>
+              Optional. Also get tremor notices for somewhere else — family in
+              Sicily, a second home.
+            </Text>
+          </View>
+          <Ionicons name="chevron-forward" size={20} color="#8FA0BC" />
+        </Pressable>
+
         <Text style={styles.footer}>
           Turning informational notifications off does not affect emergency alerts.
-          You will still be woken by the siren for a dangerous earthquake.
+          You will still be alerted by the siren for a dangerous earthquake.
         </Text>
       </ScrollView>
     </SafeAreaView>
@@ -267,4 +304,11 @@ const styles = StyleSheet.create({
     color: "#8FA0BC", fontSize: 12, fontStyle: "italic",
     textAlign: "center", marginTop: 24, lineHeight: 18,
   },
+  placesLink: {
+    flexDirection: "row", alignItems: "center", gap: 12,
+    backgroundColor: "#151E2F", borderRadius: 12, padding: 16,
+    borderWidth: 1, borderColor: "#25324A", marginTop: 20, minHeight: 48,
+  },
+  placesLinkTitle: { color: "#E7EDF5", fontSize: 15, fontWeight: "700" },
+  placesLinkBody: { color: "#8FA0BC", fontSize: 12, marginTop: 2, lineHeight: 17 },
 });

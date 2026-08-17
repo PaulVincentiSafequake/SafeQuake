@@ -112,9 +112,9 @@ export default function OnboardingScreen() {
           </View>
           <Text style={styles.h1}>Turn on Critical Alerts</Text>
           <Text style={styles.subtitle}>
-            An earthquake alert must wake your phone even when it&apos;s on
-            silent or in a Focus mode. Grant Critical Alerts so Quake Angel can
-            do that.
+            An earthquake alert must be able to sound on your phone even when
+            it&apos;s on silent or in a Focus mode. Grant Critical Alerts so
+            Quake Angel can do that.
           </Text>
 
           {/* Bullet list of what the permission enables */}

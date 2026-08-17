@@ -27,6 +27,7 @@ from apns import (
     apns_config_status,
     send_critical_alerts,
     send_preview_alerts,
+    send_silent_cancel_reminders,
 )
 
 # EMSC/USGS shadow-mode monitoring (Phase 1, 2026-08).
@@ -366,6 +367,48 @@ async def post_status(payload: StatusInPayload):
     return {"status": "ok", "device_id": doc["device_id"], "updated_at": now}
 
 
+# ---------- #146: telling test entries apart from real casualties -------
+# Synthetic/test rows used to sit in the live trapped list looking exactly
+# like real people. That's dangerous in both directions: an operator can
+# waste attention on a ghost, or dismiss a real person as "probably another
+# test". Detection is deliberately two-pronged.
+TEST_DEVICE_MARKERS = (
+    "test",       # qg-snippet-test-…, qg-rescue-test-…, TEST_…
+    "e2e",        # qg-rescue-e2e-…
+    "loadtest",   # B5 load-test seeder
+    "diag",       # diagnostics screen
+    "snippet",    # browser-automation harnesses
+    "playwright",
+    "demo",
+    "-mob-",      # qg-mob-safe-…, qg-mob-mobile-…
+)
+
+# The mobile app's own ids look like `qg-<13-digit epoch>-<8 random chars>`.
+# Anything matching this is treated as a REAL person no matter what its
+# random suffix happens to spell, so a marker substring can never
+# accidentally hide a genuine casualty. Only the explicit operator flag can
+# hide one of these — a decision with a name attached to it in the audit log.
+_REAL_DEVICE_ID_RE = __import__("re").compile(r"^qg-\d{10,14}-[a-z0-9]{6,12}$")
+
+
+def _is_test_device(row: dict) -> bool:
+    """True when a device_status row is a test/synthetic entry.
+
+    The explicit flag comes first and is the important one: test check-ins
+    made from a real phone (which is how ours are made) cannot be
+    recognised from the id, so an operator tags them by hand.
+    """
+    if row.get("synthetic") is True:
+        return True
+    did = str(row.get("device_id") or "")
+    if did == "dashboard":
+        return True
+    if _REAL_DEVICE_ID_RE.match(did):
+        return False
+    low = did.lower()
+    return any(m in low for m in TEST_DEVICE_MARKERS)
+
+
 @api_router.get("/devices")
 async def get_devices(
     request: Request,
@@ -438,10 +481,24 @@ async def get_devices(
             "pre_rescue_status": r.get("pre_rescue_status"),
             "pre_rescue_severity": r.get("pre_rescue_severity"),
             "pre_rescue_mobility": r.get("pre_rescue_mobility"),
+            # ── #146: is this row a test/synthetic entry? ────────────────
+            # Old test check-ins were cluttering the live trapped list with
+            # no way to tell them from real casualties. Two sources:
+            #   * an explicit `synthetic: true` flag (set by the load-test
+            #     seeder, or by an operator via POST
+            #     /api/admin/devices/{id}/mark-test — needed because Paul's
+            #     test check-ins come from his own REAL device, which no
+            #     naming pattern can catch);
+            #   * a recognised test device_id pattern.
+            # Returned as a field rather than filtered server-side: the
+            # dashboard hides them by default but can show them on demand,
+            # and nothing is ever silently dropped from a legal record.
+            "is_test": _is_test_device(r),
         }
 
     return {
         "count": len(rows),
+        "test_count": sum(1 for r in rows if _is_test_device(r)),
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "devices": [clean(r) for r in rows],
     }
@@ -2067,6 +2124,121 @@ async def set_notification_preset(body: NotificationPresetBody):
         upsert=True,
     )
     return {"ok": True, "device_id": body.device_id, "preset": preset}
+
+
+# ---------- B8: "places I care about" (optional named places) ------------
+#
+# Approved 2026-08-17 as the answer to "should users set their own
+# notification radius" — a radius slider was considered and REJECTED
+# (task #158): distance alone is the wrong variable (M6 at 300 km matters
+# more than M2 at 20 km), and a dial invites misconfiguration in both
+# directions — set small and people silently miss things, set large and
+# they get flooded and switch notifications off entirely.
+#
+# Instead: a user optionally names places they care about (family in
+# Sicily, a second home). Each place is evaluated with the SAME intensity
+# logic as their own location — never a raw radius.
+#
+# HARD CONSTRAINT (safety): places affect INFORMATIONAL tremor notices
+# only. They can never filter, delay or suppress the critical alert for
+# the user's own location. That is guaranteed structurally, not by a flag:
+# the critical path is send_critical_alerts() via /api/trigger-alert and
+# the evaluator's critical branch, neither of which reads `user_places`
+# at all. Place evaluation lives exclusively in emsc/preview.py.
+#
+# PRIVACY (flagged for the GDPR work, #75): a saved place is location data
+# about OTHER PEOPLE (where your family lives). It needs covering in the
+# privacy policy, in retention, and in erasure — deleting a device must
+# delete its places.
+MAX_PLACES_PER_DEVICE = 5
+
+
+class PlaceBody(BaseModel):
+    name: str = Field(..., min_length=1, max_length=40)
+    latitude: float = Field(..., ge=-90, le=90)
+    longitude: float = Field(..., ge=-180, le=180)
+
+
+class PlacesEnabledBody(BaseModel):
+    enabled: bool
+
+
+@api_router.get("/devices/{device_id}/places")
+async def list_places(device_id: str):
+    """A device's saved places + the whole-feature on/off switch.
+
+    Public endpoint — device_id IS the auth, same trust model as
+    /api/status and /api/devices/{id}/notification-preset.
+    """
+    rows = await db.user_places.find(
+        {"device_id": device_id}, {"_id": 0},
+    ).sort("created_at", 1).to_list(MAX_PLACES_PER_DEVICE * 2)
+    dev = await db.push_devices.find_one(
+        {"user_id": device_id}, {"_id": 0, "places_enabled": 1},
+    )
+    enabled = (dev or {}).get("places_enabled")
+    return {
+        "device_id": device_id,
+        # Default ON so that adding a place works immediately; the feature
+        # is opt-in by virtue of having no places at all, so nothing nags
+        # a user who never adds one.
+        "enabled": True if enabled is None else bool(enabled),
+        "max_places": MAX_PLACES_PER_DEVICE,
+        "places": rows,
+    }
+
+
+@api_router.post("/devices/{device_id}/places")
+async def add_place(device_id: str, body: PlaceBody):
+    """Add a named place. Capped at MAX_PLACES_PER_DEVICE."""
+    name = (body.name or "").strip()
+    if not name:
+        raise HTTPException(400, "name is required")
+    count = await db.user_places.count_documents({"device_id": device_id})
+    if count >= MAX_PLACES_PER_DEVICE:
+        raise HTTPException(
+            400, f"You can save up to {MAX_PLACES_PER_DEVICE} places. Remove one first.",
+        )
+    now = datetime.now(timezone.utc).isoformat()
+    doc = {
+        "place_id": str(uuid.uuid4()),
+        "device_id": device_id,
+        "name": name,
+        "latitude": body.latitude,
+        "longitude": body.longitude,
+        "created_at": now,
+    }
+    await db.user_places.insert_one(dict(doc))
+    return {"ok": True, "place": doc}
+
+
+@api_router.delete("/devices/{device_id}/places/{place_id}")
+async def delete_place(device_id: str, place_id: str):
+    """Remove one saved place. Notices for it stop immediately — the
+    dispatch path reads `user_places` fresh on every event."""
+    res = await db.user_places.delete_one(
+        {"device_id": device_id, "place_id": place_id},
+    )
+    if res.deleted_count == 0:
+        raise HTTPException(404, "No such place for this device")
+    return {"ok": True, "deleted": place_id}
+
+
+@api_router.post("/devices/{device_id}/places/enabled")
+async def set_places_enabled(device_id: str, body: PlacesEnabledBody):
+    """Whole-feature switch — silences every place at once without
+    deleting any of them."""
+    now = datetime.now(timezone.utc)
+    await db.push_devices.update_one(
+        {"user_id": device_id},
+        {
+            "$set": {"places_enabled": bool(body.enabled), "places_enabled_updated_at": now},
+            "$setOnInsert": {"user_id": device_id, "created_at": now},
+        },
+        upsert=True,
+    )
+    return {"ok": True, "device_id": device_id, "enabled": bool(body.enabled)}
+
 
 # ---------- Dual casualty reports: B1 Operational / B2 Public -----------
 #
@@ -3711,7 +3883,204 @@ async def trigger_alert(
         "apns_payload": apns_payload,
     }
 
+
+# ---------- False-alarm recovery: cancel every pending check-in reminder ----
+@api_router.post("/admin/reminders/cancel")
+async def cancel_check_in_reminders(request: Request):
+    """STOP THE NAGGING — cancel pending check-in reminders on every phone.
+
+    Why this exists (batch 5, B1): manual triggering is a primary detection
+    path (#105) and humans make mistakes. Before this endpoint, a false alarm
+    meant every user got the alert plus 8 local reminder sirens over 11½
+    minutes, with no way for an operator to stop it — the reminders are
+    scheduled ON the device, so nothing server-side could reach them.
+
+    How it stops them without adding noise: a SILENT background push
+    (content-available, no alert, no sound — see
+    apns.send_silent_cancel_reminders) which the app handles in a registered
+    background task and answers by cancelling every scheduled reminder plus
+    dismissing any already on screen. The user hears nothing; the nagging
+    just stops.
+
+    Scope: every registered iOS device. A phone with no pending reminders
+    treats it as a no-op, so broadcasting is safe and needs no bookkeeping
+    about who received which alert.
+
+    Android note: Android reminders are local notifications too, but the
+    Android relay has no silent data-push channel, so this endpoint covers
+    iOS only. Android users' reminders still stop the moment they answer.
+    """
+    principal = await resolve_principal(
+        request, request.headers.get("x-admin-token"),
+        ADMIN_TRIGGER_PASSWORD, db,
+    )
+    require_role(principal, "admin", "operator")
+
+    ios_devices = await db.push_devices.find(
+        {
+            "platform": {"$in": ["ios", "iOS"]},
+            "device_token": {"$exists": True, "$ne": None},
+        },
+        {"_id": 0, "user_id": 1, "device_token": 1},
+    ).to_list(5000)
+
+    idem = f"cancel-reminders-{uuid.uuid4()}"
+    result = await send_silent_cancel_reminders(
+        db=db,
+        devices=ios_devices,
+        idempotency_key=idem,
+        reason="operator_cancel",
+    )
+    events = result.get("events") or []
+    delivered = sum(1 for e in events if e.get("delivered"))
+    now = datetime.now(timezone.utc).isoformat()
+
+    await db.emsc_audit_log.insert_one({
+        "timestamp": now,
+        "event_type": "reminders_cancelled",
+        "context": {
+            "requested_by": principal.get("email"),
+            "targeted": len(ios_devices),
+            "delivered": delivered,
+            "idempotency_key": idem,
+            "silent": True,
+        },
+    })
+
+    return {
+        "ok": True,
+        "targeted": len(ios_devices),
+        "delivered": delivered,
+        "silent": True,
+        "requested_by": principal.get("email"),
+        "requested_at": now,
+        "idempotency_key": idem,
+        "apns_events": events,
+    }
+
+
 # ---------- Maintenance: purge leftover test / diagnostic rows ----------
+class MarkTestBody(BaseModel):
+    is_test: bool = True
+
+
+@api_router.post("/admin/devices/{device_id}/mark-test")
+async def mark_device_as_test(device_id: str, body: MarkTestBody, request: Request):
+    """Tag (or untag) one device as a test entry — #146.
+
+    Why an operator needs this: our own test check-ins come from a real
+    phone with a real device_id, so no naming pattern can spot them. Once
+    tagged, the row still exists (nothing is deleted, the audit trail is
+    intact) but the dashboard's trapped list hides it by default.
+
+    Reversible: post {"is_test": false} to put it back. Both directions
+    are written to the audit log, because hiding a person from a rescue
+    list is a decision someone must be able to account for.
+    """
+    principal = await resolve_principal(
+        request, request.headers.get("x-admin-token"), ADMIN_TRIGGER_PASSWORD, db
+    )
+    require_role(principal, "admin", "operator")
+
+    res = await db.device_status.update_one(
+        {"device_id": device_id},
+        {"$set": {"synthetic": bool(body.is_test)}},
+    )
+    if res.matched_count == 0:
+        raise HTTPException(404, "No such device")
+
+    now = datetime.now(timezone.utc).isoformat()
+    await db.emsc_audit_log.insert_one({
+        "timestamp": now,
+        "event_type": "device_marked_test" if body.is_test else "device_unmarked_test",
+        "device_id": device_id,
+        "context": {"by": principal.get("email"), "is_test": bool(body.is_test)},
+    })
+    return {"ok": True, "device_id": device_id, "is_test": bool(body.is_test)}
+
+
+@api_router.get("/admin/test-entries")
+async def list_test_entries(request: Request):
+    """Preview what a purge would remove, across ALL three collections."""
+    principal = await resolve_principal(
+        request, request.headers.get("x-admin-token"), ADMIN_TRIGGER_PASSWORD, db
+    )
+    require_role(principal, "admin", "operator")
+
+    rows = await db.device_status.find({}, {"_id": 0}).to_list(5000)
+    test_rows = [r for r in rows if _is_test_device(r)]
+    ids = [r.get("device_id") for r in test_rows]
+    return {
+        "count": len(test_rows),
+        "device_status": len(test_rows),
+        "status_events": await db.status_events.count_documents({"device_id": {"$in": ids}}) if ids else 0,
+        "push_devices": await db.push_devices.count_documents({"user_id": {"$in": ids}}) if ids else 0,
+        "devices": [
+            {
+                "device_id": r.get("device_id"),
+                "status": r.get("status"),
+                "severity": r.get("severity"),
+                "display_name": r.get("display_name"),
+                "updated_at": r.get("updated_at"),
+                "flagged_by_operator": r.get("synthetic") is True,
+            }
+            for r in test_rows
+        ],
+    }
+
+
+@api_router.post("/admin/purge-test-entries")
+async def purge_test_entries(request: Request):
+    """Delete every tagged/recognised test entry from the live surfaces.
+
+    Unlike the older /admin/purge-test-devices (which only ever touched
+    `push_devices`, and so left the trapped list exactly as cluttered as
+    before — the actual cause of #146), this clears `device_status`,
+    `status_events` and `push_devices` together.
+
+    ADMIN ONLY, and audited with the full id list: this deletes rows from
+    what is, for real people, a legal record. Operators can hide entries
+    (mark-test); only an admin can destroy them.
+    """
+    principal = await resolve_principal(
+        request, request.headers.get("x-admin-token"), ADMIN_TRIGGER_PASSWORD, db
+    )
+    require_role(principal, "admin")
+
+    rows = await db.device_status.find({}, {"_id": 0, "device_id": 1, "synthetic": 1}).to_list(5000)
+    ids = [r.get("device_id") for r in rows if _is_test_device(r)]
+    if not ids:
+        return {"ok": True, "deleted": {"device_status": 0, "status_events": 0, "push_devices": 0}}
+
+    d1 = await db.device_status.delete_many({"device_id": {"$in": ids}})
+    d2 = await db.status_events.delete_many({"device_id": {"$in": ids}})
+    d3 = await db.push_devices.delete_many({"user_id": {"$in": ids}})
+
+    now = datetime.now(timezone.utc).isoformat()
+    await db.emsc_audit_log.insert_one({
+        "timestamp": now,
+        "event_type": "test_entries_purged",
+        "context": {
+            "by": principal.get("email"),
+            "device_ids": ids,
+            "deleted": {
+                "device_status": d1.deleted_count,
+                "status_events": d2.deleted_count,
+                "push_devices": d3.deleted_count,
+            },
+        },
+    })
+    return {
+        "ok": True,
+        "purged_device_ids": ids,
+        "deleted": {
+            "device_status": d1.deleted_count,
+            "status_events": d2.deleted_count,
+            "push_devices": d3.deleted_count,
+        },
+    }
+
+
 async def _run_purge_test_devices() -> dict:
     result = await db.push_devices.delete_many({
         "$or": [

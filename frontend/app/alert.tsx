@@ -13,6 +13,7 @@ import {
   StyleSheet,
   Text,
   View,
+  useWindowDimensions,
 } from "react-native";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import Animated, {
@@ -35,7 +36,9 @@ import {
 import {
   cancelCheckInReminders,
   cancelRescueInfoNotification,
+  ensureNotificationSetup,
   postRescueInfoNotification,
+  scheduleCheckInReminders,
 } from "@/src/utils/reminders";
 
 const SIREN_SOURCE = require("../assets/audio/siren.mp3");
@@ -76,6 +79,12 @@ export default function AlertScreen() {
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const isReminderContext = params.reminder === "1";
   const insets = useSafeAreaInsets();
+  // Short-screen mode (batch 5, B2). iPhone SE/mini class devices can't fit
+  // the 220pt pulse graphic + 40pt headline + data strip + two large action
+  // buttons. Below this height the graphic and headline shrink; the data
+  // strip and the buttons never do.
+  const { height: windowHeight } = useWindowDimensions();
+  const compact = windowHeight < 760;
   const [status, setStatus] = useState<Status>("idle");
   const [outcome, setOutcome] = useState<OutcomeKind>("safe");
   const [chosenSeverity, setChosenSeverity] =
@@ -221,6 +230,30 @@ export default function AlertScreen() {
       // ignore
     }
   }, [status, sirenPlayer]);
+
+  // ─── CHECK-IN REMINDERS: real alerts only (batch 5, B1) ───────────────
+  // Reminders used to be scheduled by the in-app TEST trigger on Home,
+  // which meant a practice run nagged the user 8 times over 11½ minutes.
+  // They now arm here, and only when this screen was opened by a genuine
+  // critical alert (siren=1, set solely by the kind="critical_alert" tap
+  // handler) or by a reminder from that alert. Test triggers and preview
+  // taps reach /alert with siren!=1 and arm nothing.
+  useEffect(() => {
+    if (!shouldPlaySiren) return;
+    let cancelled = false;
+    (async () => {
+      const ok = await ensureNotificationSetup();
+      if (!ok || cancelled) return;
+      // cancel-then-schedule keeps overlapping sets from stacking when a
+      // second alert arrives while the first is unanswered.
+      await cancelCheckInReminders();
+      if (cancelled) return;
+      await scheduleCheckInReminders();
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [shouldPlaySiren]);
 
   const stopSiren = () => {
     // Flip the guard FIRST so any in-flight play effect bails out before
@@ -573,40 +606,66 @@ export default function AlertScreen() {
           <Text style={styles.liveText}>LIVE ALERT · {mm}:{ss}</Text>
         </View>
 
-        {/* Center: pulsing warning */}
+        {/* Center: pulsing warning.
+            LAYOUT CONTRACT (batch 5, B2): this block is the ONLY shrinkable
+            region on the screen. The metrics strip and the action buttons are
+            siblings with flexShrink:0, so on a short iPhone the graphic and
+            headline give up space instead of the data strip sliding underneath
+            the I'M SAFE button (the bug: only the top few pixels of each
+            number were visible). `overflow: hidden` is the belt-and-braces
+            guarantee that nothing from here can ever paint over the strip. */}
         <View style={styles.center}>
-          <View style={styles.pulseWrap}>
+          <View style={[styles.pulseWrap, compact && styles.pulseWrapCompact]}>
             <Animated.View style={[styles.pulseRing, ringStyle]} />
             <Animated.View style={[styles.pulseRing, styles.pulseRingInner, ringStyle]} />
-            <Animated.View style={[styles.iconBubble, iconStyle]}>
-              <Ionicons name="warning" size={72} color={colors.onBrandPrimary} />
+            <Animated.View
+              style={[styles.iconBubble, compact && styles.iconBubbleCompact, iconStyle]}
+            >
+              <Ionicons
+                name="warning"
+                size={compact ? 48 : 72}
+                color={colors.onBrandPrimary}
+              />
             </Animated.View>
           </View>
 
-          <Text style={styles.heading}>EARTHQUAKE{"\n"}DETECTED</Text>
-          <Text style={styles.subheading}>
+          <Text style={[styles.heading, compact && styles.headingCompact]}>
+            EARTHQUAKE{"\n"}DETECTED
+          </Text>
+          <Text style={[styles.subheading, compact && styles.subheadingCompact]}>
             Drop. Cover. Hold on.{"\n"}Move to open space when shaking stops.
           </Text>
+        </View>
 
-          <View style={styles.metricsRow}>
-            <View style={styles.metric}>
-              <Text style={styles.metricLabel}>MAGNITUDE</Text>
-              <Text style={styles.metricValue}>{eventMagnitude ?? "—"}</Text>
-            </View>
-            <View style={styles.metricDivider} />
-            <View style={styles.metric}>
-              <Text style={styles.metricLabel}>DISTANCE</Text>
-              <Text style={styles.metricValue}>
-                {eventDistanceKm != null ? (
-                  <>{eventDistanceKm}<Text style={styles.metricUnit}>km</Text></>
-                ) : "—"}
-              </Text>
-            </View>
-            <View style={styles.metricDivider} />
-            <View style={styles.metric}>
-              <Text style={styles.metricLabel}>INTENSITY</Text>
-              <Text style={styles.metricValue}>{eventIntensity ?? "—"}</Text>
-            </View>
+        {/* Data strip — own row, never overlapped by the buttons below. */}
+        <View style={styles.metricsRow}>
+          <View style={styles.metric}>
+            <Text style={[styles.metricLabel, compact && styles.metricLabelCompact]}>
+              MAGNITUDE
+            </Text>
+            <Text style={styles.metricValue} numberOfLines={1} adjustsFontSizeToFit>
+              {eventMagnitude ?? "—"}
+            </Text>
+          </View>
+          <View style={styles.metricDivider} />
+          <View style={styles.metric}>
+            <Text style={[styles.metricLabel, compact && styles.metricLabelCompact]}>
+              DISTANCE
+            </Text>
+            <Text style={styles.metricValue} numberOfLines={1} adjustsFontSizeToFit>
+              {eventDistanceKm != null ? (
+                <>{eventDistanceKm}<Text style={styles.metricUnit}>km</Text></>
+              ) : "—"}
+            </Text>
+          </View>
+          <View style={styles.metricDivider} />
+          <View style={styles.metric}>
+            <Text style={[styles.metricLabel, compact && styles.metricLabelCompact]}>
+              INTENSITY
+            </Text>
+            <Text style={styles.metricValue} numberOfLines={1} adjustsFontSizeToFit>
+              {eventIntensity ?? "—"}
+            </Text>
           </View>
         </View>
 
@@ -697,26 +756,28 @@ export default function AlertScreen() {
             </Pressable>
           )}
 
-          <Pressable
-            onPress={() => {
-              stopSiren();
-              cancelCheckInReminders().catch(() => {});
-              if (router.canGoBack()) {
-                router.back();
-              } else {
-                router.replace("/");
-              }
-            }}
-            style={styles.dismissBtn}
-            hitSlop={12}
-            testID="alert-dismiss-btn"
-          >
-            <Text style={styles.dismissText}>
-              {status === "sent" && outcome === "trapped"
-                ? "Back to home"
-                : "Dismiss alert"}
-            </Text>
-          </Pressable>
+          {/* Task #14: the "Dismiss alert" escape hatch is gone — an
+              unanswered alert must not be dismissable, because a dismissal
+              looks identical to silence on the dashboard. The only way off
+              this screen is to answer (I'M SAFE / I'M TRAPPED). After a
+              trapped report is confirmed, a plain "Back to home" remains. */}
+          {status === "sent" && outcome === "trapped" && (
+            <Pressable
+              onPress={() => {
+                stopSiren();
+                if (router.canGoBack()) {
+                  router.back();
+                } else {
+                  router.replace("/");
+                }
+              }}
+              style={styles.dismissBtn}
+              hitSlop={12}
+              testID="alert-back-home-btn"
+            >
+              <Text style={styles.dismissText}>Back to home</Text>
+            </Pressable>
+          )}
         </View>
 
         {/* Triage sheet — plain-language mapping to START triage colours.
@@ -920,6 +981,9 @@ const styles = StyleSheet.create({
   },
   center: {
     flex: 1,
+    flexShrink: 1,
+    minHeight: 0,
+    overflow: "hidden",
     alignItems: "center",
     justifyContent: "center",
   },
@@ -929,6 +993,11 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     marginBottom: spacing.xl,
+  },
+  pulseWrapCompact: {
+    width: 150,
+    height: 150,
+    marginBottom: spacing.md,
   },
   pulseRing: {
     position: "absolute",
@@ -957,6 +1026,11 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 0 },
     elevation: 20,
   },
+  iconBubbleCompact: {
+    width: 96,
+    height: 96,
+    borderRadius: 48,
+  },
   heading: {
     color: colors.onSurface,
     fontSize: 40,
@@ -964,6 +1038,11 @@ const styles = StyleSheet.create({
     letterSpacing: 3,
     textAlign: "center",
     lineHeight: 44,
+  },
+  headingCompact: {
+    fontSize: 30,
+    lineHeight: 34,
+    letterSpacing: 2,
   },
   subheading: {
     marginTop: spacing.md,
@@ -973,8 +1052,15 @@ const styles = StyleSheet.create({
     textAlign: "center",
     lineHeight: 26,
   },
+  subheadingCompact: {
+    marginTop: spacing.sm,
+    fontSize: 16,
+    lineHeight: 22,
+  },
   metricsRow: {
-    marginTop: spacing.xl,
+    flexShrink: 0,
+    marginTop: spacing.md,
+    marginBottom: spacing.md,
     flexDirection: "row",
     alignItems: "center",
     backgroundColor: "rgba(0,0,0,0.35)",
@@ -996,6 +1082,10 @@ const styles = StyleSheet.create({
     fontWeight: "700",
     marginBottom: 4,
   },
+  metricLabelCompact: {
+    fontSize: 10,
+    letterSpacing: 0.3,
+  },
   metricValue: {
     color: colors.onSurface,
     fontSize: 28,
@@ -1013,6 +1103,7 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(255,255,255,0.15)",
   },
   bottomWrap: {
+    flexShrink: 0,
     gap: spacing.md,
   },
   errorToast: {

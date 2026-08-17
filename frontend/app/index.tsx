@@ -38,9 +38,7 @@ import {
   wasNamePrompted,
 } from "@/src/utils/checkin";
 import {
-  cancelCheckInReminders,
   ensureNotificationSetup,
-  scheduleCheckInReminders,
 } from "@/src/utils/reminders";
 
 // Legacy: pre-1.0.22 we only recorded the last-seen version and cleared the
@@ -59,6 +57,12 @@ const WATCH_CONFIRMED_VERSION_KEY = "quakeguard_watch_confirmed_version";
 // steps; long enough not to feel spammy.
 const WATCH_RECHECK_DAYS = 14;
 const WATCH_RECHECK_MS = WATCH_RECHECK_DAYS * 24 * 60 * 60 * 1000;
+
+// Self-declared "I have no Apple Watch" opt-out (batch 5, B6). iOS gives JS
+// no way to read Watch pairing — there is no Expo API and no entitlement for
+// it — so the only honest gate is the user's own answer. One tap silences
+// the whole feature permanently for people it can never help.
+const WATCH_NOT_APPLICABLE_KEY = "quakeangel_no_apple_watch";
 
 const HERO_IMG =
   "https://images.unsplash.com/photo-1772050137595-0116f8dba498?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjY2NjV8MHwxfHNlYXJjaHwxfHxlYXJ0aHF1YWtlJTIwc2Vpc21vZ3JhcGglMjBkYXJrfGVufDB8fHx8MTc4NDcwNTQ2MHww&ixlib=rb-4.1.0&q=85";
@@ -149,11 +153,19 @@ export default function HomeScreen() {
       return;
     }
     try {
-      const [confirmedAtRaw, confirmedVersion, legacySeen] = await Promise.all([
+      const [confirmedAtRaw, confirmedVersion, legacySeen, noWatch] = await Promise.all([
         AsyncStorage.getItem(WATCH_CONFIRMED_AT_KEY),
         AsyncStorage.getItem(WATCH_CONFIRMED_VERSION_KEY),
         AsyncStorage.getItem(LEGACY_LAST_SEEN_VERSION_KEY),
+        AsyncStorage.getItem(WATCH_NOT_APPLICABLE_KEY),
       ]);
+
+      // User has told us they don't own an Apple Watch — never show any of
+      // this again. Pure noise for them.
+      if (noWatch === "1" && !forcePreview) {
+        setWatchState({ kind: "hidden" });
+        return;
+      }
 
       // First-launch heuristic: if BOTH new keys are empty AND legacy key is
       // empty, this is a truly fresh install — do NOT nag on first launch
@@ -270,6 +282,38 @@ export default function HomeScreen() {
     setWatchModalOpen(true);
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
   };
+
+  // "I don't use an Apple Watch" — permanent opt-out (batch 5, B6).
+  //
+  // This must mean "I don't OWN an Apple Watch", never "stop telling me".
+  // Anyone who does own one has to keep getting this notice after every
+  // update, because iOS re-enables the Watch notification toggle every
+  // time — so the confirm dialog spells out the difference and defaults to
+  // keeping the notice.
+  const dismissWatchForever = useCallback(() => {
+    Alert.alert(
+      "Do you own an Apple Watch?",
+      "This notice only matters if you do. Apple can switch your Watch " +
+        "notifications back on after every update, and a quiet tap on your " +
+        "wrist is easy to miss — so if you own one, keep the reminder.\n\n" +
+        "Only turn it off if you don't have an Apple Watch at all.",
+      [
+        { text: "I own one — keep reminding me", style: "cancel" },
+        {
+          text: "I don't own one",
+          onPress: async () => {
+            try {
+              await AsyncStorage.setItem(WATCH_NOT_APPLICABLE_KEY, "1");
+            } catch {
+              // ignore — worst case they see the card again next launch
+            }
+            setWatchState({ kind: "hidden" });
+            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+          },
+        },
+      ],
+    );
+  }, []);
 
   // ── Name modal handlers ──────────────────────────────────────────────
   const openNameEditor = useCallback(() => {
@@ -418,15 +462,13 @@ export default function HomeScreen() {
     //    Authorization: Bearer <jwt>) — every trigger is now attributed to a
     //    named operator in the audit trail. See Task #9 (2026-08).
 
-    // 3) Ask for notification permission and schedule local reminder
-    //    notifications every ~90s until the user marks themselves safe.
-    (async () => {
-      const ok = await ensureNotificationSetup();
-      if (ok) {
-        await cancelCheckInReminders();
-        await scheduleCheckInReminders();
-      }
-    })();
+    // 3) NO reminders for the in-app test trigger (batch 5, B1). A practice
+    //    run must not nag the user 8 times over 11½ minutes. Reminders are
+    //    scheduled ONLY when a genuine critical alert opens /alert (see
+    //    app/alert.tsx) or arrives while the app is running (_layout.tsx).
+    //    We still ensure notification permission/channel setup exists so the
+    //    real path is ready when it matters.
+    ensureNotificationSetup().catch(() => {});
 
     router.push("/alert");
     setTriggering(false);
@@ -529,7 +571,7 @@ export default function HomeScreen() {
                   {watchState.reason === "stale"
                     ? "Time to re-check your Apple Watch"
                     : watchState.reason === "version-change"
-                      ? "Just updated? Re-check your Apple Watch"
+                      ? "You've just updated Quake Angel"
                       : "Check your Apple Watch settings"}
                 </Text>
               </View>
@@ -544,10 +586,15 @@ export default function HomeScreen() {
                   </>
                 ) : watchState.reason === "version-change" ? (
                   <>
-                    iOS often resets the Watch app&apos;s notification-mirroring
-                    toggle back to <Text style={styles.updateReminderBold}>on</Text>{" "}
-                    after an app update — even for critical alerts. Please
-                    re-verify it&apos;s off.
+                    Apple sometimes switches your Apple Watch notifications back
+                    on after an update. We can&apos;t change that setting for you.
+                    {"\n\n"}
+                    <Text style={styles.updateReminderBold}>Why this matters:</Text>{" "}
+                    if your watch handles the alert, your phone may not ring out
+                    loud. A quiet tap on your wrist is easy to miss. In an
+                    earthquake you want the siren.
+                    {"\n\n"}
+                    Take a moment to check now.
                   </>
                 ) : (
                   <>
@@ -589,6 +636,16 @@ export default function HomeScreen() {
                 Watch updates can reset this toggle too. The app can&apos;t
                 detect or control the toggle directly.
               </Text>
+              <Pressable
+                onPress={dismissWatchForever}
+                style={styles.updateReminderOptOut}
+                testID="update-reminder-no-watch"
+                hitSlop={6}
+              >
+                <Text style={styles.updateReminderOptOutText}>
+                  I don&apos;t own an Apple Watch — don&apos;t show this again
+                </Text>
+              </Pressable>
             </View>
           </View>
         ) : watchState.kind === "confirmed" ? (
@@ -1172,6 +1229,18 @@ const styles = StyleSheet.create({
     lineHeight: 17,
     fontStyle: "italic",
   },
+  updateReminderOptOut: {
+    marginTop: spacing.md,
+    paddingVertical: spacing.sm,
+    minHeight: 44,
+    justifyContent: "center",
+  },
+  updateReminderOptOutText: {
+    color: colors.onSurfaceSecondary,
+    fontSize: 13,
+    textDecorationLine: "underline",
+  },
+
 
   /* Confirmed-state pill — always visible until the next re-check triggers */
   watchOkPill: {

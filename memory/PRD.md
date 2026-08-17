@@ -779,3 +779,117 @@ dashboard pointed at preview).
 Emergent build pipeline at publish time (auto-increment). The 1.0.23 build is the
 first to contain the #51 mobility-skip fix plus everything listed as
 "in-code-but-not-in-build-1022" above.
+
+---
+
+## 2026-08-17 (batch 5) — Part A verified live, Part B built, C1 designed
+
+**PART A — all four already live in PRODUCTION; Paul's evidence was pre-publish.**
+Verified by fetching a fresh PDF from the production backend and the live Render
+dashboard, not from preview:
+- A1: prod `operational.pdf?detail=summary` → 0 occurrences of "B1", 0 of "B2".
+  Same for public.pdf and the audit PDF (checked with pdfplumber text extract).
+- A2: prod team report → exactly 1 image per page, no "In partnership with"
+  caption when no org logo is set.
+- A3: prod index.html carries the bordered/hover/pointer export cards,
+  14.5px/12.5px text and "printable doc" ×2.
+- A4: prod index.html contains `openHistoryModal` ×3 and the "📜 Full history"
+  button — it lives on each person's row in the trapped/status list.
+Paul's stale file was timestamped 20260817T072324Z, before the publish landed.
+
+**PART B — app version 1.0.24 (build number assigned by the pipeline).**
+- B1 `app/index.tsx` no longer schedules reminders on the TEST trigger;
+  `app/alert.tsx` arms them in a `useEffect` gated on `shouldPlaySiren`, so only
+  a genuine critical alert (siren=1) does. `_layout.tsx` also arms them when a
+  `kind=critical_alert` push arrives while the app is running.
+  Kill switch: `POST /api/admin/reminders/cancel` (server.py) →
+  `apns.send_silent_cancel_reminders()` sends `{"aps":{"content-available":1},
+  "kind":"cancel_reminders"}` with `apns-push-type: background`, priority 5,
+  10-minute expiration. App handles it in a registered background task
+  (`CANCEL_REMINDERS_TASK` in `_layout.tsx`) + the foreground received listener.
+  Dashboard button "Stop reminder notifications" added to
+  memory/dashboard_build/index.html — NEEDS A PAT PUSH TO GO LIVE.
+  Answer-cancels-reminders: demonstrated with a Node harness stubbing
+  expo-notifications (8 pending at 60/150/…/690s → 0 pending + 2 lock-screen
+  ones dismissed, synchronously in `submitCheckIn` before GPS/network).
+- B2 `alert.tsx`: metrics strip moved OUT of the shrinkable `center` block;
+  `center` is `flex:1 + minHeight:0 + overflow:hidden`, strip and buttons are
+  `flexShrink:0`; `compact` (window height < 760) shrinks graphic/headline only.
+  Verified no overlap at 320x568 / 375x667 / 390x844 / 430x932. "Dismiss alert"
+  removed (#14) — only a "Back to home" after a confirmed trapped report.
+- B3 `quake/[unid].tsx` computes distance from the user's own position when
+  permission is ALREADY granted (never prompts here), else falls back to Malta
+  and says so; the explainer sentence is either fully present or fully absent.
+  ALSO FIXED THE REAL CAUSE: `_layout.tsx`'s tap handler short-circuited on
+  `action_url` and navigated to /quake/<unid> with NO params — every field
+  showed "—" when opened from a notification. It now forwards all payload
+  fields. Preview notification body already carries distance ("210km SE of
+  Malta").
+- B4 three options; "significant" retired and auto-migrated to "noticeable"
+  (same MMI III floor) on first open, so nobody lands on Off.
+- B5 "woken" → "alerted"; onboarding's "must wake your phone" reworded. Repo
+  searched — those were the only two; a pytest guard now fails on any new
+  waking claim in app/ or src/.
+- B6 post-update card carries Paul's why-it-matters copy + a permanent
+  "I don't use an Apple Watch" opt-out (`WATCH_NOT_APPLICABLE_KEY`). LIMITATION:
+  iOS exposes no Watch-pairing signal to JS, so the gate is self-declared.
+- B7 re-verified on current code: red skips mobility, green skips, yellow asks.
+  Never was a bug in 1.0.23 — Paul's repro was against the 3 Aug build.
+- B8 "places I care about": `user_places` collection, 4 endpoints under
+  /api/devices/{id}/places (cap 5, whole-feature switch), notices dispatched by
+  `emsc/preview.py::dispatch_place_notices` using the SAME intensity logic
+  (`mmi_from_faenza_michelini_2010` + `preset_would_fire`) plus a
+  poll_radius_km cap so "everything nearby" can't become a firehose. App screen
+  `app/settings/places.tsx` uses the OS geocoder (`Location.geocodeAsync`) — no
+  API key, no map. SAFETY: the critical path never reads `user_places`;
+  asserted structurally in tests. PRIVACY: saved places are location data about
+  third parties — flagged for the GDPR work (#75).
+- B9 `TREMOR_INFO` category with "See location on map" / "Close" on
+  informational notices only; `_build_critical_payload` asserted to carry NO
+  category. Tapping the body behaves like "See location on map"; "Close" does
+  nothing at all.
+- Housekeeping in app.json: `ITSAppUsesNonExemptEncryption: false` (stops the
+  export-compliance question on every build), explicit
+  `CFBundleDisplayName: "Quake Angel"`, and `UIBackgroundModes:
+  ["remote-notification"]` (required for the silent kill switch).
+
+**C1** designed in `/app/memory/recheckin-design.md` — nothing built. Flags one
+uncomfortable truth: the widening ladder is reliable for ~24h and best-effort
+after that, because iOS local-notification top-ups need the app to run and
+silent pushes are throttled.
+
+**Docs:** `/app/memory/app-build-history.md` answers Paul's outstanding request
+for app changes since 3 Aug with the build each landed in.
+
+**Tests:** `tests/test_batch5.py` (20) + testing agent's independent
+`test_batch5_independent_iteration_32.py` (33) — all green. Pre-existing legacy
+failures unchanged (test_critical_alerts, test_admin_gate: predate the #9 JWT
+cutover and assert version 1.0.8).
+
+**Batch 5 follow-ups (same day):**
+- B6 refined per Paul: the opt-out now means "I don't OWN an Apple Watch", never
+  "stop telling me". `dismissWatchForever` (app/index.tsx) shows a confirm
+  dialog whose default action is "I own one — keep reminding me"; only "I don't
+  own one" sets `WATCH_NOT_APPLICABLE_KEY`. Watch owners keep getting the notice
+  after every version change, which is the point — iOS resets the toggle every
+  update.
+- **#146 old test entries in the trapped list — FIXED.** Root cause: the
+  existing `/admin/purge-test-devices` only ever touched `push_devices`, so the
+  trapped list (which reads `device_status`) was untouched by it. Now:
+  `_is_test_device()` in server.py returns a server-computed `is_test` on every
+  /api/devices row (+ `test_count`). Detection is two-pronged: recognised
+  harness markers (test/e2e/loadtest/diag/snippet/playwright/demo/-mob-) AND an
+  explicit `synthetic` flag — needed because our own test check-ins come from a
+  real phone. Ids matching the app's own format `qg-<epoch>-<rand>` are
+  ALWAYS treated as real unless explicitly flagged, so a random suffix can never
+  hide a genuine casualty. New endpoints: POST
+  /api/admin/devices/{id}/mark-test (operator, reversible, audited both ways),
+  GET /api/admin/test-entries (preview across all 3 collections), POST
+  /api/admin/purge-test-entries (ADMIN ONLY, audited with the full id list —
+  operators may hide, only admins may destroy). Dashboard hides test rows from
+  the list, the map and the count pills by default with a "Show test entries
+  (N)" toggle + per-row "🧪 Mark as test" / "↩︎ Not a test". Verified end-to-end
+  in a browser with a stubbed API: pill went 2→1 when hidden, TEST tag and both
+  buttons render, POST fires with the right body, banner confirms.
+- Dashboard pushed to GitHub twice (kill switch, then #146); clone wiped each
+  time. BOTH features need the batch-5 backend published to work.

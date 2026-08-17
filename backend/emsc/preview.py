@@ -480,3 +480,194 @@ async def dispatch_preview_if_needed(
         "title": title,
         "body": body,
     }
+
+
+# ── B8: "places I care about" — informational notices for saved places ──
+#
+# Approved 2026-08-17 (task #158) in place of a user-set radius slider.
+# Each saved place is evaluated with the SAME intensity logic as the
+# user's own location — never a raw radius. See the block comment above
+# the /api/devices/{id}/places endpoints in server.py for the full
+# rationale, and note the hard safety constraint:
+#
+#   NOTHING HERE CAN AFFECT THE CRITICAL ALERT FOR THE USER'S OWN
+#   LOCATION. This module is only ever called from the informational
+#   preview path. The critical path (send_critical_alerts via
+#   /api/trigger-alert, and the evaluator's critical branch) never reads
+#   `user_places`. That's a structural guarantee, not a flag.
+#
+# Distance cap: an event must be within the country's poll_radius_km of
+# the PLACE as well, so the "everything nearby" preset (MMI floor 0)
+# can't turn a saved place into a worldwide firehose.
+async def dispatch_place_notices(
+    *,
+    db,
+    apns_send_preview,
+    emsc_event: dict,
+    country_config: dict,
+) -> Optional[dict]:
+    """Send one informational notice per (device, saved place) that clears
+    the device's own preset threshold at that place's coordinates.
+
+    Returns None when nothing was sent, else a summary dict.
+    """
+    from notification_presets import preset_would_fire, DEFAULT_PRESET as _DEFAULT_PRESET
+    from .evaluator import haversine_km
+    from .intensity import mmi_from_faenza_michelini_2010
+
+    preview_cfg = (country_config or {}).get("preview_mode") or {}
+    if not preview_cfg.get("enabled"):
+        return None
+    device_ids = list(preview_cfg.get("device_ids") or [])
+    if not device_ids:
+        return None
+
+    e_lat = emsc_event.get("latitude")
+    e_lon = emsc_event.get("longitude")
+    magnitude = emsc_event.get("magnitude")
+    if e_lat is None or e_lon is None or magnitude is None:
+        return None
+
+    places = await db.user_places.find(
+        {"device_id": {"$in": device_ids}}, {"_id": 0},
+    ).to_list(200)
+    if not places:
+        return None
+
+    push_devices = await db.push_devices.find(
+        {
+            "user_id": {"$in": device_ids},
+            "platform": {"$in": ["ios", "iOS"]},
+            "device_token": {"$exists": True, "$ne": None},
+        },
+        {"_id": 0, "user_id": 1, "device_token": 1, "notification_preset": 1,
+         "places_enabled": 1},
+    ).to_list(50)
+    by_id = {d.get("user_id"): d for d in push_devices}
+
+    radius_cap_km = country_config.get("poll_radius_km") or 600.0
+    rate_limit_minutes = int(preview_cfg.get("rate_limit_minutes") or 10)
+    now = datetime.now(timezone.utc)
+    attempted = 0
+
+    for place in places:
+        dev = by_id.get(place.get("device_id"))
+        if not dev:
+            continue
+        # Whole-feature switch — silences every place without deleting any.
+        if dev.get("places_enabled") is False:
+            continue
+
+        p_lat = place.get("latitude")
+        p_lon = place.get("longitude")
+        if p_lat is None or p_lon is None:
+            continue
+        distance_km = haversine_km(e_lat, e_lon, p_lat, p_lon)
+        if distance_km > radius_cap_km:
+            continue
+
+        mmi_at_place = mmi_from_faenza_michelini_2010(
+            magnitude=magnitude,
+            distance_km=distance_km,
+            depth_km=emsc_event.get("depth_km"),
+        )
+        user_preset = dev.get("notification_preset") or _DEFAULT_PRESET
+        fires, skip_reason = preset_would_fire(user_preset, mmi_at_place)
+        if not fires:
+            continue
+
+        # Rate limit per (device, place) so a swarm near one place can't
+        # flood, while a genuinely different place can still get through.
+        cutoff = now - timedelta(minutes=rate_limit_minutes)
+        recent = await db.emsc_preview_notifications.find_one(
+            {
+                "device_id": place["device_id"],
+                "place_id": place.get("place_id"),
+                "sent_at": {"$gte": cutoff},
+                "delivered": True,
+            },
+            {"_id": 1},
+        )
+        if recent:
+            await db.emsc_preview_notifications.insert_one({
+                "sent_at": now,
+                "device_id": place["device_id"],
+                "place_id": place.get("place_id"),
+                "place_name": place.get("name"),
+                "delivered": False,
+                "skipped_reason": "rate_limited",
+                "country_code": country_config.get("country_code"),
+            })
+            continue
+
+        # Copy must name the place unambiguously — the user has to know at
+        # a glance this is about Sicily and NOT about them.
+        name = place.get("name") or "your saved place"
+        bearing = bearing_deg(p_lat, p_lon, e_lat, e_lon)
+        title = f"PREVIEW · Seismic activity near {name}"
+        body = (
+            f"{name}: M{magnitude:g} tremor — {int(round(distance_km))}km "
+            f"{compass_16(bearing)} of {name}"
+            + (f", depth {int(round(emsc_event.get('depth_km')))}km"
+               if emsc_event.get("depth_km") is not None else "")
+            + ". This is one of your saved places, not your own location."
+        )
+
+        idem = f"place-notice-{uuid.uuid4()}"
+        unid = emsc_event.get("external_id")
+        observed_at = emsc_event.get("observed_at")
+        observed_at_iso = (
+            observed_at.isoformat() if hasattr(observed_at, "isoformat")
+            else str(observed_at) if observed_at else None
+        )
+        try:
+            result = await apns_send_preview(
+                db=db,
+                devices=[dev],
+                title=title,
+                body=body,
+                action_url=f"/quake/{unid}" if unid else "/",
+                idempotency_key=idem,
+                magnitude=magnitude,
+                distance_km=round(distance_km, 1),
+                depth_km=emsc_event.get("depth_km"),
+                latitude=e_lat,
+                longitude=e_lon,
+                region=emsc_event.get("region"),
+                unid=unid,
+                provider=emsc_event.get("provider"),
+                observed_at=observed_at_iso,
+            )
+        except Exception as e:
+            log.warning("Place-notice APNs send raised: %s", e)
+            result = {"events": [{"user_id": dev.get("user_id"),
+                                  "delivered": False, "error": str(e)}]}
+
+        attempted += 1
+        for evt in (result.get("events") or []):
+            await db.emsc_preview_notifications.insert_one({
+                "sent_at": now,
+                "device_id": evt.get("user_id"),
+                "place_id": place.get("place_id"),
+                "place_name": name,
+                "delivered": bool(evt.get("delivered")),
+                "apns_id": evt.get("apns_id"),
+                "reason": evt.get("reason"),
+                "error": evt.get("error"),
+                "status_code": evt.get("status_code"),
+                "kind": "place_notice",
+                "mmi_at_place": round(mmi_at_place, 2),
+                "distance_km": round(distance_km, 1),
+                "user_preset": user_preset,
+                "emsc_event_ref": {"provider": emsc_event.get("provider"),
+                                   "external_id": emsc_event.get("external_id"),
+                                   "revision": emsc_event.get("revision")},
+                "country_code": country_config.get("country_code"),
+                "title": title,
+                "body": body,
+                "idempotency_key": idem,
+            })
+
+    if attempted == 0:
+        return None
+    return {"attempted": attempted}
