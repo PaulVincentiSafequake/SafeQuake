@@ -276,6 +276,19 @@ export default function RootLayout() {
         return;
       }
       if (kind === "critical_alert") {
+        // #169 follow-up — CLOSE THE FOREGROUND GAP.
+        //
+        // If a real alert lands while the app is already open, iOS plays the
+        // push sound once (siren.caf) and shows a banner, but nothing else
+        // happened: the user was left on whatever screen they were on, with
+        // no looping siren and no check-in screen, unless they happened to
+        // tap the banner. Route straight to the alert screen with siren=1 —
+        // the same destination and the same playback path as a tap.
+        //
+        // This is the one place an automatic navigation is justified: the
+        // event is a genuine critical alert for the user's own location, and
+        // the check-in screen is the only correct destination.
+        handleTap({ ...data, kind: "critical_alert" });
         (async () => {
           const ok = await ensureNotificationSetup();
           if (!ok) return;

@@ -3815,6 +3815,20 @@ async def trigger_alert(
                     "title": title,
                     "message": message,
                     "action_url": "/alert",
+                    # #169 follow-up — THIS FIELD WAS MISSING, and its absence
+                    # was silently downgrading every Android earthquake alert.
+                    # The app's tap handler routes by `kind` and treats a
+                    # missing kind as INFORMATIONAL (a deliberate fail-safe
+                    # against BUG-2026-08-06-preview-tap-siren). With no kind,
+                    # an Android user tapping a REAL alert landed on the
+                    # informational event screen instead of the check-in
+                    # screen, and the in-app siren never armed.
+                    "kind": "critical_alert",
+                    # Forwarded so the alert screen renders the real event
+                    # instead of dashes, exactly as on iOS.
+                    "magnitude": body.magnitude,
+                    "distance_km": body.distance_km,
+                    "intensity": body.intensity,
                 },
                 idempotency_key=idem,
             )

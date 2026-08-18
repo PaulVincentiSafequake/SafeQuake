@@ -425,3 +425,35 @@ class TestIssue169SirenPlaysOnTest:
         assert p["aps"]["sound"]["name"] == "siren.caf"
         assert p["aps"]["sound"]["volume"] == 1.0
         assert os.path.exists("/app/frontend/assets/audio/siren.caf")
+
+
+class TestIssue169FollowUps:
+    """Two further defects found while tracing #169 end to end, both in the
+    real-alert path rather than the test button."""
+
+    def test_android_real_alert_carries_kind_critical_alert(self):
+        """Android alerts had NO `kind`, and the app's fail-safe treats a
+        missing kind as informational — so tapping a real earthquake alert
+        opened the informational event screen, not the check-in screen, and
+        never armed the siren."""
+        src = open("/app/backend/server.py").read()
+        block = src.split("# ---- Android: SuprSend relay")[1].split("ios_delivered")[0]
+        assert '"kind": "critical_alert"' in block
+        assert '"action_url": "/alert"' in block
+        assert '"magnitude": body.magnitude' in block
+
+    def test_foreground_critical_alert_routes_to_alert_screen(self):
+        """If a real alert arrives with the app already open, the user must
+        land on the check-in screen with the siren running — not be left on
+        whatever screen they were on with a banner they might not tap."""
+        layout = open("/app/frontend/app/_layout.tsx").read()
+        recv = layout.split("addNotificationReceivedListener")[1].split("getLastNotificationResponseAsync")[0]
+        assert 'handleTap({ ...data, kind: "critical_alert" });' in recv
+
+    def test_foreground_notifications_are_audible(self):
+        """iOS suppresses the push sound in the foreground unless the handler
+        asks for it. shouldPlaySound MUST stay true or a foreground alert is
+        silent again."""
+        layout = open("/app/frontend/app/_layout.tsx").read()
+        handler = layout.split("setNotificationHandler")[1].split("}")[0]
+        assert "shouldPlaySound: true" in handler

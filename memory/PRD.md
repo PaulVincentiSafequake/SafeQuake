@@ -965,3 +965,31 @@ still names the bundled `siren.caf` (the locked-phone siren is the PUSH sound �
 if the user never opens the app, that file is the only siren they get).
 
 **App version 1.0.25.** C1 design work paused as instructed.
+
+**#169 — answer to "would a REAL alert have sounded?" + two further defects
+found while tracing it (app 1.0.25, backend change):**
+
+iOS real alerts WOULD have sounded in every app state 6–17 Aug. The siren is
+the push sound itself (`siren.caf`, `critical: 1`, `volume: 1.0`) and the
+foreground handler sets `shouldPlaySound: true`, so only the in-app TEST button
+(which sends no push at all — it is purely local) was silent. The looping in-app
+siren also worked on a real alert, because the tap handler sets `siren=1`.
+
+TWO REAL DEFECTS FOUND ANYWAY, both fixed now:
+1. **Android real alerts were silently downgraded.** The SuprSend payload in
+   /api/trigger-alert carried NO `kind` field. The app's tap handler routes by
+   `kind` and treats a missing kind as INFORMATIONAL (deliberate fail-safe from
+   BUG-2026-08-06-preview-tap-siren) — so an Android user tapping a REAL
+   earthquake alert landed on the informational event screen, never on the
+   check-in screen, and the in-app siren never armed. Fixed: payload now carries
+   `kind: "critical_alert"` + magnitude/distance/intensity. STILL OUTSTANDING:
+   the Android notification sound is the channel default, not the siren — a
+   custom channel sound needs the audio file in `res/raw` via a config plugin
+   (native work, needs a build).
+2. **Foreground gap on iOS.** A real alert arriving with the app already open
+   played the push sound once and showed a banner, but left the user wherever
+   they were — no looping siren, no check-in screen — unless they tapped it.
+   Fixed: the received-listener now routes straight to `/alert?siren=1` via the
+   same handleTap path as a tap.
+3 new tests pin all three (Android `kind`, foreground routing,
+`shouldPlaySound: true`). 35 tests in test_batch5.py.
