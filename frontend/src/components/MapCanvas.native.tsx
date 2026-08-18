@@ -21,6 +21,7 @@
 import { View, StyleSheet } from "react-native";
 import MapView, { Marker, Circle, PROVIDER_DEFAULT } from "react-native-maps";
 import type { MapCanvasProps, MapCanvasEvent } from "./MapCanvas.types";
+import { parseUtc } from "@/src/utils/time";
 
 // Initial camera framing: shows central-and-eastern Mediterranean
 // (where soak coverage is densest) centered on Malta.
@@ -46,7 +47,7 @@ function magnitudeSize(m: number | null): number {
 }
 
 function timeAgoShort(iso: string): string {
-  const then = new Date(iso).getTime();
+  const then = parseUtc(iso)?.getTime() ?? NaN;
   if (!Number.isFinite(then)) return "";
   const s = Math.max(0, Math.floor((Date.now() - then) / 1000));
   if (s < 60) return `${s}s ago`;
@@ -56,12 +57,25 @@ function timeAgoShort(iso: string): string {
 }
 
 export default function MapCanvas(props: MapCanvasProps) {
-  const { events, center, radiusMeters, radiusIsSolid, onEventPress } = props;
+  const {
+    events, center, radiusMeters, radiusIsSolid, onEventPress,
+    focus = null, highlightExternalId = null,
+  } = props;
+  // Opened from an event ("see this on the map"): start tight on that
+  // event instead of the whole basin, so it doesn't have to be hunted for.
+  const initialRegion = focus
+    ? {
+        latitude: focus.latitude,
+        longitude: focus.longitude,
+        latitudeDelta: 4.0,
+        longitudeDelta: 4.0,
+      }
+    : INITIAL_REGION;
   return (
     <MapView
       style={StyleSheet.absoluteFillObject}
       provider={PROVIDER_DEFAULT}
-      initialRegion={INITIAL_REGION}
+      initialRegion={initialRegion}
       showsCompass={false}
       showsUserLocation={false}
       rotateEnabled={false}
@@ -80,7 +94,9 @@ export default function MapCanvas(props: MapCanvasProps) {
       )}
 
       {events.map((ev: MapCanvasEvent) => {
-        const size = magnitudeSize(ev.magnitude);
+        const highlighted = highlightExternalId != null
+          && ev.external_id === highlightExternalId;
+        const size = magnitudeSize(ev.magnitude) * (highlighted ? 1.6 : 1);
         return (
           <Marker
             key={`${ev.provider}-${ev.external_id}`}
@@ -99,6 +115,7 @@ export default function MapCanvas(props: MapCanvasProps) {
                   borderRadius: size / 2,
                   backgroundColor: magnitudeColor(ev.magnitude),
                 },
+                highlighted && styles.markerHighlighted,
               ]}
             />
           </Marker>
@@ -109,6 +126,14 @@ export default function MapCanvas(props: MapCanvasProps) {
 }
 
 const styles = StyleSheet.create({
+  markerHighlighted: {
+    borderWidth: 3,
+    borderColor: "#FFFFFF",
+    shadowColor: "#000",
+    shadowOpacity: 0.5,
+    shadowRadius: 4,
+    shadowOffset: { width: 0, height: 1 },
+  },
   markerDot: {
     borderWidth: 1.5, borderColor: "#0B1220",
     shadowColor: "#000", shadowOpacity: 0.4, shadowRadius: 2, shadowOffset: {width:0, height:1},

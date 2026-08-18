@@ -32,6 +32,7 @@ import { View, Text, ScrollView, StyleSheet, TouchableOpacity, Linking } from "r
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import * as Location from "expo-location";
+import { parseUtc } from "@/src/utils/time";
 
 // Fallback reference point when we have no user location: the Malta/Gozo
 // archipelago centre (same coordinates as the MT country_config on the
@@ -76,11 +77,15 @@ export default function QuakeDetailScreen() {
     region?: string;
     observed_at?: string;
     preview?: string;
+    /** Where this screen was opened from — labels the back control (#173). */
+    from?: string;
   }>();
 
   const isPreview = params.preview === "true" || params.preview === "1";
-  const observedAt = params.observed_at ? new Date(params.observed_at) : null;
-  const observedAtValid = observedAt && !isNaN(observedAt.getTime());
+  // parseUtc, not new Date(): an offset-less backend timestamp would be read
+  // as local time and render two hours early on a Malta phone.
+  const observedAt = parseUtc(params.observed_at);
+  const observedAtValid = observedAt !== null;
 
   const timeAgo = (() => {
     if (!observedAtValid) return "—";
@@ -169,19 +174,61 @@ export default function QuakeDetailScreen() {
     ? `${Math.round(distance.km)} km from ${distance.from}`
     : null;
 
+  // Sets the expectation BEFORE the tap — "you'll return to the map", not
+  // "this closes" (Paul, 2026-08-18).
+  const backLabel =
+    params.from === "map" ? "Map" : router.canGoBack() ? "Back" : "Close";
+
+  const hasCoords =
+    lat != null && lon != null &&
+    Number.isFinite(Number(lat)) && Number.isFinite(Number(lon));
+
+  // B5 — see this event on the map. Pushes the map ON TOP of this screen, so
+  // backing out returns here rather than looping: notification → detail →
+  // map → (back) → detail → (back) → wherever the detail came from.
+  const openOnMap = () => {
+    router.push({
+      pathname: "/map" as any,
+      params: {
+        focus_lat: String(lat),
+        focus_lon: String(lon),
+        focus_unid: String(params.unid ?? ""),
+      },
+    });
+  };
+
   return (
     <SafeAreaView style={styles.container} edges={["top"]}>
       <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
         {/* Header */}
         <View style={styles.header}>
+          {/* #173 — RETURN TO WHERE YOU CAME FROM.
+              This was `router.replace("/")`, which tore down the stack and
+              dumped the user on Home. Browsing several events (the whole
+              point of the seismic feed, #107) meant re-entering the map,
+              re-picking the time window and re-panning after every single
+              pin. router.back() pops this screen off instead, so the map
+              underneath keeps its pan, zoom and time window untouched.
+              `replace("/")` survives only as the cold-start fallback, when
+              a notification tap means there is genuinely no stack to pop. */}
           <TouchableOpacity
             style={styles.closeBtn}
-            onPress={() => router.replace("/")}
+            onPress={() => {
+              if (router.canGoBack()) router.back();
+              else router.replace("/");
+            }}
             hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
             accessibilityRole="button"
-            accessibilityLabel="Close"
+            accessibilityLabel={backLabel}
           >
-            <Ionicons name="close" size={26} color={colors.text} />
+            <Ionicons
+              name={router.canGoBack() ? "chevron-back" : "close"}
+              size={26}
+              color={colors.text}
+            />
+            {router.canGoBack() && (
+              <Text style={styles.backLabel}>{backLabel}</Text>
+            )}
           </TouchableOpacity>
           {isPreview && (
             <View style={styles.previewBadge}>
@@ -231,6 +278,23 @@ export default function QuakeDetailScreen() {
             present or fully absent — it must never render as a gap
             ("...was approximately  from your location"), which is what
             happened when distance_km was missing (batch 5, B3). */}
+        {/* B5 — the map already existed and was good; the two simply
+            weren't connected. Only offered when we actually have
+            coordinates to centre on. */}
+        {hasCoords && (
+          <TouchableOpacity
+            style={styles.mapBtn}
+            onPress={openOnMap}
+            accessibilityRole="button"
+            accessibilityLabel="See this location on the map"
+            testID="see-on-map-btn"
+          >
+            <Ionicons name="map-outline" size={20} color={colors.text} />
+            <Text style={styles.mapBtnText}>See location on map</Text>
+            <Ionicons name="chevron-forward" size={18} color={colors.textDim} />
+          </TouchableOpacity>
+        )}
+
         <Text style={styles.section}>What this means</Text>
         <Text style={styles.explainer}>
           {distance
@@ -277,6 +341,20 @@ function Row({ label, value }: { label: string; value: string }) {
 }
 
 const styles = StyleSheet.create({
+  backLabel: { color: colors.text, fontSize: 15, fontWeight: "600", marginLeft: 2 },
+  mapBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    minHeight: 52,
+    paddingHorizontal: 14,
+    marginTop: 18,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.16)",
+    backgroundColor: "rgba(255,255,255,0.06)",
+  },
+  mapBtnText: { flex: 1, color: colors.text, fontSize: 15, fontWeight: "700" },
   container: { flex: 1, backgroundColor: colors.bg },
   scrollContent: { paddingHorizontal: 20, paddingBottom: 40 },
   header: {

@@ -264,6 +264,62 @@ def _build_critical_payload(
     return payload
 
 
+RECHECK_CATEGORY_ID = "RECHECK_V1"
+
+
+def _build_recheck_payload(
+    title: str,
+    body: str,
+    check_id: str,
+    device_id: str,
+    ladder_step: Optional[int] = None,
+    battery_saving: bool = False,
+) -> dict:
+    """APNs payload for a periodic re-check of someone who reported trapped.
+
+    Critical interruption level with a SHORT sound (recheck.wav, ~1 s), not
+    the 30-second siren. Critical is what gets through Do Not Disturb, Focus,
+    the ringer switch and a locked, face-down phone — which is precisely the
+    situation of someone under rubble — without turning every check into an
+    emergency.
+
+    Entitlement justification (agreed with Paul 2026-08-17, quote verbatim in
+    any App Review response): this is sent ONLY to a person who has themselves
+    reported being trapped after an earthquake, and only while that report
+    stands unresolved. The user opts in by tapping I'M TRAPPED; nobody else
+    can put a device into this state. There is no code path that sends it to a
+    device without a standing self-reported trapped status — see
+    recheckin.py:send_due_rechecks, which refuses any device whose current
+    status is not `trapped`, and the test that locks that refusal in.
+
+    `category` carries the lock-screen answer buttons. SAME / WORSE / MUCH
+    WORSE run WITHOUT opening the app (`opensAppToForeground: false` on the
+    mobile side), so a badly injured person never has to get past Face ID or a
+    passcode to answer. BETTER is in-app only: it is the rarest and least
+    time-critical answer, and it must not be the easiest button to hit by
+    accident.
+    """
+    payload: dict = {
+        "aps": {
+            "alert": {"title": title, "body": body},
+            "sound": {"critical": 1, "name": "recheck.wav", "volume": 0.8},
+            "interruption-level": "critical",
+            "relevance-score": 1,
+            "category": RECHECK_CATEGORY_ID,
+        },
+        # kind is REQUIRED — the mobile handler routes by this field, and a
+        # missing/unknown kind is treated as informational (never a siren).
+        "kind": "recheck",
+        "action_url": "/recheck",
+        "check_id": check_id,
+        "device_id": device_id,
+        "battery_saving": battery_saving,
+    }
+    if ladder_step is not None:
+        payload["ladder_step"] = ladder_step
+    return payload
+
+
 def _build_preview_payload(
     title: str,
     body: str,
@@ -591,6 +647,85 @@ async def send_preview_alerts(
     return {
         "payload": payload,
         "events": [r.as_dict() for r in results],
+    }
+
+
+# ---------- Periodic re-check send (C1) ----------
+async def send_recheck_prompts(
+    db: AsyncIOMotorDatabase,
+    devices: list[dict],          # each: {user_id, device_token, check_id}
+    title: str,
+    body: str,
+    idempotency_key: str,
+    ladder_step: Optional[int] = None,
+    battery_saving: bool = False,
+) -> dict:
+    """Send a re-check prompt to each trapped person's device.
+
+    One payload per device (unlike the broadcast senders) because the
+    `check_id` is per-device: an answer must be attributable to the exact
+    check it responds to, or "we asked and heard nothing" cannot be recorded
+    honestly.
+
+    Eligibility is NOT decided here — recheckin.py owns that, including the
+    hard refusal to prompt any device whose current status is not `trapped`.
+    """
+    if not devices:
+        return {"payload": None, "events": []}
+
+    cfg = await load_apns_config(db)
+    if cfg is None:
+        return {
+            "payload": None,
+            "events": [
+                {
+                    "user_id": d.get("user_id") or "",
+                    "token_fingerprint": _fingerprint(d.get("device_token") or ""),
+                    "environment": "n/a",
+                    "status_code": None,
+                    "apns_id": None,
+                    "apns_unique_id": None,
+                    "reason": "APNS_NOT_CONFIGURED",
+                    "delivered": False,
+                    "duration_ms": 0,
+                    "error": "APNs auth key not uploaded.",
+                    "check_id": d.get("check_id"),
+                }
+                for d in devices
+            ],
+        }
+
+    sem = asyncio.Semaphore(CONCURRENCY)
+    last_payload: Optional[dict] = None
+
+    async def _guarded(d: dict) -> tuple[dict, ApnsResult]:
+        nonlocal last_payload
+        payload = _build_recheck_payload(
+            title=title,
+            body=body,
+            check_id=str(d.get("check_id") or ""),
+            device_id=str(d.get("user_id") or ""),
+            ladder_step=ladder_step,
+            battery_saving=battery_saving,
+        )
+        last_payload = payload
+        async with sem:
+            res = await _send_one(
+                cfg,
+                user_id=d.get("user_id") or "",
+                device_token=d.get("device_token") or "",
+                payload=payload,
+                idempotency_key=f"{idempotency_key}-{d.get('user_id')}",
+                apns_priority="10",   # a trapped person's check is immediate
+            )
+        return d, res
+
+    pairs = await asyncio.gather(*(_guarded(d) for d in devices))
+    return {
+        "payload": last_payload,
+        "events": [
+            {**res.as_dict(), "check_id": d.get("check_id")} for d, res in pairs
+        ],
     }
 
 

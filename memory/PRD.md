@@ -1014,3 +1014,314 @@ sheet survives, notice appears, no second route stacked, mobility question still
 reachable, answer completes, no "re-armed" log. 5 new tests (40 total in
 test_batch5.py) incl. one that fails if the aftershock subscriber ever touches
 setStatus/setTriageOpen/setChosenSeverity/submitCheckIn.
+
+---
+
+## 2026-08-18 (batch 6) — A0 + A1 fixes, event-detail navigation, C3 identity
+
+**A0 — blank screen on tremor tap: ALREADY FIXED in 1.0.25.** Cause was
+`_layout.tsx` handleTap short-circuiting on `action_url` and navigating to
+/quake/<unid> with NO params; it now forwards every payload field. Paul was on
+1.0.24/125 which predates it.
+**A0 measured timing (real preview data, 400 events):** quake time → our ingest
+median **10.5 min**, p10 5.0, p90 42.7, max 59.4. That is EMSC publication lag
+plus our 60 s poll; our own send adds seconds. Paul's ~2h53m gap is NOT pipeline
+latency — it is the radius/tier widening at ~11:00 making already-ingested
+events newly eligible, and the backlog going out. Which exposed a real defect:
+**no freshness gate existed.** Added `max_event_age_minutes` (default 90) to
+both `dispatch_preview_if_needed` and `dispatch_place_notices`; older events log
+`event_too_old` and send nothing.
+**A0 revisions (confirmed, real data):** 33 of the last 400 ingested events were
+revisions of an event already stored; e.g. 20260805_0000212 revisions [0,1] with
+magnitudes [3.7, 4.4]. Every revision dispatched a fresh notice, so Paul's
+M3.3/M3.7 pair was ONE quake. Now: magnitude moved < 0.3 → suppressed
+(`revision_no_material_change`); >= 0.3 → sent as "PREVIEW · Updated seismic
+reading" / "Updated: now measured at M3.7 (first reported M3.3). Same
+earthquake, not a new one." Delivered rows now record magnitude so the
+comparison has a baseline.
+
+**A1 — chart counted events, table counted people (#124 family).**
+`_bucket_timeline` in server.py now counts each device ONCE per bucket at its
+MOST SEVERE status (trapped > rescued > safe), so chart, table and narrative all
+measure people. Y-axis labelled "People" in `_timeline_chart`. Verified on all
+three PDFs with a seeded device that toggles 5 times — chart peak 1, not 3.
+6 tests incl. the structural invariant (bucket total can never exceed distinct
+device count) — that is the check Paul asked for after #124, expressed as an
+assertion rather than a review step.
+
+**B2/#173 — event detail returned to Home.** `quake/[unid].tsx` used
+`router.replace("/")`, tearing down the stack. Now `router.back()` when a stack
+exists (map keeps its pan/zoom/time window), `replace("/")` only as the
+cold-start fallback. Back control is a chevron labelled with its origin
+("Map"), an X only on cold start. `map.tsx` tags its pushes with `from: "map"`.
+
+**B5 — "See location on map"** on the detail screen → pushes /map with
+`focus_lat/focus_lon/focus_unid`; MapCanvas gained `focus` (initial region) and
+`highlightExternalId` (larger dot + white ring). Pushed, not replaced, so
+notification → detail → map → detail always unwinds.
+
+**C3 — identity everywhere.** Verified: team PDF per-device table shows the name;
+public PDF has NO names (aggregate only); audit CSV has display_name +
+short_code columns; history modal renders name + code; dashboard search already
+matched names. FIXED: map pin labels and popups showed only the code — both now
+carry the name (pin labels truncate at 12 chars). Pushed as 7809dc8.
+
+**C2 — answered with evidence.** `status_events` is append-only and
+/admin/device-history returns EVERY row: a repeated identical status is its own
+entry flagged `reconfirmation: true` (demonstrated: 3 identical trapped/red
+events → false, true, true), each with per-event battery and lat/lon, plus
+`last_known` carrying `silent_seconds` and `is_stale`. So "reconfirmed hourly
+for three days" and "silent for three days" are already distinguishable.
+
+**App version 1.0.26.** Diagnostics marker updated to "#169 siren, aftershock
+guard, map nav (#173)". Testing agent verified 16/16 backend + all frontend
+flows (report iteration_33.json); its one non-blocking finding (places path
+missing the freshness gate) is fixed above.
+
+---
+
+## 2026-06-18 — GDPR map-link fix, UTC timestamps, server.py split, C1 phase 1
+
+### 🔴 GDPR: coordinates no longer leave to a third party
+Audit rows, the per-person history and the server-rendered audit page all built
+`https://www.google.com/maps/place/<lat>,<lon>` links. Every operator click
+disclosed a casualty's exact position to Google inside a URL. Replaced with an
+internal recentre of our own Leaflet map (`window.qgShowOnMap`, delegated
+`[data-qg-map-lat]` handler); the backend HTML page now prints coordinates as
+text rounded to 5 dp. Exports and PDFs swept — clean. Regression guard:
+`backend/tests/test_no_external_map_links.py`. **If an external routing link is
+ever added it must be a separate, explicitly-labelled action AND written to the
+audit trail, because it is a disclosure (Paul, 2026-06-18).**
+
+### 🔴 Two-hour timestamp error (found while measuring A0 delivery latency)
+Motor returns naive datetimes; a naive `isoformat()` has no offset and
+JavaScript parses an offset-less date-time as LOCAL time. An 08:07 UTC quake
+rendered as "08:07" on a Malta (UTC+2) phone — two hours early, on the exact
+timestamp a user compares a notification's arrival against. It made an 11-minute
+delivery look like a three-hour one. Fixed at source (`deps.iso_utc`,
+`emsc/preview.iso_utc`, seismic-map serializer) and defensively on the phone
+(`src/utils/time.ts parseUtc`).
+
+Measured latency for the record (production, the two events Paul tapped):
+origin 08:07:10.75Z → ingest 08:18:03.62Z → send 08:18:03.628Z (10 min 53 s,
+of which our send path is 8 ms); second event 30 min 33 s, send path 8 ms. The
+lag is upstream EMSC publication, not ours. Poll cadence ≤60 s.
+
+`emsc_preview_notifications` now records `distance_km` + `observed_at` on
+DELIVERED rows too — previously only skipped rows carried distance, so any
+"closest event we've seen" query could only ever return the closest event we
+did NOT notify about (that is where the bogus 4,829 km figure came from).
+
+### 🔵 server.py split (behaviour-preserving)
+6,057 lines → 2,307, with the route surface asserted byte-identical (71 routes,
+same methods) before and after:
+- `deps.py` — env, single Mongo client, admin secret, CORS allowlist,
+  `short_code`, `iso_utc`, `is_test_device`, and the background workers
+  (EMSC poller, testimonies sweeper, re-check sweeper). Imports nothing from
+  server.py, so route modules can import it without a cycle.
+- `push_relay.py` — Emergent/SuprSend relay client + `send_push`.
+- `reports_export.py` — audit CSV/PDF, B1/B2 casualty reports, PDF chrome,
+  chart, plain-language narrative.
+- `routes_auth_users.py` — Google sign-in + user management.
+- `routes_emsc_admin.py` — soak health/recent/config/continuity + preview mode.
+- `routes_diagnostics.py` — maintenance + operator HTML diagnostic pages.
+- `routes_recheck.py` — C1 answer endpoint, sweeper status, kill switch.
+Test files that read server.py source were repointed; four tests using
+`asyncio.get_event_loop()` were changed to `asyncio.run()` (they failed only in
+combination with other modules, which reads as a regression and wasn't one).
+
+### 🔴 C1 phase 1 — automatic re-check ladder (landed)
+Per `memory/recheckin-design.md`. `backend/recheckin.py`:
+- Ladder 15 / 30 / 60 / 180 min by time-since-trapped, tunable; ×2 below 20%
+  battery, ×3 below 10%, and the prompt SAYS so.
+- `RecheckSweeper` (60 s cadence, own asyncio task) sends due prompts.
+- **Invariant: never prompts a device whose CURRENT status is not `trapped`** —
+  this is what keeps the Critical Alerts entitlement justification true, and it
+  has a test.
+- Critical interruption level with a SHORT sound (`recheck.wav`, ~1 s, bundled
+  via the expo-notifications `sounds` array), never the 30-second siren. Own
+  category `RECHECK_V1`; the critical alert still carries no category at all.
+- Lock-screen actions WORSE / MUCH WORSE / SAME submit with
+  `opensAppToForeground: false` — no Face ID, no passcode. That is the PRIMARY
+  answer path (Paul, 2026-08-18); tapping the body opens `/recheck` (four
+  ~64 pt buttons) as the secondary path. BETTER is in-app only.
+- Escalation one-way: WORSE moves one band, MUCH WORSE reaches red from any
+  band, BETTER is recorded as "reports improving" and NEVER auto-downgrades.
+- Tap time authoritative: `answered_at` (device) is what every human surface
+  renders and sorts by; `received_at` kept alongside; >2 min gap flagged
+  "queued offline"; an implausible device clock is flagged, never corrected.
+- Non-responses written as `recheck_missed` rows — "we asked and heard nothing"
+  is a positive fact in the record.
+- Two kinds of silence on `/api/devices`: `silent_alive` (missing answers, phone
+  still reporting) vs `dark` (>45 min of nothing). Neither reduces priority; a
+  dark phone is not prompted, because asking a dead phone achieves nothing. An
+  operator restart brings it back.
+- Kill switch with a UI path: `POST /api/admin/recheck/enabled`,
+  `GET /api/admin/recheck/status`.
+- Dashboard: re-check rows in the history modal (answer, ↑ deteriorating,
+  offline-queue lag, device-clock warning), plus card badges for deteriorating,
+  silent_alive and dark.
+- 35 unit tests in `backend/tests/test_recheckin_c1.py`.
+
+Deferred to C1 phase 2: operator-initiated `POST /api/admin/recheck` with target
+selector + battery-cost confirm dialog, and the "help is on the way" line (needs
+real zone assignment, never a free-text morale message).
+
+### Spec written, not built
+`memory/swarm-grouping-design.md` — one updating notification per swarm, a
+much-larger event always stands alone, never applied to the critical alert.
+§6 answered by Paul 2026-06-18: use the EMSC region string verbatim when every
+member shares it, our own broader label only when they differ; first notice
+sounds, updates silent, a stand-alone larger event always sounds; stand-alone
+magnitude gap **0.5**, not 0.8 (magnitude is logarithmic — burying a
+significant quake costs more than a needless notification).
+
+---
+
+## 2026-06-18 (later) — A1 reopened, singular/plural fixed as a class, C1 proven
+
+### 🔴 A1 reopened: chart still contradicted the sentence beneath it
+The August fix de-duplicated within a bucket. That is not enough: someone still
+trapped an hour later reports again — and the C1 re-check ladder makes that
+routine — so one person produced a red bar of 1 in each of three consecutive
+hours. A reader adds the bars up and reads three trapped people while the
+sentence underneath says one. On the public report that misreading reaches the
+press and cannot be corrected afterwards.
+
+`_bucket_timeline` now counts each device **once per status for the whole
+window**, in the period it FIRST reported that status. Consequences:
+- Invariant, asserted as a test: `sum(red bars) == "N people told us they were
+  trapped"` (`test_red_bars_sum_equals_narrative_trapped_figure`).
+- Legend reads "First told us they were trapped / First marked found /
+  First checked in safe".
+- New caption under the chart on BOTH B1 and B2: "Each person is counted once,
+  in the period they first reported that status. Adding the red bars together
+  gives the number of people who told us they were trapped." Without it a
+  reader has no way to know whether adding the bars is meaningful.
+- A row with no `device_id` can no longer become a bar (the narrative counts
+  distinct device_ids, so an unattributable row would break the invariant).
+
+### 🔴 Singular/plural fixed as a class, not as a third instance
+Three of these have now reached a rendered PDF (#124, A1, egress). Every count
+of humans in a narrative sentence goes through `_n_people(n)`, and every
+"n of the t people still trapped" sentence through
+`_subject_of_still_trapped(n, t)` — which returns "The only person still
+trapped"/"has", "All 3 people still trapped"/"have", "1 of the 3 …"/"has". So
+agreement is written once, not once per feature. Fixed en route: "The 1 person
+still trapped", and the egress line saying "Some of them report only minor
+injuries" about a single person.
+`backend/tests/test_narrative_grammar.py` generates every narrative sentence
+over every count that changes the wording (0, 1, 2, many, n == t) and runs one
+shared bank of grammar rules over all of them — 95 cases, no DB, milliseconds.
+The bank is digit-guarded: the failing `test_singular_plural_grammar` was a
+false positive, because "31 people" contains "1 people".
+
+### 🔴 C1 verified end-to-end (was built but unproven)
+213 backend tests green: ladder timing, `much_worse` → red from any band,
+BETTER never downgrades, authoritative tap time (answer stamped 40 min in the
+past is recorded at tap time), dark phones not prompted, kill switch reflected
+in `GET /api/admin/recheck/status`, 400 on a bad answer / 404 on an unknown
+device. Frontend `/recheck` verified in the web preview: four buttons, deep
+link with `check_id`, confirmation screen, offline-queue notice. Lock-screen
+notification ACTIONS remain untestable outside a real build — unchanged.
+
+No mobile app change in this pass, so the version stays **1.0.27**.
+
+### App version
+1.0.27 (parseUtc timestamp fix, /recheck screen + lock-screen answers,
+recheck.wav bundled, Diagnostics "Reset Apple Watch reminder", diag fix marker).
+
+---
+
+## 2026-06-18 (later still) — batch 6: B3, B6, C1 phase 2
+
+Paul's order for the remaining batch 6 items: one app-side batch first
+(B1 + B3 + B4 + the triage reword) because every build costs him a publish, an
+App Store Connect step and a test cycle; then B6 (dashboard only, no build);
+then C1 phase 2; then swarm grouping. Android alert sound stays deferred with
+the Android launch work.
+
+### Already shipped, only unverified (Paul is on 1.0.25 / 126)
+B1 (metrics above the buttons, "Dismiss alert" gone), B4 ("alerted", not
+"woken" — zero matches left in the app) and the triage reword + egress question
+are all in 1.0.26/1.0.27. Re-verified this session at 390×844 and 320×568.
+
+### 🟠 B3 — the third tremor option states what it costs, in its title
+Was: title "Everything nearby", subtitle "Including tremors too small to feel".
+Now the clause is IN the title — "Everything nearby — including tremors too
+small to feel" — because the title is the only line a scanning reader reads,
+and the option that generates the most notifications must not look like the
+quiet one. Three options and the always-on green panel are unchanged.
+
+### 🟠 B6 — the activity feed is grouped by person, in plain sentences
+It was a raw event log: one row per update, so a person who re-reported four
+times filled the panel four times and the operator reconstructed "who is where
+and how are they now" by reading backwards. It also printed wire values
+(`not_responding`) at the operator.
+- Default view is **By person**: one row per person, most urgent first, with
+  their current state, a plain sentence for the latest thing that happened,
+  the update count in the window, battery, a map recentre link and 📜 Full
+  history (the SAME modal as the triage cards — `window.qgOpenHistory`).
+- **Every update** (the old log) is one click away and the choice is
+  remembered in localStorage; an operator reconstructing a sequence needs it.
+- Colour is never the only channel: each state carries a **shape** (circle =
+  needs help now, triangle = needs help, square = minor, tick = found, dot =
+  safe, diamond = not responding) and a **word**, matching qgSeverityChip and
+  the map markers, so it survives greyscale printing and colour-blindness.
+- Wire values are gone from both views: "Recorded as not responding.",
+  "Told us they need help — minor injuries. They cannot get out on their own.",
+  "Answered a re-check: much worse — urgent." Severity badges read
+  IMMEDIATE / SERIOUS / MINOR even in the pre-qgSeverityChip fallback.
+- Row timestamps read "14 minutes ago · 13:05 UTC" — elapsed for staleness,
+  absolute for the radio and the record.
+- **Backend:** `/api/audit` now labels C1 rows `recheck_sent` /
+  `recheck_answered` / `recheck_missed` with `answer`, `answered_at`,
+  `deteriorating` and `queued_offline`. They previously arrived labelled
+  "status", so an automatic re-check answer was indistinguishable from a
+  person opening the app and reporting themselves.
+- 10 tests: `backend/tests/test_b6_activity_feed.py`.
+
+### 🔴 C1 phase 2 — the operator can ask now, and sees what it costs first
+`POST /api/admin/recheck` (operator or admin):
+- `confirm: false` (the default) is a **preview that sends nothing** — it
+  returns who would be woken, their battery, and the cost in plain words.
+  Pressing "ask now" wakes injured people's phones, so the cost goes in front
+  of the operator before it happens, not after.
+- `confirm: true` sends, via the SAME `_dispatch_rechecks` path as the
+  automatic sweep — same invariants, same ledger rows, same rescheduling — so
+  a manual ask can never drift from an automatic one. Ledger rows carry
+  `initiated_by` + `manual: true`, and a `recheck_audit` row records who asked,
+  why, and whom.
+- Optional `device_ids` and `severity` targeting (e.g. red only).
+- Two refusals with no override, because the Critical Alerts entitlement rests
+  on them: not currently `trapped` → never asked; phone dark → never asked
+  (it cannot answer). Both come back in `skipped` with a plain reason. A
+  broadcast preview does NOT list every safe phone in the database — a 400-row
+  skip list buries the two entries that matter.
+- The cost text states facts, never an invented percentage: "This will wake 4
+  phones belonging to people who told us they need help. 1 of them is on less
+  than 10% battery. … Their next automatic check is rescheduled from now, so
+  asking does not add an extra one on top."
+- Dashboard panel above the activity feed (live operations, not the admin test
+  drawer): ladder state in plain words, the two-step ask, and pause/resume with
+  an explicit "Only an admin can pause or resume automatic checks."
+- 11 tests: `backend/tests/test_c1_phase2_manual_recheck.py`.
+
+### Deploy order for this landing
+Publish the backend FIRST (the feed depends on the new `/api/audit` kinds and
+the panel on `POST /api/admin/recheck`), then push the dashboard to GitHub.
+App version stays **1.0.27** — the B3 wording lands in it; no build exists yet.
+
+### D1 — ANSWERED by Paul, 2026-06-18: name the region in tremor notices
+"(a) — name the region in tremor notices, e.g. '3 tremors near Sicily,' instead
+of only showing a distance." So D1 is a WORDING requirement on the informational
+tremor notice, not a new subscription model and not a dashboard concept —
+"Places I care about" (named place + coordinates + trigger tier, `user_places`)
+already covers the subscription side and is unchanged.
+
+D1 therefore folds into swarm grouping, which already has the region rule
+Paul set: use the **EMSC region string verbatim** when every member of a group
+shares it, and fall back to our own broader label ONLY when they differ. Single
+(ungrouped) notices should carry the EMSC region verbatim too — EMSC is
+authoritative and we must not introduce errors into it. Build the two together;
+the distance stays, the region is added, not substituted.

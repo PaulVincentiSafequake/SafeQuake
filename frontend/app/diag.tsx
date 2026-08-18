@@ -24,6 +24,7 @@ import {
   type DiagInfo,
 } from "@/src/utils/push";
 import { AppleWatchNote } from "@/src/components/AppleWatchNote";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 
 // Local siren assets — used only to verify that the audio files are correctly
 // bundled inside the native IPA/APK. `siren.caf` is the file APNs references
@@ -146,6 +147,19 @@ export default function DiagScreen() {
     };
   }, [stopBothSirens]);
 
+  // QA affordance (Paul, 2026-08-18): the post-update Apple Watch notice
+  // only reappears after a version change or 14 days, so re-testing it
+  // previously meant reinstalling the app. This clears the three keys that
+  // hold its state, so the notice reappears on the next Home visit.
+  const onResetWatchReminder = useCallback(async () => {
+    await AsyncStorage.multiRemove([
+      "quakeguard_watch_confirmed_at",
+      "quakeguard_watch_confirmed_version",
+      "quakeangel_no_apple_watch",
+    ]);
+    setMsg("Apple Watch reminder reset — go Back to Home to see it.");
+  }, []);
+
   const onReRegister = useCallback(async () => {
     setBusy("registering");
     setMsg(null);
@@ -230,7 +244,7 @@ export default function DiagScreen() {
               bundle that contains the fix, so its presence can't be wrong
               and its ABSENCE is itself the answer. Version lookups can
               disagree with the binary; a code marker can't. */}
-          <Row label="fixes in this build" value="#169 siren + aftershock guard" />
+          <Row label="fixes in this build" value="1.0.28 — aftershock rehearsal, B3 tremor wording, A1 people-based chart" />
         </Section>
 
         <Section title="Siren">
@@ -244,6 +258,33 @@ export default function DiagScreen() {
             backend publish can change that.
           </Text>
         </Section>
+
+        <Section title="Aftershock rehearsal">
+          <Text style={styles.help}>
+            Shows what happens when a second earthquake alert arrives while you
+            are part-way through answering the first. Tap the button below, then
+            start answering — choose I NEED HELP and pick an injury level, but
+            do not send it. After 12 seconds a second alert arrives.
+            {"\n\n"}
+            What you should see: the screen does NOT restart. An amber notice
+            appears at the top saying another alert arrived, and your
+            part-finished answer is exactly where you left it. If you had
+            already sent a report, the notice says so and offers an Update
+            button instead — it never resets you on its own.
+            {"\n\n"}
+            This uses the same internal path a real second alert uses. The one
+            thing it cannot test is Apple&apos;s delivery of the second
+            notification.
+          </Text>
+        </Section>
+
+        <TouchableOpacity
+          style={styles.btnGhost}
+          onPress={() => router.push("/alert?siren=1&test=1&rehearse=aftershock" as any)}
+          testID="diag-aftershock-rehearsal"
+        >
+          <Text style={styles.btnGhostText}>Rehearse an aftershock mid-answer</Text>
+        </TouchableOpacity>
 
         <Section title="Push token">
           <Row
@@ -350,6 +391,13 @@ export default function DiagScreen() {
           <Text style={styles.btnText}>
             {busy === "registering" ? "Re-registering…" : "Re-register with backend"}
           </Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={styles.btnGhost}
+          onPress={onResetWatchReminder}
+        >
+          <Text style={styles.btnGhostText}>Reset Apple Watch reminder</Text>
         </TouchableOpacity>
 
         <TouchableOpacity

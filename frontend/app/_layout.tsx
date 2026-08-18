@@ -11,6 +11,8 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 
 import { useIconFonts } from "@/src/hooks/use-icon-fonts";
 import { registerForPushNotifications } from "@/src/utils/push";
+import { getDeviceId } from "@/src/utils/checkin";
+import { flushRecheckQueue, submitRecheckAnswer } from "@/src/utils/recheck";
 import { isAlertScreenMounted, publishAlert } from "@/src/utils/alertBus";
 import {
   cancelCheckInReminders,
@@ -30,6 +32,29 @@ const ONBOARDING_DONE_KEY = "quakeguard_onboarding_done";
 const TREMOR_CATEGORY_ID = "TREMOR_INFO";
 const ACTION_VIEW_MAP = "VIEW_MAP";
 const ACTION_CLOSE = "CLOSE";
+
+// RECHECK_V1 carries the answer buttons for the C1 re-check ladder — sent
+// ONLY to someone who has themselves reported being trapped.
+//
+// SAME / WORSE / MUCH WORSE all run with `opensAppToForeground: false`, which
+// means they submit straight from the lock screen with no Face ID and no
+// passcode. That is the PRIMARY answer path by design: Face ID under dust, in
+// darkness, at an odd angle will often fail, and then it is a passcode,
+// one-handed, injured (Paul, 2026-08-18). BETTER is deliberately in-app only
+// — it is the rarest and least time-critical answer, and it must not be the
+// easiest button to hit by accident.
+//
+// Android shows up to three inline actions, so the ordering here puts the
+// answers that change something urgent first.
+const RECHECK_CATEGORY_ID = "RECHECK_V1";
+const ACTION_RECHECK_SAME = "RECHECK_SAME";
+const ACTION_RECHECK_WORSE = "RECHECK_WORSE";
+const ACTION_RECHECK_MUCH_WORSE = "RECHECK_MUCH_WORSE";
+const RECHECK_ACTION_ANSWERS: Record<string, "same" | "worse" | "much_worse"> = {
+  [ACTION_RECHECK_SAME]: "same",
+  [ACTION_RECHECK_WORSE]: "worse",
+  [ACTION_RECHECK_MUCH_WORSE]: "much_worse",
+};
 
 // Background handler for the operator's "cancel all pending reminders" kill
 // switch (batch 5, B1). The backend sends a SILENT push (content-available,
@@ -125,6 +150,24 @@ if (Platform.OS !== "web") {
     },
   ]).catch(() => {});
 
+  Notifications.setNotificationCategoryAsync(RECHECK_CATEGORY_ID, [
+    {
+      identifier: ACTION_RECHECK_WORSE,
+      buttonTitle: "WORSE",
+      options: { opensAppToForeground: false },
+    },
+    {
+      identifier: ACTION_RECHECK_MUCH_WORSE,
+      buttonTitle: "MUCH WORSE",
+      options: { opensAppToForeground: false, isDestructive: true },
+    },
+    {
+      identifier: ACTION_RECHECK_SAME,
+      buttonTitle: "SAME",
+      options: { opensAppToForeground: false },
+    },
+  ]).catch(() => {});
+
   Notifications.registerTaskAsync(CANCEL_REMINDERS_TASK).catch(() => {});
 }
 
@@ -170,6 +213,9 @@ export default function RootLayout() {
       registerForPushNotifications().catch((e) =>
         console.log("[QuakeGuard] push register error:", e?.message),
       );
+
+      // C1: any re-check answer tapped while offline goes out on app open.
+      flushRecheckQueue().catch(() => {});
     })();
   }, [router]);
 
@@ -210,6 +256,15 @@ export default function RootLayout() {
         if (data.region != null)      params.set("region", String(data.region));
         if (data.unid != null)        params.set("unid", String(data.unid));
         router.push(("/alert?" + params.toString()) as any);
+        return;
+      }
+
+      // Re-check prompt (C1). Tapping the BODY opens the four-button screen;
+      // the lock-screen action buttons are handled before this ever runs.
+      if (kind === "recheck") {
+        const params = new URLSearchParams();
+        if (data.check_id != null) params.set("check_id", String(data.check_id));
+        router.push(("/recheck" + (params.toString() ? "?" + params.toString() : "")) as any);
         return;
       }
 
@@ -261,6 +316,17 @@ export default function RootLayout() {
         // notification body behaves exactly like "See location on map",
         // which is what users expect.
         if (response.actionIdentifier === ACTION_CLOSE) return;
+
+        // C1: an answer tapped on the lock screen submits WITHOUT opening the
+        // app. It is queued locally first, so no signal never loses it.
+        const recheckAnswer = RECHECK_ACTION_ANSWERS[response.actionIdentifier];
+        if (recheckAnswer) {
+          getDeviceId()
+            .then((id) => submitRecheckAnswer(id, recheckAnswer, data.check_id))
+            .catch(() => {});
+          return;
+        }
+
         handleTap(data);
       },
     );

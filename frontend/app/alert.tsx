@@ -30,10 +30,12 @@ import {
   getShortCode,
   getDisplayName,
   postStatus,
+  type Egress,
   type Mobility,
   type TriageSeverity,
 } from "@/src/utils/checkin";
 import {
+  publishAlert,
   setAlertScreenMounted,
   subscribeToAlerts,
   type CriticalAlertEvent,
@@ -68,6 +70,7 @@ export default function AlertScreen() {
     siren?: string;
     reminder?: string;
     test?: string;
+    rehearse?: string;
   }>();
   const eventMagnitude = params.magnitude ?? null;
   const eventDistanceKm = params.distance_km ?? null;
@@ -107,6 +110,13 @@ export default function AlertScreen() {
   const [pendingSeverity, setPendingSeverity] =
     useState<TriageSeverity | null>(null);
   const [mobilityOpen, setMobilityOpen] = useState(false);
+  // GREEN-only egress follow-up (2026-06-18). #51 limits the mobility question
+  // to yellow, so someone trapped but uninjured picked green and was never
+  // asked whether they were stuck — they surfaced as "minor, walking wounded"
+  // while physically unable to leave, and never appeared as an extraction case.
+  // Mobility is not egress: the body versus the building.
+  const [egressOpen, setEgressOpen] = useState(false);
+  const [chosenEgress, setChosenEgress] = useState<Egress | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [elapsed, setElapsed] = useState(0);
 
@@ -311,6 +321,33 @@ export default function AlertScreen() {
 
   const aftershockMagnitude = aftershock?.magnitude ?? null;
 
+  // Aftershock REHEARSAL (Paul, 2026-06-18). He asked to see the aftershock
+  // case on his own phone: trigger an alert, then a second one before
+  // answering the first. Home's Trigger Test Alert cannot show it — it
+  // navigates locally, and once you are on this screen the button is behind
+  // you, so a practice run could never reproduce the one case that matters.
+  //
+  // This publishes a synthetic second event through `publishAlert` — the
+  // SAME bus, the SAME listener above, that a real push hits from
+  // _layout.tsx. What it does not exercise is APNs delivery itself, and the
+  // notice says so, because a rehearsal that quietly skips a step is worse
+  // than no rehearsal.
+  const isRehearsal = params.rehearse === "aftershock";
+  useEffect(() => {
+    if (!isRehearsal) return;
+    const t = setTimeout(() => {
+      publishAlert({
+        magnitude: "5.1",
+        distance_km: "38",
+        intensity: "V",
+        depth_km: "10",
+        region: "REHEARSAL — not a real earthquake",
+        unid: "rehearsal",
+      });
+    }, 12000);
+    return () => clearTimeout(t);
+  }, [isRehearsal]);
+
   const stopSiren = () => {
     // Flip the guard FIRST so any in-flight play effect bails out before
     // touching the hardware. Then forcibly silence: loop=false so any
@@ -423,6 +460,7 @@ export default function AlertScreen() {
     kind: OutcomeKind,
     severity: TriageSeverity | null = null,
     mobility: Mobility | null = null,
+    egress: Egress | null = null,
   ) => {
     if (status === "sending" || status === "sent") return;
     // 1) IMMEDIATELY silence the siren and cancel pending reminders. The user
@@ -436,6 +474,7 @@ export default function AlertScreen() {
     setOutcome(kind);
     setChosenSeverity(severity);
     setChosenMobility(mobility);
+    setChosenEgress(egress);
     setStatus("sending");
     setErrorMsg(null);
     Haptics.notificationAsync(
@@ -537,6 +576,7 @@ export default function AlertScreen() {
         status: kind === "safe" ? "safe" : "trapped",
         severity: kind === "trapped" ? severity : null,
         mobility: kind === "trapped" ? mobility : null,
+        egress: kind === "trapped" ? egress : null,
         location: { latitude, longitude, accuracy, error: locationError },
         battery: { level: batteryLevel, state: batteryState },
       });
@@ -615,10 +655,20 @@ export default function AlertScreen() {
       return;
     }
 
-    // Green → user is walking wounded, mobility is "mobile" by definition.
-    // Red  → user is seriously injured / can't move → mobility is "trapped".
-    const inferredMobility: Mobility = severity === "green" ? "mobile" : "trapped";
-    submitCheckIn("trapped", severity, inferredMobility);
+    if (severity === "green") {
+      // Green has just told us they can walk, so mobility is settled — but
+      // egress is not, and it is the only thing that decides whether a team
+      // with cutting gear is needed. One extra tap, asked of the group most
+      // able to give it. NOT extended to red: red already implies immobility
+      // and gets maximum response anyway. Yellow keeps its mobility question.
+      setPendingSeverity(severity);
+      setEgressOpen(true);
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+      return;
+    }
+
+    // Red → seriously injured / can't move → mobility is "trapped".
+    submitCheckIn("trapped", severity, "trapped");
   };
 
   const chooseMobility = (mobility: Mobility) => {
@@ -632,11 +682,20 @@ export default function AlertScreen() {
     submitCheckIn("trapped", sev, mobility);
   };
 
+  const chooseEgress = (egress: Egress) => {
+    stopSiren();
+    setEgressOpen(false);
+    const sev = pendingSeverity;
+    setPendingSeverity(null);
+    submitCheckIn("trapped", sev, "mobile", egress);
+  };
+
   // Back arrow inside the mobility sheet: reopen severity picker so the
   // user can re-answer without losing their place in the flow.
   const backToSeverity = () => {
     stopSiren();
     setMobilityOpen(false);
+    setEgressOpen(false);
     setPendingSeverity(null);
     setTriageOpen(true);
   };
@@ -782,7 +841,14 @@ export default function AlertScreen() {
                 <Text style={styles.trappedToastText}>
                   Rescuers alerted. Stay calm. Conserve battery.
                 </Text>
-                {chosenMobility ? (
+                {chosenEgress ? (
+                  <Text style={styles.trappedToastMeta} testID="trapped-egress-summary">
+                    Reported:{" "}
+                    {chosenEgress === "can_exit"
+                      ? "you can get out on your own"
+                      : "you cannot get out — extraction needed"}
+                  </Text>
+                ) : chosenMobility ? (
                   <Text style={styles.trappedToastMeta} testID="trapped-mobility-summary">
                     Reported:{" "}
                     {chosenMobility === "mobile"
@@ -825,7 +891,16 @@ export default function AlertScreen() {
             </Pressable>
           )}
 
-          {/* Secondary: TRAPPED / NEED HELP (amber) — opens triage sheet */}
+          {/* Secondary: I NEED HELP (amber) — opens triage sheet.
+              Reworded from "I'M TRAPPED / NEED HELP" on 2026-06-18. The button
+              was doing double duty: worded as "I'm trapped" but functioning as
+              "I'm not safe", so it contradicted the very next screen, whose
+              first option is "I can walk and I'm not badly hurt". If you can
+              walk you are not trapped. Rewording fixes the contradiction with
+              no extra screens and no extra taps — splitting injury and
+              entrapment into two questions for everyone was considered and
+              rejected, because it adds a tap for the person least able to make
+              one, and the dashboard records both facts separately anyway. */}
           {status !== "sent" && (
             <Pressable
               onPress={openTriage}
@@ -840,7 +915,7 @@ export default function AlertScreen() {
               <Text style={styles.trappedBtnText}>
                 {status === "sending" && outcome === "trapped"
                   ? "SENDING…"
-                  : "I'M TRAPPED / NEED HELP"}
+                  : "I NEED HELP"}
               </Text>
             </Pressable>
           )}
@@ -848,7 +923,7 @@ export default function AlertScreen() {
           {/* Task #14: the "Dismiss alert" escape hatch is gone — an
               unanswered alert must not be dismissable, because a dismissal
               looks identical to silence on the dashboard. The only way off
-              this screen is to answer (I'M SAFE / I'M TRAPPED). After a
+              this screen is to answer (I'M SAFE / I NEED HELP). After a
               trapped report is confirmed, a plain "Back to home" remains. */}
           {status === "sent" && outcome === "trapped" && (
             <Pressable
@@ -974,6 +1049,61 @@ export default function AlertScreen() {
                 style={styles.triageCancel}
                 hitSlop={8}
                 testID="mobility-back"
+              >
+                <Text style={styles.triageCancelText}>Back</Text>
+              </Pressable>
+            </View>
+          </View>
+        </Modal>
+
+        {/* GREEN-only egress follow-up (2026-06-18). Mobility describes the
+            body; egress describes the building. Someone can be fully mobile
+            and still unable to leave — jammed door, beam pinning a limb
+            without injuring it, collapsed stairwell, blocked basement — and
+            only egress decides whether a team with cutting gear is needed.
+            A "no" surfaces them as needing extraction despite minor injury. */}
+        <Modal
+          visible={egressOpen}
+          animationType="slide"
+          transparent
+          onRequestClose={backToSeverity}
+        >
+          <View style={styles.triageBackdrop}>
+            <View
+              style={[
+                styles.triageSheet,
+                { paddingBottom: Math.max(insets.bottom + spacing.md, spacing.xl) },
+              ]}
+            >
+              <View style={styles.triageHandle} />
+              <Text style={styles.triageTitle}>Can you get out on your own?</Text>
+              <Text style={styles.triageSubtitle}>
+                Not about your injuries — about the building. A jammed door or
+                blocked stairwell counts as no. This does not delay your report.
+              </Text>
+
+              <TriageOption
+                color="#2E7D32"
+                label="Yes, I can get out"
+                sublabel="Nothing is blocking my way out"
+                icon="exit"
+                onPress={() => chooseEgress("can_exit")}
+                testID="egress-can-exit"
+              />
+              <TriageOption
+                color="#C21818"
+                label="No, I can&apos;t get out"
+                sublabel="Blocked, jammed or pinned — a team will be needed"
+                icon="lock-closed"
+                onPress={() => chooseEgress("cannot_exit")}
+                testID="egress-cannot-exit"
+              />
+
+              <Pressable
+                onPress={backToSeverity}
+                style={styles.triageCancel}
+                hitSlop={8}
+                testID="egress-back"
               >
                 <Text style={styles.triageCancelText}>Back</Text>
               </Pressable>

@@ -40,7 +40,12 @@ class TestTriggerAlertGate:
             headers={"Content-Type": "application/json"},
         )
         assert r.status_code == 401, r.text
-        assert r.json().get("detail") == "Invalid or missing X-Admin-Token"
+        # Message wording changed with the JWT cutover (task #9): an
+        # unauthenticated call is now "Not authenticated". Either wording is
+        # acceptable; the 401 is the contract.
+        assert r.json().get("detail") in (
+            "Invalid or missing X-Admin-Token", "Not authenticated",
+        )
 
     def test_wrong_token_returns_401(self, s):
         r = requests.post(
@@ -49,7 +54,12 @@ class TestTriggerAlertGate:
             headers={"Content-Type": "application/json", "X-Admin-Token": "wrong"},
         )
         assert r.status_code == 401, r.text
-        assert r.json().get("detail") == "Invalid or missing X-Admin-Token"
+        # Message wording changed with the JWT cutover (task #9): an
+        # unauthenticated call is now "Not authenticated". Either wording is
+        # acceptable; the 401 is the contract.
+        assert r.json().get("detail") in (
+            "Invalid or missing X-Admin-Token", "Not authenticated",
+        )
 
     def test_correct_token_returns_200_broadcast(self, s):
         r = requests.post(

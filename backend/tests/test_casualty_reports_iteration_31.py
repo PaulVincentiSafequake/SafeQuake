@@ -355,7 +355,8 @@ class TestConsistencyB1vsB2:
 # ---------- static grep for belt-and-braces guard ----------
 class TestStaticGuardExists:
     def test_b2_safe_keys_guard_in_server_py(self):
-        text = Path("/app/backend/server.py").read_text()
+        # B1/B2 moved to reports_export.py in the 2026-06-18 module split.
+        text = Path("/app/backend/reports_export.py").read_text()
         assert "_B2_SAFE_KEYS" in text
         # A 500 with mention of the legal lock must exist inside B2 endpoint
         # (rough check — presence of both substrings in the file).

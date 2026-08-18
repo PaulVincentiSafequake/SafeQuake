@@ -48,6 +48,28 @@ from typing import List, Optional
 log = logging.getLogger(__name__)
 
 
+def iso_utc(value) -> Optional[str]:
+    """ISO-8601 string that is UNAMBIGUOUSLY UTC.
+
+    Motor returns naive datetimes for BSON dates, and
+    `naive.isoformat()` yields "2026-08-18T08:07:10.750000" with no
+    offset. ECMAScript parses an offset-less date-time as LOCAL time, so
+    a Malta phone (CEST, UTC+2) rendered an 08:07 UTC quake as "08:07"
+    instead of "10:07" — a silent two-hour error on the one timestamp a
+    user compares against when the notification arrived, which made an
+    11-minute delivery look like a three-hour one (Paul, 2026-08-18).
+
+    Every timestamp we hand to a client must carry its offset.
+    """
+    if value is None:
+        return None
+    if not hasattr(value, "isoformat"):
+        return str(value)
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat()
+
+
 # ── Direction / bearing helpers ──────────────────────────────────────────
 _COMPASS_16 = [
     "N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
@@ -277,6 +299,39 @@ async def dispatch_preview_if_needed(
     now = datetime.now(timezone.utc)
     rate_limit_minutes = int(preview_cfg.get("rate_limit_minutes") or 10)
 
+    # ── Freshness gate (2026-08-18, batch 6 A0) ─────────────────────────
+    # An informational notice must be about something that just happened.
+    # There was no age check at all, so any event newly ingested — or
+    # newly ELIGIBLE because an operator widened the radius or loosened
+    # the tier — produced a notice that reads as current no matter how old
+    # the quake was. That is how a tremor timestamped 08:07 was announced
+    # just before 11:00: the config changed, and the backlog went out.
+    max_age_minutes = int(preview_cfg.get("max_event_age_minutes") or 90)
+    observed_dt = emsc_event.get("observed_at")
+    if isinstance(observed_dt, str):
+        try:
+            observed_dt = datetime.fromisoformat(observed_dt.replace("Z", "+00:00"))
+        except ValueError:
+            observed_dt = None
+    if observed_dt is not None:
+        if observed_dt.tzinfo is None:
+            observed_dt = observed_dt.replace(tzinfo=timezone.utc)
+        age_minutes = (now - observed_dt).total_seconds() / 60.0
+        if age_minutes > max_age_minutes:
+            await db.emsc_preview_notifications.insert_one({
+                "sent_at": now,
+                "device_id": None,
+                "delivered": False,
+                "skipped_reason": f"event_too_old ({age_minutes:.0f} min > {max_age_minutes} min)",
+                "emsc_event_ref": {"provider": emsc_event.get("provider"),
+                                   "external_id": emsc_event.get("external_id"),
+                                   "revision": emsc_event.get("revision"),
+                                   "magnitude": emsc_event.get("magnitude")},
+                "country_code": country_code,
+                "trigger_tier": trigger_tier,
+            })
+            return None
+
     # Fetch push_devices rows for the allowlisted device_ids that
     # currently have iOS tokens. Preview mode is iOS-only for v1.
     # We ALSO pull notification_preset so we can enforce per-device
@@ -320,7 +375,56 @@ async def dispatch_preview_if_needed(
             emsc_event.get("latitude"), emsc_event.get("longitude"),
         )
 
-    title = "PREVIEW · Seismic activity"
+    # ── Revisions must never look like new earthquakes (batch 6 A0) ─────
+    # EMSC republishes an event as its magnitude is refined, and each
+    # revision stored a new emsc_events row, which dispatched a second
+    # notice. Two notices minutes apart — "M3.3, 249km" then "M3.7,
+    # 251km" — read as two earthquakes to any user. They were one.
+    #
+    # Rule: for an event we have ALREADY notified about,
+    #   * material change (magnitude moved >= 0.3) -> send, but explicitly
+    #     labelled as an update, with the previous figure;
+    #   * anything smaller -> suppress and log why.
+    # A first notice for an event is unaffected.
+    prior = await db.emsc_preview_notifications.find_one(
+        {
+            "emsc_event_ref.external_id": emsc_event.get("external_id"),
+            "emsc_event_ref.provider": emsc_event.get("provider"),
+            "delivered": True,
+        },
+        {"_id": 0, "emsc_event_ref": 1, "sent_at": 1},
+        sort=[("sent_at", -1)],
+    )
+    is_update = False
+    prior_magnitude = None
+    if prior:
+        prior_magnitude = (prior.get("emsc_event_ref") or {}).get("magnitude")
+        new_magnitude = emsc_event.get("magnitude")
+        moved = (
+            prior_magnitude is not None and new_magnitude is not None
+            and abs(float(new_magnitude) - float(prior_magnitude)) >= 0.3
+        )
+        if not moved:
+            await db.emsc_preview_notifications.insert_one({
+                "sent_at": now,
+                "device_id": None,
+                "delivered": False,
+                "skipped_reason": "revision_no_material_change",
+                "emsc_event_ref": {"provider": emsc_event.get("provider"),
+                                   "external_id": emsc_event.get("external_id"),
+                                   "revision": emsc_event.get("revision"),
+                                   "magnitude": new_magnitude,
+                                   "prior_magnitude": prior_magnitude},
+                "country_code": country_code,
+                "trigger_tier": trigger_tier,
+            })
+            return None
+        is_update = True
+
+    title = (
+        "PREVIEW · Updated seismic reading" if is_update
+        else "PREVIEW · Seismic activity"
+    )
     body = format_body(
         magnitude=emsc_event.get("magnitude") or 0.0,
         distance_km=distance_km or 0.0,
@@ -328,6 +432,12 @@ async def dispatch_preview_if_needed(
         bearing_from_country=bearing if bearing is not None else 0.0,
         country_name=country_config.get("country_name") or country_code,
     )
+    if is_update:
+        body = (
+            f"Updated: now measured at M{emsc_event.get('magnitude'):g} "
+            f"(first reported M{float(prior_magnitude):g}). Same earthquake, "
+            f"not a new one. " + body
+        )
     # When the operator's radius override is what allowed this preview
     # through (event is beyond the real 600 km data boundary), prepend a
     # visible marker so a preview at 1800 km can never be mistaken for a
@@ -414,7 +524,7 @@ async def dispatch_preview_if_needed(
     idem = f"emsc-preview-{uuid.uuid4()}"
     unid = emsc_event.get("external_id")
     observed_at = emsc_event.get("observed_at")
-    observed_at_iso = observed_at.isoformat() if hasattr(observed_at, "isoformat") else str(observed_at) if observed_at else None
+    observed_at_iso = iso_utc(observed_at)
     try:
         result = await apns_send_preview(
             db=db,
@@ -459,9 +569,22 @@ async def dispatch_preview_if_needed(
             "error": evt.get("error"),
             "status_code": evt.get("status_code"),
             "environment": evt.get("environment"),
+            # magnitude is recorded here so a later revision of the SAME
+            # event can be compared against what the user was actually
+            # told (batch 6 A0 — revisions must not read as new quakes).
             "emsc_event_ref": {"provider": emsc_event.get("provider"),
                                "external_id": emsc_event.get("external_id"),
-                               "revision": emsc_event.get("revision")},
+                               "revision": emsc_event.get("revision"),
+                               "magnitude": emsc_event.get("magnitude"),
+                               # Recorded on DELIVERED rows too (2026-08-18).
+                               # It was only stored on skipped rows, so a
+                               # "closest event we've seen" query over this
+                               # collection could only ever return the closest
+                               # event we DIDN'T notify about — which is how a
+                               # 4,829 km figure got quoted while 249 km
+                               # notices were arriving on the phone.
+                               "distance_km": distance_km,
+                               "observed_at": emsc_event.get("observed_at")},
             "country_code": country_code,
             "trigger_tier": trigger_tier,
             "title": title,
@@ -545,6 +668,23 @@ async def dispatch_place_notices(
     ).to_list(50)
     by_id = {d.get("user_id"): d for d in push_devices}
 
+    # Same freshness gate as the own-location path (batch 6 A0). Flagged by
+    # the test agent: without it, a stale event handed to the places path
+    # could still announce a hours-old tremor near someone's family as if it
+    # had just happened.
+    max_age_minutes = int(preview_cfg.get("max_event_age_minutes") or 90)
+    observed_dt = emsc_event.get("observed_at")
+    if isinstance(observed_dt, str):
+        try:
+            observed_dt = datetime.fromisoformat(observed_dt.replace("Z", "+00:00"))
+        except ValueError:
+            observed_dt = None
+    if observed_dt is not None:
+        if observed_dt.tzinfo is None:
+            observed_dt = observed_dt.replace(tzinfo=timezone.utc)
+        if (datetime.now(timezone.utc) - observed_dt).total_seconds() / 60.0 > max_age_minutes:
+            return None
+
     radius_cap_km = country_config.get("poll_radius_km") or 600.0
     rate_limit_minutes = int(preview_cfg.get("rate_limit_minutes") or 10)
     now = datetime.now(timezone.utc)
@@ -616,10 +756,7 @@ async def dispatch_place_notices(
         idem = f"place-notice-{uuid.uuid4()}"
         unid = emsc_event.get("external_id")
         observed_at = emsc_event.get("observed_at")
-        observed_at_iso = (
-            observed_at.isoformat() if hasattr(observed_at, "isoformat")
-            else str(observed_at) if observed_at else None
-        )
+        observed_at_iso = iso_utc(observed_at)
         try:
             result = await apns_send_preview(
                 db=db,
@@ -661,7 +798,8 @@ async def dispatch_place_notices(
                 "user_preset": user_preset,
                 "emsc_event_ref": {"provider": emsc_event.get("provider"),
                                    "external_id": emsc_event.get("external_id"),
-                                   "revision": emsc_event.get("revision")},
+                                   "revision": emsc_event.get("revision"),
+                                   "magnitude": emsc_event.get("magnitude")},
                 "country_code": country_config.get("country_code"),
                 "title": title,
                 "body": body,

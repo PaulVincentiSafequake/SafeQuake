@@ -189,3 +189,41 @@ agent_communication:
 
       Please clean up any test rows you create (delete device_status +
       status_events with device_id starting with "test-" or "qg-test-").
+
+## Iteration 34 — GDPR map links, UTC timestamps, server.py split, C1 phase 1 (2026-06-18)
+
+  - agent: "main"
+    message: |
+      Landed, in the order Paul asked for: (1) GDPR — casualty coordinates no
+      longer leave to Google in a URL (dashboard audit rows + per-person history
+      recentre our own Leaflet map; the server-rendered /api/admin/audit-log page
+      prints coordinates as text rounded to 5 dp). (2) UTC — naive timestamps
+      were being parsed as local time by JS, showing events two hours early on a
+      Malta phone; fixed at source and defensively on the phone. (3) server.py
+      split 6,057 -> 2,307 lines across deps.py, push_relay.py,
+      reports_export.py, routes_auth_users.py, routes_emsc_admin.py,
+      routes_diagnostics.py, routes_recheck.py — route surface asserted
+      byte-identical (71 routes, same methods) before and after. (4) C1 phase 1:
+      automatic re-check ladder (backend/recheckin.py, 35 unit tests) with
+      lock-screen answers that submit without unlocking.
+
+  - agent: "testing"
+    message: |
+      43 live-endpoint tests written (tests/test_iteration_34_regression_and_c1.py),
+      42 passed. Found one real 500: /api/admin/audit-log called get_audit_log()
+      without the `request` argument it gained when /api/audit went behind
+      operator auth on 2026-08-13 — a direct Python call, so FastAPI never
+      filled it in.
+
+  - agent: "main"
+    message: |
+      Fixed (server.py audit_log_browser now takes and forwards `request`). The
+      page returns 200 and contains zero google.com/maps links. Full run after
+      the fix: 376 passed, 6 skipped, 0 failed across 17 suites. Also deleted
+      leftover qg-test-i34-* rows — one of them had short code 88B1, which
+      tripped the "no B1/B2 jargon in PDFs" guard as a false positive.
+      Stale legacy suites still failing for environmental reasons only (not
+      regressions): test_admin_gate / test_cleanup_iteration_19 (KeyError
+      EXPO_PUBLIC_BACKEND_URL in this fork), test_critical_alerts (asserts app
+      version 1.0.8), test_debug_endpoints + push/probe suites (endpoints
+      removed or moved behind auth in earlier sessions).

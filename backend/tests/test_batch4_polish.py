@@ -45,7 +45,7 @@ HEADERS = {"X-Admin-Token": ADMIN_TOKEN}
 
 # The embedded Quake Angel mark, straight from the server source — the
 # same bytes the PDFs draw, so "visually identical" is trivially true.
-_SRC = open("/app/backend/server.py").read()
+_SRC = open("/app/backend/reports_export.py").read()
 QA_B64 = re.search(r'_QA_LOGO_B64 = "([A-Za-z0-9+/=]+)"', _SRC).group(1)
 
 

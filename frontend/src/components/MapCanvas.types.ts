@@ -23,4 +23,13 @@ export type MapCanvasProps = {
   /** true = solid (real boundary); false = dashed (indicative). */
   radiusIsSolid: boolean;
   onEventPress: (ev: MapCanvasEvent) => void;
+  /**
+   * Centre the map here on first render instead of the default region.
+   * Used when the map is opened from an event's detail screen ("see this
+   * on the map"), so the user lands on the event rather than having to
+   * hunt for it.
+   */
+  focus?: { latitude: number; longitude: number } | null;
+  /** external_id of the event to draw emphasised (ring + larger dot). */
+  highlightExternalId?: string | null;
 };

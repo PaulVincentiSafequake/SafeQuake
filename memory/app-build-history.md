@@ -69,3 +69,63 @@ before the siren fix existed.
 | Foreground real alerts route to the check-in screen instead of leaving the user where they were | #169 follow-up |
 | Aftershock guard: a second alert publishes to the OPEN alert screen instead of remounting it, so an in-progress answer survives; no siren resurrection | Paul's edge case |
 | Diagnostics shows version + build number read from the installed binary, plus a hard-coded "fixes in this build" marker | build-gap prevention |
+
+## Version 1.0.27 — GDPR + timestamps + C1 phase 1 (18 Jun 2026)
+
+Paul's build before this was **1.0.25 (126)**; he never installed 1.0.26, which
+is why nearly all of batch 6 read as unfixed. Everything in 1.0.26 is still in
+1.0.27.
+
+| Change | Ref |
+|---|---|
+| `parseUtc` — backend timestamps without an offset were read as LOCAL time, showing events two hours early on a Malta phone | A0 follow-up |
+| `/recheck` screen — four ~64 pt buttons, SAME · WORSE · MUCH WORSE · BETTER | C1 |
+| Lock-screen answers (WORSE / MUCH WORSE / SAME) that submit without unlocking | C1 / D2 |
+| `recheck.wav` (~1 s) bundled for the critical-interruption re-check sound | C1 |
+| Offline answer queue, stamped with the time of the tap | C1 |
+| Diagnostics: "Reset Apple Watch reminder" so B6 can be re-tested without reinstalling | C4 |
+| Diagnostics "fixes in this build" marker updated (still hard-coded, deliberately) | process |
+| "I NEED HELP" replaces "I'M TRAPPED / NEED HELP" on the alert screen | batch 6 triage |
+| "Can you get out on your own?" asked after a GREEN (minor injury) report — mobility describes the body, egress describes the building | batch 6 triage |
+| Tremor settings, third option: the clause moved INTO the title — "Everything nearby — including tremors too small to feel". An option must state what it costs you on the line you choose it by | batch 6 B3 |
+
+**Batch 6 items that are ALREADY in 1.0.26/1.0.27 and need no further work** —
+they read as outstanding only because Paul is still on 1.0.25 (126):
+- **B1** — magnitude / distance / intensity sit in their own row ABOVE the
+  I'M SAFE button, with `flexShrink: 0`, so the graphic gives up space on a
+  short phone instead of the numbers sliding under the button. Verified at
+  390×844 and 320×568.
+- **B1** — "Dismiss alert" was removed with #14; the only ways off the alert
+  screen are I'M SAFE and I NEED HELP.
+- **B4** — "woken by the siren" is gone from the whole app; the wording is
+  "alerted by the siren". Zero matches remain in the app source.
+
+Backend changes in the same landing need a **Publish**; dashboard changes need
+the GitHub push. Order: Publish backend → push dashboard → build iOS.
+
+## Version 1.0.28 — batch 6 B3 + aftershock rehearsal (18 Jun 2026)
+
+Everything in 1.0.26 and 1.0.27 is in this build. Paul's installed build before
+this is **1.0.25 (126)**. Bumped from 1.0.27 rather than adding silently to it:
+1.0.27's contents had already been quoted to him, and a version number whose
+contents change after it was announced is exactly the build-gap confusion that
+cost eleven days on #169.
+
+| Change | Ref |
+|---|---|
+| Tremor settings, third option: "Everything nearby — including tremors too small to feel" (clause moved into the TITLE) | batch 6 B3 |
+| Diagnostics → "Rehearse an aftershock mid-answer": opens the alert screen and publishes a second alert through the real alert bus 12 s later, so the mid-answer case can be seen ON THE PHONE | Paul, 2026-06-18 |
+| Diagnostics "fixes in this build" marker now names the version | process |
+
+**Why the rehearsal button had to exist:** Home's Trigger Test Alert navigates
+locally (`router.push("/alert?siren=1&test=1")`), so it delivers no push — and
+once you are on the alert screen the button is behind you. There was therefore
+no way to reproduce "a second alert arrives while I am part-way through
+answering" on a real phone without broadcasting a live alert to every user. The
+rehearsal uses the SAME bus and the SAME listener a real second push hits; the
+only step it does not exercise is APNs delivery, and the on-screen text says so.
+
+Verified in preview: opened the alert screen, tapped I NEED HELP, left the
+injury sheet open unanswered — at 00:12 the amber "Another alert just arrived —
+M5.1. Your answer below still applies." notice appeared with the sheet and the
+part-finished answer untouched.

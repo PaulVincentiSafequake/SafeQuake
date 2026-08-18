@@ -36,7 +36,7 @@ class _FakeCollection:
     def find(self, query=None, projection=None):
         return _FakeCursor([r for r in self.rows if _matches(r, query or {})])
 
-    async def find_one(self, query=None, projection=None):
+    async def find_one(self, query=None, projection=None, sort=None):
         for r in self.rows:
             if _matches(r, query or {}):
                 return dict(r)
@@ -145,7 +145,10 @@ async def _stub_apns_send_preview(**kwargs):
 
 # ── Tests ────────────────────────────────────────────────────────────
 def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+    # asyncio.run(), not get_event_loop(): when another test module has
+    # already closed the default loop these tests failed only in combination
+    # with it, which reads as a refactor regression and isn't one.
+    return asyncio.run(coro)
 
 
 def test_no_override_athens_is_skipped():

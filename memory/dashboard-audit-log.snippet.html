@@ -271,9 +271,13 @@
       : "";
     var loc = "";
     if (e.latitude != null && e.longitude != null) {
-      loc = ' · <a href="https://www.google.com/maps/place/' +
-            encodeURIComponent(e.latitude + "," + e.longitude) +
-            '" target="_blank" rel="noopener">📍 map</a>';
+      // GDPR (2026-06): recentre our own map instead of disclosing a
+      // casualty's coordinates to a third party in an outbound URL.
+      loc = ' · <a href="#map-wrap" class="qg-maplink"' +
+            ' data-qg-map-lat="' + esc(e.latitude) + '"' +
+            ' data-qg-map-lon="' + esc(e.longitude) + '"' +
+            ' data-qg-map-label="' + esc(e.short_code || e.device_id || "") + '"' +
+            ' title="Show this location on the map above">📍 map</a>';
     }
     var bat = e.battery_pct != null ? " · 🔋 " + esc(e.battery_pct) + "%" : "";
     return (

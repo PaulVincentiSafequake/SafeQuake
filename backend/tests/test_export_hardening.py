@@ -498,9 +498,12 @@ class TestNarrativeTableConsistency:
             )
 
     def test_singular_plural_grammar(self, seeded):
+        import re
         b1, b2 = self._texts()
         for name, text in (("B1", b1), ("B2", b2)):
             flat = text.replace("\n", " ")
-            assert "1 people" not in flat, f"{name}: '1 people' grammar error"
+            # Digit-guarded: "31 people" legitimately contains "1 people",
+            # which made this assertion a false positive (2026-06-18).
+            assert not re.search(r"(?<!\d)1 people\b", flat), f"{name}: '1 people' grammar error"
             assert "1 person have" not in flat, f"{name}: '1 person have' grammar error"
             assert "1 person are" not in flat, f"{name}: '1 person are' grammar error"

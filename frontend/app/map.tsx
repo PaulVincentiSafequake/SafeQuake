@@ -41,8 +41,9 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
-import { useRouter } from "expo-router";
+import { useLocalSearchParams, useRouter } from "expo-router";
 import { getDeviceId } from "@/src/utils/checkin";
+import { parseUtc } from "@/src/utils/time";
 import MapCanvas from "@/src/components/MapCanvas";
 import type { MapCanvasEvent } from "@/src/components/MapCanvas.types";
 
@@ -91,7 +92,7 @@ function magnitudeColor(m: number | null): string {
 }
 
 function timeAgo(iso: string): string {
-  const then = new Date(iso).getTime();
+  const then = parseUtc(iso)?.getTime() ?? NaN;
   if (!Number.isFinite(then)) return "";
   const s = Math.max(0, Math.floor((Date.now() - then) / 1000));
   if (s < 60)    return `${s}s ago`;
@@ -106,6 +107,21 @@ function timeAgo(iso: string): string {
 
 export default function SeismicMapScreen() {
   const router = useRouter();
+  // Opened from an event's detail screen ("see this on the map") — centre
+  // on that event and emphasise its pin (#173/B5). Absent on the normal
+  // entry from Home, where the whole-basin view is right.
+  const focusParams = useLocalSearchParams<{
+    focus_lat?: string;
+    focus_lon?: string;
+    focus_unid?: string;
+  }>();
+  const focus =
+    focusParams.focus_lat && focusParams.focus_lon
+      ? {
+          latitude: Number(focusParams.focus_lat),
+          longitude: Number(focusParams.focus_lon),
+        }
+      : null;
   const [events, setEvents] = useState<MapEvent[]>([]);
   const [attribution, setAttribution] = useState<string>("Data: EMSC & USGS");
   const [loading, setLoading] = useState(true);
@@ -180,6 +196,10 @@ export default function SeismicMapScreen() {
         observed_at: ev.observed_at,
         magnitude: String(ev.magnitude ?? ""),
         magnitude_type: src?.magnitude_type ?? "",
+        // #173: tells the detail screen where it was opened from, so its
+        // back control returns HERE (with this pan/zoom/time window intact)
+        // instead of resetting to Home.
+        from: "map",
         depth_km: String(src?.depth_km ?? ""),
         region: ev.region ?? "",
         latitude: String(ev.latitude),
@@ -333,6 +353,8 @@ export default function SeismicMapScreen() {
         <MapCanvas
           events={events}
           center={MALTA}
+          focus={focus}
+          highlightExternalId={focusParams.focus_unid ?? null}
           radiusMeters={presetRadiusM}
           radiusIsSolid={presetIsSolid}
           onEventPress={goToEvent}

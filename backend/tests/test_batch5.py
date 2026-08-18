@@ -15,6 +15,7 @@
 import os
 import re
 import uuid
+from datetime import datetime, timezone
 
 import pytest
 import requests
@@ -254,8 +255,11 @@ class TestAppSideInvariants:
         s = open("/app/frontend/app/settings/notifications.tsx").read()
         opts = re.findall(r'value: "(off|significant|noticeable|everything)"', s)
         assert opts == ["off", "noticeable", "everything"], opts
-        assert "Including tremors too small to feel" in s
-        assert "including ones you will not feel at all" in s
+        # B3 (batch 6): the clause lives in the TITLE, not the subtitle — the
+        # title is the only line a scanning reader reads, so the option that
+        # generates the most notifications must not look like the quiet one.
+        assert 'title: "Everything nearby — including tremors too small to feel"' in s
+        assert "Includes tremors you will not feel at all" in s
         # both protective statements survive
         assert "always on and cannot be switched off" in s
         assert "does not affect emergency alerts" in s
@@ -269,7 +273,7 @@ class TestAppSideInvariants:
     def test_app_version_bumped(self):
         import json
         cfg = json.load(open("/app/frontend/app.json"))
-        assert cfg["expo"]["version"] == "1.0.25"
+        assert cfg["expo"]["version"] == "1.0.28"
         info = cfg["expo"]["ios"]["infoPlist"]
         # export-compliance answer baked in so App Store Connect stops asking
         assert info["ITSAppUsesNonExemptEncryption"] is False
@@ -356,7 +360,8 @@ class TestIssue146TestEntries:
         are legal records for real people."""
         r = requests.post(f"{BASE_URL}/api/admin/purge-test-entries", timeout=30)
         assert r.status_code in (401, 403)
-        src = open("/app/backend/server.py").read()
+        # Moved to routes_diagnostics.py in the 2026-06-18 module split.
+        src = open("/app/backend/routes_diagnostics.py").read()
         fn = src.split('@api_router.post("/admin/purge-test-entries")')[1].split("@api_router.")[0]
         assert 'require_role(principal, "admin")' in fn
         assert '"event_type": "test_entries_purged"' in fn
@@ -505,6 +510,32 @@ class TestAftershockDoesNotDestroyAnswers:
         assert 'testID="aftershock-update-btn"' in alert
         assert 'status === "sent"' in alert.split('testID="aftershock-bar"')[1][:1200]
 
+    def test_rehearsal_uses_the_real_bus(self):
+        """1.0.28: Paul asked to see the mid-answer case on his own phone.
+        Home's Trigger Test Alert cannot show it (it navigates locally, and
+        once you're on the screen the button is behind you), so Diagnostics
+        opens the alert screen with `rehearse=aftershock` and the screen
+        publishes a second event through the SAME bus a real push uses. If
+        this ever became a bespoke code path it would stop being evidence."""
+        alert = open("/app/frontend/app/alert.tsx").read()
+        diag = open("/app/frontend/app/diag.tsx").read()
+        assert 'params.rehearse === "aftershock"' in alert
+        assert "publishAlert({" in alert
+        assert "rehearse=aftershock" in diag
+        assert 'testID="diag-aftershock-rehearsal"' in diag
+        # The rehearsal must not fake the notice directly — it goes through
+        # publishAlert so the real listener does the work.
+        block = alert.split('const isRehearsal = params.rehearse')[1].split("}, [isRehearsal]);")[0]
+        assert "setAftershock(" not in block
+
+    def test_rehearsal_states_what_it_cannot_test(self):
+        """A rehearsal that quietly skips a step is worse than no rehearsal:
+        the screen must say APNs delivery is not exercised."""
+        diag = open("/app/frontend/app/diag.tsx").read()
+        section = diag.split('<Section title="Aftershock rehearsal">')[1][:1600]
+        assert "delivery of the second" in section
+        assert "12 seconds" in section
+
 
 class TestBuildIdentification:
     """After a 3-week-old build went unnoticed, the app must be able to tell
@@ -520,5 +551,171 @@ class TestBuildIdentification:
 
     def test_diag_carries_a_hardcoded_fix_marker(self):
         diag = open("/app/frontend/app/diag.tsx").read()
-        assert "#169 siren + aftershock guard" in diag
+        # The marker text changes every build; what must never change is that
+        # it is HARD-CODED, not derived from the version number — that is how
+        # a build shipping without the fix gets caught before a test cycle is
+        # wasted on it (Paul, 2026-08-18).
+        assert "1.0.28 — aftershock rehearsal" in diag
         assert 'label="fixes in this build"' in diag
+
+
+# ── A1 (batch 6): the chart counted events while the table counted people ─
+class TestReportChartCountsPeople:
+    """One device toggling its status three times drew a red bar of 3 beside
+    a table saying "Total devices reporting: 1". Every figure was correct;
+    the document still contradicted itself in plain language. On the public
+    report that reads as three people trapped to a journalist."""
+
+    def _rows(self):
+        # ONE device, many events inside a single hour, plus a second device
+        # that only ever checked in safe.
+        base = "2026-08-18T09:%02d:00+00:00"
+        return [
+            {"device_id": "dev-A", "status": "trapped", "recorded_at": base % 1},
+            {"device_id": "dev-A", "status": "safe", "recorded_at": base % 5},
+            {"device_id": "dev-A", "status": "trapped", "recorded_at": base % 9},
+            {"device_id": "dev-A", "status": "safe", "recorded_at": base % 20},
+            {"device_id": "dev-A", "status": "trapped", "recorded_at": base % 30},
+            {"device_id": "dev-B", "status": "safe", "recorded_at": base % 40},
+        ]
+
+    def test_one_person_many_toggles_counts_as_one(self):
+        """A1 reopened 2026-06-18: de-duplicating within a bucket was not
+        enough, because someone still trapped an hour later reports again and
+        the C1 ladder makes that routine. Each person now counts ONCE PER
+        STATUS for the whole window, in the period they first reported it — so
+        the red bars add up to the narrative's trapped figure by construction."""
+        from reports_export import _bucket_timeline
+        since = datetime(2026, 8, 18, 8, 0, tzinfo=timezone.utc)
+        until = datetime(2026, 8, 18, 11, 0, tzinfo=timezone.utc)
+        buckets, hourly = _bucket_timeline(self._rows(), since, until)
+        assert hourly is True
+        assert sum(b["trapped"] for b in buckets) == 1, "chart still counting events"
+        # dev-A checked in safe as well, which is a real event the chart must
+        # show — but only once, alongside dev-B.
+        assert sum(b["safe"] for b in buckets) == 2
+
+    def test_bucket_total_never_exceeds_distinct_people(self):
+        """The invariant that makes chart/table/narrative agreement
+        structural rather than a coincidence: no SERIES can exceed the number
+        of distinct people."""
+        from reports_export import _bucket_timeline
+        rows = self._rows()
+        since = datetime(2026, 8, 18, 8, 0, tzinfo=timezone.utc)
+        until = datetime(2026, 8, 18, 11, 0, tzinfo=timezone.utc)
+        buckets, _ = _bucket_timeline(rows, since, until)
+        distinct_people = len({r["device_id"] for r in rows})
+        for series in ("trapped", "safe", "rescued"):
+            assert sum(b[series] for b in buckets) <= distinct_people
+
+    def test_reverted_rescues_are_still_excluded(self):
+        from reports_export import _bucket_timeline
+        rows = [{"device_id": "dev-C", "status": "rescued", "rescue_reverted": True,
+                 "recorded_at": "2026-08-18T09:10:00+00:00"}]
+        buckets, _ = _bucket_timeline(
+            rows,
+            datetime(2026, 8, 18, 8, 0, tzinfo=timezone.utc),
+            datetime(2026, 8, 18, 11, 0, tzinfo=timezone.utc),
+        )
+        assert max(b["rescued"] for b in buckets) == 0
+
+    def test_y_axis_is_labelled_in_words(self):
+        src = open("/app/backend/reports_export.py").read()
+        fn = src.split("def _timeline_chart(")[1].split("\ndef ")[0]
+        assert 'String(9, height_pt / 2 - 22, "People")' in fn
+
+    def test_both_reports_use_the_same_bucketing_function(self):
+        """The public report must never get an event-based chart even if the
+        team report were ever changed."""
+        src = open("/app/backend/reports_export.py").read()
+        assert src.count("_bucket_timeline(") >= 3   # 1 def + >=2 call sites
+
+
+# ── A0 (batch 6): revisions and stale events in tremor notices ───────────
+class TestPreviewRevisionsAndFreshness:
+    """Two notices minutes apart — "M3.3, 249km" then "M3.7, 251km" — were
+    ONE earthquake at two revision stages. A user reads that as two
+    earthquakes. And neither had an age check, so a config change could
+    announce a 3-hour-old tremor as if it had just happened."""
+
+    def test_revision_without_material_change_is_suppressed(self):
+        src = open("/app/backend/emsc/preview.py").read()
+        fn = src.split("async def dispatch_preview_if_needed")[1]
+        assert '"skipped_reason": "revision_no_material_change"' in fn
+        assert "abs(float(new_magnitude) - float(prior_magnitude)) >= 0.3" in fn
+
+    def test_material_revision_is_labelled_as_an_update(self):
+        src = open("/app/backend/emsc/preview.py").read()
+        fn = src.split("async def dispatch_preview_if_needed")[1]
+        assert '"PREVIEW · Updated seismic reading" if is_update' in fn
+        assert "Updated: now measured at M" in fn
+        assert "Same earthquake, " in fn
+        assert "first reported M" in fn
+
+    def test_delivered_rows_record_magnitude_for_comparison(self):
+        """Without this the update/suppress decision has nothing to compare
+        against and every revision would look new again."""
+        src = open("/app/backend/emsc/preview.py").read()
+        fn = src.split("async def dispatch_preview_if_needed")[1]
+        delivered_block = fn.split('"idempotency_key": idem')[0]
+        assert '"magnitude": emsc_event.get("magnitude")' in delivered_block
+
+    def test_stale_events_are_not_announced_as_current(self):
+        src = open("/app/backend/emsc/preview.py").read()
+        fn = src.split("async def dispatch_preview_if_needed")[1]
+        assert "max_event_age_minutes" in fn
+        assert "event_too_old" in fn
+        # default must be tight enough that a 3-hour-old quake is blocked
+        assert 'or 90)' in fn
+
+
+# ── B2/#173 (batch 6): closing an event detail must return to its origin ──
+class TestEventDetailNavigation:
+    """`router.replace("/")` tore down the stack and dumped the user on Home,
+    so browsing a second event meant re-entering the map, re-picking the
+    time window and re-panning. That kills the retention feature (#107)."""
+
+    def test_detail_pops_the_stack_instead_of_resetting_it(self):
+        s = open("/app/frontend/app/quake/[unid].tsx").read()
+        assert "if (router.canGoBack()) router.back();" in s
+        # replace("/") survives ONLY as the cold-start fallback (the other
+        # occurrence is the comment explaining why it was removed)
+        import re as _re
+        code = _re.sub(r"\{/\*.*?\*/\}", "", s, flags=_re.S)
+        assert code.count('router.replace("/")') == 1, code.count('router.replace("/")')
+        assert "else router.replace(\"/\");" in s
+
+    def test_back_control_is_labelled_with_its_origin(self):
+        s = open("/app/frontend/app/quake/[unid].tsx").read()
+        assert 'params.from === "map" ? "Map"' in s
+        assert 'name={router.canGoBack() ? "chevron-back" : "close"}' in s
+
+    def test_map_tags_its_origin_on_push(self):
+        s = open("/app/frontend/app/map.tsx").read()
+        assert 'from: "map",' in s
+
+    def test_detail_can_open_the_map_on_that_event(self):
+        s = open("/app/frontend/app/quake/[unid].tsx").read()
+        assert 'testID="see-on-map-btn"' in s
+        assert "focus_lat: String(lat)" in s
+        assert "focus_unid" in s
+        # pushed (not replaced) so backing out returns to the detail — the
+        # notification → detail → map → detail loop must always unwind
+        openmap = s.split("const openOnMap = () => {")[1].split("};")[0]
+        assert "router.push(" in openmap and "replace" not in openmap
+
+    def test_map_honours_focus_and_highlight(self):
+        m = open("/app/frontend/app/map.tsx").read()
+        assert "focus={focus}" in m
+        assert "highlightExternalId={focusParams.focus_unid ?? null}" in m
+        canvas = open("/app/frontend/src/components/MapCanvas.native.tsx").read()
+        assert "initialRegion={initialRegion}" in canvas
+        assert "styles.markerHighlighted" in canvas
+
+    def test_places_path_has_the_same_freshness_gate(self):
+        """Flagged by the test agent: a stale event must not announce a
+        hours-old tremor near someone's family as if it just happened."""
+        src = open("/app/backend/emsc/preview.py").read()
+        fn = src.split("async def dispatch_place_notices")[1]
+        assert "max_event_age_minutes" in fn
+        assert "max_age_minutes" in fn

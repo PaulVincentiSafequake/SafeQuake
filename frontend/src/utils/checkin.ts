@@ -149,10 +149,22 @@ export interface BatteryPayload {
  * inspect res.ok / res.status keep working identically. The backend post
  * runs in parallel and its outcome is logged but never blocks the caller.
  */
+/**
+ * Egress is NOT mobility (2026-06-18). Mobility describes the body; egress
+ * describes the building. Someone can be fully mobile and still unable to
+ * leave — jammed door, beam pinning a limb without injuring it, collapsed
+ * stairwell, blocked basement — and only egress decides whether a team with
+ * cutting gear is needed. Asked of GREEN reports only: they have just told us
+ * they can walk, so asking about mobility again would be noise, while "minor
+ * injury but cannot get out" is otherwise invisible to the operator.
+ */
+export type Egress = "can_exit" | "cannot_exit";
+
 export async function postStatus(opts: {
   status: CheckInStatus;
   severity?: TriageSeverity | null;
   mobility?: Mobility | null;
+  egress?: Egress | null;
   location?: LocationPayload;
   battery?: BatteryPayload;
 }): Promise<Response> {
@@ -160,7 +172,7 @@ export async function postStatus(opts: {
   // Best-effort — if AsyncStorage is unavailable we send null and the
   // dashboard falls back to short_code-only display for this check-in.
   const displayName = await getDisplayName().catch(() => null);
-  const { status, severity, mobility, location, battery } = opts;
+  const { status, severity, mobility, egress, location, battery } = opts;
 
   const payload: Record<string, any> = {
     deviceId,
@@ -170,6 +182,10 @@ export async function postStatus(opts: {
     // mobility ("mobile" | "trapped") is likewise trapped-only; backend
     // normalizer will null it out for other statuses defensively.
     mobility: status === "trapped" ? (mobility ?? null) : null,
+    // egress ("can_exit" | "cannot_exit") — trapped-only, asked of green
+    // reports. A "cannot_exit" must surface the person as needing extraction
+    // even though their injuries are minor.
+    egress: status === "trapped" ? (egress ?? null) : null,
     // Optional first name for responder-side identification. Nullable —
     // dashboard falls back to short_code alone when null.
     display_name: displayName,

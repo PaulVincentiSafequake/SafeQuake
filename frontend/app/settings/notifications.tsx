@@ -17,8 +17,13 @@
  *   - Off              : no informational notifications at all
  *   - Only what I'd
  *     likely feel      : predicted MMI III+ (recommended default)
- *   - Everything nearby: every event inside country radius, including
- *                        tremors too small to feel
+ *   - Everything nearby — including tremors too small to feel:
+ *                        every event inside country radius. The "including
+ *                        tremors too small to feel" clause is in the TITLE,
+ *                        not the subtitle (Paul, batch 6 B3): the option must
+ *                        state what it costs you in the line you choose it by,
+ *                        because that is the only line a scanning reader
+ *                        actually reads.
  *
  * "Significant only" (MMI IV+) and "Noticeable" (MMI III+) were one point
  * apart on an intensity scale and indistinguishable to lay users — Paul,
@@ -74,9 +79,9 @@ const PRESET_OPTIONS: {
   },
   {
     value: "everything",
-    title: "Everything nearby",
-    subtitle: "Including tremors too small to feel",
-    helper: "Every recorded tremor in the region, including ones you will not feel at all. Expect a few notifications a day.",
+    title: "Everything nearby — including tremors too small to feel",
+    subtitle: "Every recorded tremor in the region",
+    helper: "Includes tremors you will not feel at all. Expect a few notifications a day.",
   },
 ];
 

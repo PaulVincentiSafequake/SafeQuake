@@ -2,7 +2,7 @@
   "expo": {
     "name": "Quake Angel",
     "slug": "frontend",
-    "version": "1.0.25",
+    "version": "1.0.28",
     "orientation": "portrait",
     "icon": "./assets/icons/quake_angel_ios_v3.png",
     "scheme": "frontend",
@@ -54,7 +54,7 @@
         "expo-notifications",
         {
           "mode": "production",
-          "sounds": ["./assets/audio/siren.caf"]
+          "sounds": ["./assets/audio/siren.caf", "./assets/audio/recheck.wav"]
         }
       ],
       [
