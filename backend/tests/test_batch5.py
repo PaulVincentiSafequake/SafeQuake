@@ -457,3 +457,50 @@ class TestIssue169FollowUps:
         layout = open("/app/frontend/app/_layout.tsx").read()
         handler = layout.split("setNotificationHandler")[1].split("}")[0]
         assert "shouldPlaySound: true" in handler
+
+
+class TestAftershockDoesNotDestroyAnswers:
+    """Paul, 2026-08-17: aftershocks arrive minutes after a main shock. If a
+    second alert re-navigates someone who is mid-answer, they lose it — and
+    a trapped person must not have to report themselves twice because the
+    ground shook again."""
+
+    def test_layout_publishes_instead_of_navigating_when_screen_is_open(self):
+        layout = open("/app/frontend/app/_layout.tsx").read()
+        assert "isAlertScreenMounted()" in layout
+        assert "publishAlert(data);" in layout
+        crit = layout.split("addNotificationReceivedListener")[1].split("getLastNotificationResponseAsync")[0]
+        # navigation only in the else branch — never while the screen is open
+        assert "if (isAlertScreenMounted()) {" in crit
+        assert crit.index("publishAlert(data);") < crit.index("handleTap(")
+
+    def test_alert_screen_registers_mounted_state(self):
+        alert = open("/app/frontend/app/alert.tsx").read()
+        assert "setAlertScreenMounted(true)" in alert
+        assert "return () => setAlertScreenMounted(false);" in alert
+
+    def test_aftershock_touches_no_answer_state(self):
+        """The subscriber may set the notice and NOTHING else — no setStatus,
+        no clearing of severity/mobility, no closing of the sheets."""
+        alert = open("/app/frontend/app/alert.tsx").read()
+        body = alert.split("return subscribeToAlerts((event) => {")[1].split("});", 1)[0]
+        assert "setAftershock(event);" in body
+        for forbidden in ("setStatus(", "setTriageOpen(", "setMobilityOpen(",
+                          "setChosenSeverity(", "setChosenMobility(",
+                          "submitCheckIn("):
+            assert forbidden not in body, forbidden
+
+    def test_aftershock_never_resurrects_a_silenced_siren(self):
+        """#31/#50 shape: a siren that comes back after the user silenced it
+        teaches them the button doesn't work."""
+        alert = open("/app/frontend/app/alert.tsx").read()
+        body = alert.split("return subscribeToAlerts((event) => {")[1].split("});", 1)[0]
+        assert "sirenPlayer.play()" not in body
+        assert "shouldPlayRef.current = true" not in body
+
+    def test_already_answered_users_are_not_silently_reset(self):
+        """An explicit Update button, never an automatic reset — the rescue
+        list must match what the person actually said."""
+        alert = open("/app/frontend/app/alert.tsx").read()
+        assert 'testID="aftershock-update-btn"' in alert
+        assert 'status === "sent"' in alert.split('testID="aftershock-bar"')[1][:1200]

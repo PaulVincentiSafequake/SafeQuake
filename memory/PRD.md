@@ -993,3 +993,24 @@ TWO REAL DEFECTS FOUND ANYWAY, both fixed now:
    same handleTap path as a tap.
 3 new tests pin all three (Android `kind`, foreground routing,
 `shouldPlaySound: true`). 35 tests in test_batch5.py.
+
+**Aftershock edge case (Paul, 2026-08-17) — FIXED before it shipped.** The
+foreground auto-routing added minutes earlier called `router.push("/alert")`,
+which mounts a SECOND alert screen: an in-progress answer (open triage sheet,
+chosen severity, mobility answer) was discarded and the first screen's siren
+kept looping underneath the new one. New `src/utils/alertBus.ts`: alert.tsx
+registers mounted state, `_layout.tsx` PUBLISHES the new event to the open
+screen instead of navigating. The screen shows an amber "Another alert just
+arrived — M5.1. Your answer below still applies." notice and touches no answer
+state; if the user had already answered it says the report already reached the
+team and offers an explicit "Update" button (never an automatic reset).
+**Also removed a re-arm I had just added:** the first cut restarted the siren
+for the new event, and the browser demo showed it restarting while the user was
+mid-triage seconds after they'd silenced it — the exact #31/#50 shape. Dropped:
+audibility of the new event is already covered by the push sound itself
+(siren.caf plays on arrival regardless), so the user's control over the in-app
+siren stays absolute. Demonstrated in-browser via a __DEV__-only bus handle:
+sheet survives, notice appears, no second route stacked, mobility question still
+reachable, answer completes, no "re-armed" log. 5 new tests (40 total in
+test_batch5.py) incl. one that fails if the aftershock subscriber ever touches
+setStatus/setTriageOpen/setChosenSeverity/submitCheckIn.

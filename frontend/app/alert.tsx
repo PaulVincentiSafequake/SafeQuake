@@ -34,6 +34,11 @@ import {
   type TriageSeverity,
 } from "@/src/utils/checkin";
 import {
+  setAlertScreenMounted,
+  subscribeToAlerts,
+  type CriticalAlertEvent,
+} from "@/src/utils/alertBus";
+import {
   cancelCheckInReminders,
   cancelRescueInfoNotification,
   ensureNotificationSetup,
@@ -265,6 +270,46 @@ export default function AlertScreen() {
       cancelled = true;
     };
   }, [shouldPlaySiren, isTestRun]);
+
+  // ─── AFTERSHOCKS: a new alert must never cost someone their answer ───
+  // A second alert arriving while this screen is open is published to us by
+  // _layout.tsx instead of navigating (which would remount this screen and
+  // discard an in-progress answer — open triage sheet, chosen severity,
+  // mobility answer — while leaving the old siren looping underneath).
+  //
+  // What we do with it: update the readings, say plainly that a new alert
+  // arrived, and leave every piece of the user's state exactly where it was.
+  // If they had already answered, we do NOT silently reset them — we offer an
+  // explicit "Update my status" button, because deciding for them is how you
+  // end up with a rescue list that doesn't match reality.
+  const [aftershock, setAftershock] = useState<CriticalAlertEvent | null>(null);
+
+  useEffect(() => {
+    setAlertScreenMounted(true);
+    return () => setAlertScreenMounted(false);
+  }, []);
+
+  useEffect(() => {
+    return subscribeToAlerts((event) => {
+      setAftershock(event);
+      // DELIBERATELY NO SIREN RE-ARM HERE.
+      //
+      // First cut of this re-started the siren for the new event. Testing
+      // showed it restarting while the user was mid-triage — they had
+      // silenced it by tapping I'M TRAPPED seconds earlier, and it came
+      // back. That is precisely the failure shape of #31/#50 ("I'm safe
+      // doesn't stop the siren"), and a siren that resurrects itself after
+      // someone deliberately silenced it is worse than one that stays quiet:
+      // it teaches them the button doesn't work.
+      //
+      // Audibility of the new event is already covered, and covered better,
+      // by the push itself: iOS plays siren.caf (critical, volume 1.0) on
+      // arrival regardless of what this screen is doing. So the new alert is
+      // heard, and the person's control over the in-app siren is absolute.
+    });
+  }, []);
+
+  const aftershockMagnitude = aftershock?.magnitude ?? null;
 
   const stopSiren = () => {
     // Flip the guard FIRST so any in-flight play effect bails out before
@@ -617,6 +662,39 @@ export default function AlertScreen() {
           <Text style={styles.liveText}>LIVE ALERT · {mm}:{ss}</Text>
         </View>
 
+        {/* Aftershock notice. Deliberately a NOTICE, not a navigation: the
+            user's answer — submitted or half-given — is untouched. */}
+        {aftershock && (
+          <View style={styles.aftershockBar} testID="aftershock-bar">
+            <Ionicons name="pulse" size={16} color="#FFD79A" />
+            <Text style={styles.aftershockText}>
+              {aftershockMagnitude
+                ? `Another alert just arrived — M${aftershockMagnitude}. `
+                : "Another alert just arrived. "}
+              {status === "sent"
+                ? "Your report already reached the rescue team."
+                : "Your answer below still applies."}
+            </Text>
+            {status === "sent" && (
+              <Pressable
+                onPress={() => {
+                  // Explicit, user-initiated. We never silently reset someone
+                  // who has already answered.
+                  setStatus("idle");
+                  setChosenSeverity(null);
+                  setChosenMobility(null);
+                  setAftershock(null);
+                }}
+                hitSlop={10}
+                style={styles.aftershockAction}
+                testID="aftershock-update-btn"
+              >
+                <Text style={styles.aftershockActionText}>Update</Text>
+              </Pressable>
+            )}
+          </View>
+        )}
+
         {/* Center: pulsing warning.
             LAYOUT CONTRACT (batch 5, B2): this block is the ONLY shrinkable
             region on the screen. The metrics strip and the action buttons are
@@ -967,6 +1045,38 @@ const styles = StyleSheet.create({
   content: {
     flex: 1,
     paddingHorizontal: spacing.xl,
+  },
+  aftershockBar: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.sm,
+    marginTop: spacing.sm,
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.md,
+    borderRadius: radius.md,
+    backgroundColor: "rgba(255,176,32,0.16)",
+    borderWidth: 1,
+    borderColor: "rgba(255,176,32,0.45)",
+    flexShrink: 0,
+  },
+  aftershockText: {
+    flex: 1,
+    color: "#FFD79A",
+    fontSize: 13,
+    lineHeight: 18,
+    fontWeight: "600",
+  },
+  aftershockAction: {
+    minHeight: 32,
+    paddingHorizontal: spacing.md,
+    justifyContent: "center",
+    borderRadius: radius.sm,
+    backgroundColor: "rgba(255,176,32,0.25)",
+  },
+  aftershockActionText: {
+    color: "#FFE7C2",
+    fontSize: 13,
+    fontWeight: "800",
   },
   topBanner: {
     flexDirection: "row",

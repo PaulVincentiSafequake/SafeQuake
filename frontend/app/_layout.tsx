@@ -11,6 +11,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 
 import { useIconFonts } from "@/src/hooks/use-icon-fonts";
 import { registerForPushNotifications } from "@/src/utils/push";
+import { isAlertScreenMounted, publishAlert } from "@/src/utils/alertBus";
 import {
   cancelCheckInReminders,
   ensureNotificationSetup,
@@ -276,19 +277,27 @@ export default function RootLayout() {
         return;
       }
       if (kind === "critical_alert") {
-        // #169 follow-up — CLOSE THE FOREGROUND GAP.
+        // #169 follow-up — CLOSE THE FOREGROUND GAP, WITHOUT STACKING.
         //
         // If a real alert lands while the app is already open, iOS plays the
         // push sound once (siren.caf) and shows a banner, but nothing else
         // happened: the user was left on whatever screen they were on, with
         // no looping siren and no check-in screen, unless they happened to
-        // tap the banner. Route straight to the alert screen with siren=1 —
-        // the same destination and the same playback path as a tap.
+        // tap the banner. So we route them to the alert screen.
         //
-        // This is the one place an automatic navigation is justified: the
-        // event is a genuine critical alert for the user's own location, and
-        // the check-in screen is the only correct destination.
-        handleTap({ ...data, kind: "critical_alert" });
+        // AFTERSHOCK SAFETY (Paul, 2026-08-17): if that screen is ALREADY
+        // open we must not navigate again. router.push would mount a second
+        // alert screen, discarding an in-progress answer (open triage sheet,
+        // chosen severity, mobility answer) and leaving the first screen's
+        // siren looping underneath the new one. A trapped person must never
+        // have to report themselves twice because the ground shook again.
+        // Instead the new event is published to the open screen, which
+        // updates the readings and says so without touching their answer.
+        if (isAlertScreenMounted()) {
+          publishAlert(data);
+        } else {
+          handleTap({ ...data, kind: "critical_alert" });
+        }
         (async () => {
           const ok = await ensureNotificationSetup();
           if (!ok) return;
