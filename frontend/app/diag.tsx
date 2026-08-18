@@ -225,6 +225,24 @@ export default function DiagScreen() {
           <Row label="platform" value={info?.platform?.toUpperCase() ?? "—"} />
           <Row label="app version" value={info?.app_version ?? "—"} />
           <Row label="build number" value={info?.build_number ?? "—"} />
+          {/* Build marker (#169 aftermath). Deliberately a HARD-CODED row
+              rather than a version comparison: this row only exists in the
+              bundle that contains the fix, so its presence can't be wrong
+              and its ABSENCE is itself the answer. Version lookups can
+              disagree with the binary; a code marker can't. */}
+          <Row label="fixes in this build" value="#169 siren + aftershock guard" />
+        </Section>
+
+        <Section title="Siren">
+          <Text style={styles.help}>
+            Tap Trigger Test Alert on the home screen: the siren must start
+            within about a second of the red screen appearing, and stop the
+            instant you tap I&apos;M SAFE or choose an injury option.
+            {"\n\n"}
+            If the row above is missing, this build predates the #169 fix and
+            the test button will be silent — the fix is app-side, so no
+            backend publish can change that.
+          </Text>
         </Section>
 
         <Section title="Push token">
@@ -405,6 +423,7 @@ const styles = StyleSheet.create({
   scroll: { flex: 1, backgroundColor: "#0e1116" },
   scrollBody: { padding: 16, paddingBottom: 40 },
   header: { marginBottom: 16 },
+  help: { color: "#8a94a6", fontSize: 13, lineHeight: 19 },
   h1: { color: "#fff", fontSize: 22, fontWeight: "700" },
   subtitle: { color: "#8a94a6", fontSize: 13, marginTop: 4 },
   section: { marginBottom: 16 },

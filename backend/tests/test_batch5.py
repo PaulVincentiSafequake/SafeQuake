@@ -504,3 +504,21 @@ class TestAftershockDoesNotDestroyAnswers:
         alert = open("/app/frontend/app/alert.tsx").read()
         assert 'testID="aftershock-update-btn"' in alert
         assert 'status === "sent"' in alert.split('testID="aftershock-bar"')[1][:1200]
+
+
+class TestBuildIdentification:
+    """After a 3-week-old build went unnoticed, the app must be able to tell
+    you what it is. Diagnostics reads version/build from the INSTALLED
+    BINARY (expo-application), and carries a hard-coded fixes marker whose
+    absence is itself the answer on an older build."""
+
+    def test_diag_reads_version_from_the_binary(self):
+        push = open("/app/frontend/src/utils/push.ts").read()
+        assert 'import * as Application from "expo-application"' in push
+        assert "Application.nativeBuildVersion" in push
+        assert "Application.nativeApplicationVersion" in push
+
+    def test_diag_carries_a_hardcoded_fix_marker(self):
+        diag = open("/app/frontend/app/diag.tsx").read()
+        assert "#169 siren + aftershock guard" in diag
+        assert 'label="fixes in this build"' in diag

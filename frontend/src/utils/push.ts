@@ -1,5 +1,6 @@
 import * as Notifications from "expo-notifications";
 import Constants from "expo-constants";
+import * as Application from "expo-application";
 import { Platform } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
@@ -53,8 +54,22 @@ export async function getDiagInfo(): Promise<DiagInfo> {
     last_registered_at,
     last_register_status,
     backend_url: BACKEND_URL ?? "(not set)",
-    app_version: (Constants.expoConfig?.version as string) ?? null,
+    // Read from the INSTALLED BINARY, not from app.json (#169 aftermath).
+    // Constants.expoConfig.ios.buildNumber is null here because the build
+    // number is assigned by the build pipeline, so Diagnostics showed "—"
+    // and there was no way for anyone to tell which build a phone was
+    // holding — which is exactly how a 3-week-old build went unnoticed.
+    // expo-application reads the real values out of the binary.
+    // On web expo-application reports a placeholder "1.0.0", so app.json is
+    // the truth there; on a device the binary is the truth.
+    app_version:
+      (Platform.OS === "web"
+        ? (Constants.expoConfig?.version as string)
+        : Application.nativeApplicationVersion) ??
+      (Constants.expoConfig?.version as string) ??
+      null,
     build_number:
+      Application.nativeBuildVersion ??
       (Constants.expoConfig?.ios?.buildNumber as string) ??
       (Constants.expoConfig?.android?.versionCode as unknown as string) ??
       null,

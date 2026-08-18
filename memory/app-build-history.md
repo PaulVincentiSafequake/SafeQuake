@@ -56,3 +56,16 @@ versionCode are assigned by the Emergent build pipeline at publish time and
 increment per build. So the precise pairing is "version 1.0.24, first build
 generated after this publish" — quote the version, read the build number off
 TestFlight.
+
+## Version 1.0.25 — #169 siren fix (17 Aug, evening)
+**Version 1.0.24 / build 125 does NOT contain any of this.** It was snapshotted
+before the siren fix existed.
+
+| Change | Item |
+|---|---|
+| Trigger Test Alert now passes `?siren=1&test=1` — the test uses the identical playback path as a real alert. Silent since 2026-08-06 (commit d3e8d81) | #169 |
+| Siren and check-in reminders are independent decisions (`siren=1` vs `test=1`) — conflating them is what hid #169 | #169 |
+| Android real alerts now carry `kind: "critical_alert"` (backend) — previously a real alert tapped on Android opened the informational screen and armed no siren | #169 follow-up |
+| Foreground real alerts route to the check-in screen instead of leaving the user where they were | #169 follow-up |
+| Aftershock guard: a second alert publishes to the OPEN alert screen instead of remounting it, so an in-progress answer survives; no siren resurrection | Paul's edge case |
+| Diagnostics shows version + build number read from the installed binary, plus a hard-coded "fixes in this build" marker | build-gap prevention |
