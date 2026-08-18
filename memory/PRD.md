@@ -893,3 +893,31 @@ cutover and assert version 1.0.8).
   buttons render, POST fires with the right body, banner confirms.
 - Dashboard pushed to GitHub twice (kill switch, then #146); clone wiped each
   time. BOTH features need the batch-5 backend published to work.
+
+**C1 design finalised 2026-08-17 (still NOT built).** `recheckin-design.md`
+rewritten after Paul challenged two things:
+1. **Server-driven, not device-scheduled.** He was right: the throttling/Low
+   Power Mode limits apply to SILENT pushes, which only my local-schedule top-up
+   needed. Visible alert pushes at priority 10 have none of them. Now: backend
+   due-check sweeper is primary; ONE local notification armed a step ahead as an
+   offline safety net; answers queue on device and flush on reconnect.
+2. **iOS shows ZERO notification actions until expanded** (verified, not
+   assumed — cannot be overridden). So ordering the actions can't fix it. The
+   primary answer path is now: tap the notification BODY (whole banner is the
+   target) → full-screen re-check with four ~64pt buttons = two large taps, no
+   long-press. Actions kept as a secondary path. Android does show 3 inline, so
+   there Paul's rule applies: WORSE, MUCH WORSE, SAME inline; BETTER in-app.
+   Live Activity (ActivityKit + App Intents) is the real fix for true
+   lock-screen buttons — native work, needs a build, deliberately deferred.
+Other decisions: WORSE escalates one band, **MUCH WORSE jumps straight to red**
+(no forced stepwise); no auto-downgrade on BETTER; stop asking when the phone is
+DARK, keep asking indefinitely while it's ALIVE, operator can restart (state,
+not clock); non-responders included at the widest interval; re-checks are
+critical-level with a SHORT sound, with the Apple entitlement justification now
+written out verbatim in the doc plus an enforcement rule (refuse to send to any
+device not currently `trapped`, with a test).
+**Tap time is authoritative:** `answered_at` (device tap) is what the history
+modal, audit CSV and audit PDF must show and sort by; `received_at` kept
+alongside, never substituted; gaps > ~2 min rendered explicitly ("answered
+14:20, reached us 15:05 — queued offline"); implausible device clocks flagged,
+never silently corrected.

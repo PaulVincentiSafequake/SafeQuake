@@ -76,22 +76,71 @@ doubles; below 10% it triples and the prompt says so ("we'll check less often to
 save your battery") — otherwise the app looks like it has forgotten them. The
 multipliers need tuning against real battery measurements, not guesses.
 
-### 1b. What interruption level to use
-Not the 30-second siren — that's for "an earthquake is happening now". Re-checks
-go out as **critical-level with a short sound**: critical guarantees delivery
-through Do Not Disturb and a locked, face-down phone, which is exactly the
-situation, without turning every check into an emergency. Worth flagging that
-Apple reviews critical-alert use, so the justification needs writing down:
-these go only to people who have self-reported as trapped.
+### 1b. What interruption level to use — and the written justification
+Not the 30-second siren; that is for "an earthquake is happening now".
+Re-checks go out at **critical interruption level with a short sound** —
+critical is what gets through Do Not Disturb, Focus, the ringer switch and a
+locked, face-down phone, which is precisely the situation of someone under
+rubble, without turning every check into an emergency.
 
-### 2. The prompt itself
-Four full-width buttons, no scrolling, no forms: **SAME · WORSE · MUCH WORSE ·
-BETTER**. On iOS these are notification **actions** on a dedicated `RECHECK`
-category, so any of them can be answered straight from the lock screen without
-unlocking the phone or launching the app — one tap, minimal battery, and it
-works with a cracked or dusty screen. (B9 has just proven the actions mechanism;
-that category must stay separate from both TREMOR_INFO and the critical alert,
-for the same reason.)
+**JUSTIFICATION FOR APPLE'S CRITICAL ALERT ENTITLEMENT (agreed with Paul,
+2026-08-17 — quote this verbatim in any review response):**
+
+> Quake Angel sends re-check prompts at critical interruption level ONLY to a
+> person who has themselves reported being trapped after an earthquake, and only
+> for as long as that report stands unresolved. The user opts in by tapping
+> I'M TRAPPED; nobody else can put a device into this state. The prompt asks one
+> question — has your condition changed — and the answer is routed to the
+> rescue coordinators triaging that incident, where a deterioration changes who
+> is reached first. It cannot be triggered by marketing, engagement, news, or
+> any commercial purpose: there is no code path that sends it to a device
+> without a standing self-reported trapped status. Prompts stop automatically
+> when the person reports safe, when an operator marks them rescued, or when
+> their phone goes dark. Interval widens over time and widens further on low
+> battery, because the same phone is the person's only link to rescuers.
+
+Enforcement to build alongside it, so the paragraph above stays true: the
+re-check sender must refuse to send to any device whose current status is not
+`trapped`, and that refusal needs a test.
+
+### 2. The prompt itself — CORRECTED after Paul's challenge
+Paul asked what a trapped person sees WITHOUT expanding the notification. I
+checked rather than assumed, and my earlier claim was wrong in a way that
+matters:
+
+**On iOS, notification action buttons are NOT visible until the notification is
+expanded.** There is no "first two actions show" behaviour — it's zero. The user
+must long-press, or pull the banner down, or use View. A developer cannot
+override this. So Paul's instinct is right and his fix (put WORSE and MUCH WORSE
+in the two visible slots) unfortunately can't help, because the constraint isn't
+how many fit — it's that a gesture is required before any of them exist.
+
+Long-pressing is exactly the wrong thing to ask of the most badly injured person
+on the list. So the answer path is inverted:
+
+1. **Primary: tap the notification body.** The whole banner is the target — the
+   largest possible hit area, no gesture precision, no long-press — and it opens
+   the app straight onto a full-screen re-check screen with four buttons at
+   ~64pt each. **Two taps total, both of them large.** That is the path we
+   design for and the one we quote in any accessibility claim.
+2. **Secondary: the four notification actions**, for anyone who does expand or
+   who answers from Notification Center. Free to keep, never relied upon.
+3. **The real fix for lock-screen buttons, deliberately deferred:** a
+   **Live Activity** (ActivityKit + App Intents) can put genuinely interactive
+   buttons on the lock screen with no expansion at all, and would give a trapped
+   person a persistent "you are being tracked, tap to update" card for as long
+   as the incident runs. That is native work — a widget extension and an Expo
+   config plugin, testable only in a real build, not Expo Go. It is the correct
+   destination for this feature; it should not gate version one.
+
+**Android** does show up to three actions inline in the expanded notification,
+and heads-up notifications often surface them immediately. There, Paul's
+ordering rule applies directly: **WORSE, MUCH WORSE, SAME** get the three inline
+slots and BETTER lives in-app only — the answers that change something urgent
+come first, and BETTER is both the rarest and the least time-critical.
+
+Action order everywhere else (in-app, expanded iOS): SAME · WORSE · MUCH WORSE ·
+BETTER, biggest touch targets available, no forms, no free text, no second step.
 
 ### 3. What the answers mean
 - `SAME` → new `status_events` row, unchanged severity, `kind: "recheck"`.
@@ -151,6 +200,24 @@ should offer it. Optional line appended to the prompt: "A team has been
 assigned to your area." Only when true — it must be tied to a real zone
 assignment (B4), never a free-text morale message, or it becomes a promise
 nobody can audit.
+
+### 6b. Tap time is the authoritative timestamp (Paul, 2026-08-17)
+An answer tapped offline and delivered later must be recorded at the time it was
+**tapped**, not the time it reached the server, and that is the value that must
+appear everywhere a human or a court might read it:
+
+- `status_events.answered_at` — device tap time, from the device clock. **This
+  is the timestamp the per-person history modal renders, the one the audit CSV
+  and audit PDF export, and the one the dashboard sorts and ages by.**
+- `status_events.received_at` — server arrival time, kept alongside it, never
+  substituted for the above.
+- When the two differ by more than a couple of minutes the surfaces say so
+  explicitly — "answered 14:20, reached us 15:05 (queued offline)" — because a
+  45-minute gap is itself operational information about signal at that location.
+- Device clocks can be wrong. If `answered_at` is later than `received_at` or
+  implausibly early, keep both, render `answered_at` with a "device clock
+  suspect" marker, and never silently correct it. Quietly rewriting a timestamp
+  on a rescue record is worse than showing an odd one.
 
 ### 7. Logging
 Every check sent, every answer, every non-response gets a `status_events` row
