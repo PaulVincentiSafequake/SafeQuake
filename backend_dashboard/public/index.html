@@ -3984,9 +3984,13 @@ window.QuakeAngelRescue = (function () {
     // Every pin carries the person's short code (item 2) — the same
     // string as the triage card and the team report table.
     var code = qgCode(u);
-    var tagText = v.kind === "immediate" ? ("SOS " + code)
-      : v.kind === "rescued" ? ("\u2713 " + code)
-      : code;
+    // C3: pin labels carry the name too. Truncated hard — a pin label is
+    // 56px of map furniture, not a text field.
+    var nm = u.displayName ? String(u.displayName).slice(0, 12) : "";
+    var ident = nm ? code + " " + nm : code;
+    var tagText = v.kind === "immediate" ? ("SOS " + ident)
+      : v.kind === "rescued" ? ("\u2713 " + ident)
+      : ident;
     var tagCls = v.kind === "immediate" ? "" : v.kind === "rescued" ? " rescued" : " plain";
     var tagH = tagText ? 13 : 0;
     var tag = tagText ? '<span class="qg-mrk-tag' + tagCls + '">' + tagText + "</span>" : "";
@@ -4272,7 +4276,13 @@ window.QuakeAngelRescue = (function () {
     var trappedLine = (u.status === "trapped" && u.trappedSince)
       ? "<br><b>Trapped for " + window.qgDurWords(Date.now() - new Date(u.trappedSince).getTime()) + "</b>"
       : "";
-    return '<span style="font-size:16px; font-weight:800; letter-spacing:1px">' + qgCode(u) + "</span>" +
+    // C3 (batch 6): code as headline with the first name beside it — the
+    // SAME string the triage card and the team report table use, so an
+    // operator reading a pin, a card and a report sees one identity.
+    var nameBit = u.displayName
+      ? ' <span style="font-size:14px; font-weight:700">' + u.displayName + "</span>"
+      : "";
+    return '<span style="font-size:16px; font-weight:800; letter-spacing:1px">' + qgCode(u) + "</span>" + nameBit +
       (u.displayName ? " — " + u.displayName : "") +
       '<br><span style="font-size:9px; color:#888">' + u.deviceId + "</span>" +
       "<br>" + statusLabel(u.status, u.severity) + sevChip + trappedLine +
