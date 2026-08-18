@@ -62,15 +62,21 @@ export default function AlertScreen() {
     unid?: string;
     siren?: string;
     reminder?: string;
+    test?: string;
   }>();
   const eventMagnitude = params.magnitude ?? null;
   const eventDistanceKm = params.distance_km ?? null;
   const eventIntensity = params.intensity ?? null;
   // Siren defaults OFF when the param is missing — deliberate fail-safe.
-  // Only the notification-tap handler (for kind=critical_alert) sets
-  // `siren=1`. Direct /alert navigation (e.g., from Home while debugging)
-  // therefore never triggers the siren unless explicitly requested.
+  // Set by the notification-tap handler for kind=critical_alert AND by the
+  // Trigger Test Alert button on Home, so a practice run exercises exactly
+  // the same playback path as the real thing (#169). Direct /alert
+  // navigation (e.g. dev browsing, preview taps) still stays silent.
   const shouldPlaySiren = params.siren === "1";
+  // A practice run from Home. Plays the siren exactly like a real alert
+  // (#169) but arms no check-in reminders (B1) — the two are separate
+  // decisions, and conflating them is what silenced the siren for 11 days.
+  const isTestRun = params.test === "1";
   // `reminder=1` is set by the tap handler when the user tapped a
   // check-in reminder notification. Currently unused in the render path
   // (reminders re-open the same check-in UI as fresh alerts) but the
@@ -148,8 +154,12 @@ export default function AlertScreen() {
         sirenPlayer.loop = true;
         sirenPlayer.volume = 1.0;
         sirenPlayer.play();
-      } catch {
-        // ignore — audio hardware may be claimed by another app
+        // #169: leaves a trace in the device log that playback was actually
+        // requested, so "the screen appeared but was silent" can be told
+        // apart from "the sound path never ran" without guessing.
+        console.log("[QuakeAngel] SIREN play() requested");
+      } catch (e) {
+        console.log("[QuakeAngel] SIREN play() threw:", (e as Error)?.message);
       }
     })();
   }, [sirenStatus.isLoaded, sirenPlayer]);
@@ -240,6 +250,7 @@ export default function AlertScreen() {
   // taps reach /alert with siren!=1 and arm nothing.
   useEffect(() => {
     if (!shouldPlaySiren) return;
+    if (isTestRun) return;   // practice run: siren yes, 11½ min of nagging no
     let cancelled = false;
     (async () => {
       const ok = await ensureNotificationSetup();
@@ -253,7 +264,7 @@ export default function AlertScreen() {
     return () => {
       cancelled = true;
     };
-  }, [shouldPlaySiren]);
+  }, [shouldPlaySiren, isTestRun]);
 
   const stopSiren = () => {
     // Flip the guard FIRST so any in-flight play effect bails out before

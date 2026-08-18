@@ -470,7 +470,27 @@ export default function HomeScreen() {
     //    real path is ready when it matters.
     ensureNotificationSetup().catch(() => {});
 
-    router.push("/alert");
+    // 4) #169 — the TEST TRIGGER MUST EXERCISE THE REAL SIREN PATH.
+    //
+    //    This navigated to a bare "/alert" and was therefore SILENT from
+    //    2026-08-06 (commit d3e8d81) onwards: that commit made the siren
+    //    opt-in via `?siren=1` to stop informational preview taps from
+    //    detonating it (BUG-2026-08-06-preview-tap-siren), and the test
+    //    trigger — which never passed the param — was silenced as
+    //    collateral damage. The screen appeared, the audio session was
+    //    configured, the file was loaded, and nothing played.
+    //
+    //    `siren=1` is now passed so the test uses the IDENTICAL playback
+    //    path as a real server-sent critical alert (see the
+    //    kind="critical_alert" branch in app/_layout.tsx). A test that
+    //    doesn't exercise the real path is worse than no test: it reports
+    //    success for code that has never run.
+    //
+    //    `test=1` keeps the B1 promise separate — the siren plays, but a
+    //    practice run still schedules no check-in reminders. Siren and
+    //    reminders are now two independent decisions rather than one flag
+    //    doing double duty, which is what let this hide.
+    router.push("/alert?siren=1&test=1");
     setTriggering(false);
   };
 

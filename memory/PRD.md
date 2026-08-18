@@ -921,3 +921,47 @@ modal, audit CSV and audit PDF must show and sort by; `received_at` kept
 alongside, never substituted; gaps > ~2 min rendered explicitly ("answered
 14:20, reached us 15:05 — queued offline"); implausible device clocks flagged,
 never silently corrected.
+
+---
+
+## 2026-08-17 (evening) — #169 SIREN SILENT ON TEST ALERT — FIXED (app 1.0.25)
+
+**Severity: highest to date.** Paul pressed Trigger Test Alert on 1.0.23, got the
+red EARTHQUAKE DETECTED screen in total silence. He had already ruled out assets
+(both siren files "loaded" + play from Diagnostics), phone audio, the
+critical-alert entitlement (a reminder arrived loud on a locked phone) and the
+Apple Watch stealing it.
+
+**ROOT CAUSE — a one-line entry-param bug, not an audio bug.**
+`app/index.tsx` navigated with `router.push("/alert")`. `app/alert.tsx` gates
+playback on `params.siren === "1"`. That gate was introduced 2026-08-06 in commit
+d3e8d81 to fix BUG-2026-08-06-preview-tap-siren (informational preview taps were
+detonating the siren) — the test trigger never passed the param and was silenced
+as collateral. Broken 2026-08-06 → 2026-08-17. Paul's earlier 3 Aug build DID
+siren on test, which predates the gate — that's why it looked like a regression.
+
+**Answers to Paul's three questions:**
+1. Same playback code, DIFFERENT entry params — and the params were the bug. Now
+   identical: test → `/alert?siren=1&test=1`, real → `/alert?siren=1&…`.
+2. No, the real path was NOT exercised by any test. Every test covered playback
+   internals (which were fine); nothing covered the entry params. Fixed:
+   `TestIssue169SirenPlaysOnTest` pins the params for BOTH paths.
+3. Not foreground/background related, and not tied to notification arrival —
+   tied to the alert screen's params. Any entry without `siren=1` was silent
+   regardless of app state.
+
+**Fix:** `router.push("/alert?siren=1&test=1")`; new `isTestRun` flag in
+alert.tsx so the siren and the check-in reminders are two INDEPENDENT decisions
+(conflating them is what let this hide — B1's reminder gate was keyed on
+`shouldPlaySiren`). Added a `console.log("[QuakeAngel] SIREN play() requested")`
+trace so "screen appeared but silent" can be distinguished from "sound path never
+ran" from a device log.
+
+**Proven, not asserted:** browser console capture shows `SIREN play() requested`
+with `?siren=1`, absent without the param, and **fires when the actual Home
+button is clicked**. 6 new tests incl. #13 (playsInSilentMode) and #31/#50
+(kill-switch) regression guards, plus a guard that the critical push payload
+still names the bundled `siren.caf` (the locked-phone siren is the PUSH sound —
+if the user never opens the app, that file is the only siren they get).
+
+**App version 1.0.25.** C1 design work paused as instructed.

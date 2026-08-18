@@ -2,7 +2,7 @@
   "expo": {
     "name": "Quake Angel",
     "slug": "frontend",
-    "version": "1.0.24",
+    "version": "1.0.25",
     "orientation": "portrait",
     "icon": "./assets/icons/quake_angel_ios_v3.png",
     "scheme": "frontend",

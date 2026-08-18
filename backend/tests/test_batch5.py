@@ -269,7 +269,7 @@ class TestAppSideInvariants:
     def test_app_version_bumped(self):
         import json
         cfg = json.load(open("/app/frontend/app.json"))
-        assert cfg["expo"]["version"] == "1.0.24"
+        assert cfg["expo"]["version"] == "1.0.25"
         info = cfg["expo"]["ios"]["infoPlist"]
         # export-compliance answer baked in so App Store Connect stops asking
         assert info["ITSAppUsesNonExemptEncryption"] is False
@@ -360,3 +360,68 @@ class TestIssue146TestEntries:
         fn = src.split('@api_router.post("/admin/purge-test-entries")')[1].split("@api_router.")[0]
         assert 'require_role(principal, "admin")' in fn
         assert '"event_type": "test_entries_purged"' in fn
+
+
+# ── #169: the siren did not play on a test alert (MOST SERIOUS TO DATE) ───
+class TestIssue169SirenPlaysOnTest:
+    """Root cause: Home's Trigger Test Alert navigated to a bare "/alert".
+
+    Commit d3e8d81 (2026-08-06) made the siren opt-in via `?siren=1` to
+    stop informational preview taps from detonating it
+    (BUG-2026-08-06-preview-tap-siren). The test trigger never passed the
+    param, so from that day the practice run showed the red screen in
+    total silence — and no test covered the ENTRY PARAMS, only the
+    playback code, so everything looked green.
+
+    These tests pin the entry params for BOTH paths. That is the layer
+    that broke; asserting playback internals again would not have caught
+    it.
+    """
+
+    def test_home_test_trigger_passes_siren_and_test_params(self):
+        home = open("/app/frontend/app/index.tsx").read()
+        assert 'router.push("/alert?siren=1&test=1")' in home
+        # the bare push is what caused #169 — it must not come back
+        assert 'router.push("/alert")' not in home
+
+    def test_real_critical_alert_tap_still_sets_siren(self):
+        layout = open("/app/frontend/app/_layout.tsx").read()
+        crit = layout.split('if (kind === "critical_alert") {')[1].split("return;")[0]
+        assert 'params.set("siren", "1")' in crit
+
+    def test_test_run_plays_siren_but_arms_no_reminders(self):
+        alert = open("/app/frontend/app/alert.tsx").read()
+        # siren gate depends ONLY on siren=1 …
+        assert 'const shouldPlaySiren = params.siren === "1";' in alert
+        assert 'const isTestRun = params.test === "1";' in alert
+        # … and the reminder gate is the one that checks the test flag,
+        # so the two decisions can never be conflated again.
+        rem = alert.split("if (!shouldPlaySiren) return;")[1].split("}, [shouldPlaySiren")[0]
+        assert "if (isTestRun) return;" in rem
+        # playback itself is unchanged and still traced
+        assert "sirenPlayer.play();" in alert
+        assert "SIREN play() requested" in alert
+
+    def test_silent_mode_override_still_in_place(self):
+        """#13 regression guard: the siren must ignore the ringer switch."""
+        alert = open("/app/frontend/app/alert.tsx").read()
+        layout = open("/app/frontend/app/_layout.tsx").read()
+        for src in (alert, layout):
+            assert "playsInSilentMode: true" in src
+
+    def test_answering_still_kills_the_siren(self):
+        """#31 / #50 regression guard."""
+        alert = open("/app/frontend/app/alert.tsx").read()
+        assert "shouldPlayRef.current = false" in alert
+        assert "SIREN KILL-SWITCH" in alert
+
+    def test_locked_phone_path_uses_bundled_siren_sound(self):
+        """If the user never opens the app, the SIREN IS THE PUSH SOUND —
+        so the critical payload must name a real bundled file, never
+        'default' (inconsistently honoured inside a critical dict)."""
+        from apns import _build_critical_payload
+        p = _build_critical_payload("t", "b", "/alert", magnitude=6.4)
+        assert p["aps"]["sound"]["critical"] == 1
+        assert p["aps"]["sound"]["name"] == "siren.caf"
+        assert p["aps"]["sound"]["volume"] == 1.0
+        assert os.path.exists("/app/frontend/assets/audio/siren.caf")
