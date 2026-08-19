@@ -11,6 +11,7 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.paulvincenti.quakeguard",
+      "buildNumber": "28",
       "entitlements": {
         "aps-environment": "production",
         "com.apple.developer.usernotifications.critical-alerts": true
@@ -31,6 +32,7 @@
       },
       "edgeToEdgeEnabled": true,
       "package": "com.paulvincenti.quakeguard",
+      "versionCode": 28,
       "permissions": [
         "ACCESS_COARSE_LOCATION",
         "ACCESS_FINE_LOCATION"
