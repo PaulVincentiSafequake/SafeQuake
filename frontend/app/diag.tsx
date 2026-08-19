@@ -253,7 +253,7 @@ export default function DiagScreen() {
             label="fixes in this build"
             value={
               (info?.app_version ?? "?") +
-              " — #208 R4 primary alert routes to check-in + unanswered-alert redirect on cold-open, #205 single-source event readings, #253 safety-instruction never clips, #245 type-to-confirm on trigger-alert, #212 caption honest at any zoom, #251 version rows share one source"
+              " — #208 R4 primary alert routes to check-in + unanswered-alert redirect on cold-open, #205 single-source event readings, #253 safety-instruction never clips, #245 type-to-confirm on trigger-alert, #199 clear-on-stand-down (silent push clears the unanswered flag), #212 caption honest at any zoom, #251 version rows share one source"
             }
           />
         </Section>

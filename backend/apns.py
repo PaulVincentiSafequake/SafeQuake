@@ -839,3 +839,76 @@ async def send_silent_cancel_reminders(
         "payload": payload,
         "events": [r.as_dict() for r in results],
     }
+
+
+
+async def send_stand_down(
+    db,
+    devices: list[dict],
+    *,
+    reason: str,
+    unid: Optional[str] = None,
+    idempotency_key: str,
+) -> dict:
+    """#199 / #202 (Batch 7 R4 companion, 2026-08-19 night — Paul):
+      "The unanswered-alert flag is cleared only by a check-in. If an
+       alert is stood down as a false alarm (#199) or an incident is
+       closed (#202), every phone would keep forcing people to the
+       check-in screen with no way out. Add a clear-on-stand-down
+       path now while you're in that code."
+
+    Silent push (`aps.content-available: 1`, apns-push-type=background,
+    priority 5). No sound, no siren, no banner. The mobile side reads
+    `kind: "alert_stood_down"` and clears its local unanswered-alert
+    marker; a mounted /alert screen switches to the calm "Alert called
+    off" panel via the alert bus.
+
+    Reasons are free-form strings but two are conventional:
+    "false_alarm" (from #199) and "incident_closed" (from #202). The
+    mobile side falls back to "false_alarm" wording if the value is
+    unknown, so a new reason string is never an operator-visible bug.
+
+    Optional `unid` limits the standdown to a specific incident — for
+    when we've made #202 aware of incident IDs. Missing `unid` is a
+    blanket standdown (clears any pending unanswered alert), which is
+    what #199 needs today.
+    """
+    if not devices:
+        return {"payload": None, "events": []}
+
+    cfg = await load_apns_config(db)
+    if cfg is None:
+        return {"payload": None, "events": [], "reason": "APNS_NOT_CONFIGURED"}
+
+    payload: dict = {
+        "aps": {"content-available": 1},
+        # Distinct kind so the client can distinguish stand-down from
+        # incident-closed if we ever want to word them differently on
+        # the /alert screen; for now they share the calm-panel path.
+        "kind": "incident_closed" if reason == "incident_closed" else "alert_stood_down",
+        "reason": reason,
+    }
+    if unid:
+        payload["unid"] = str(unid)
+
+    expiration = str(int(time.time()) + 600)
+    sem = asyncio.Semaphore(CONCURRENCY)
+
+    async def _guarded(d: dict) -> ApnsResult:
+        async with sem:
+            return await _send_one(
+                cfg,
+                user_id=d.get("user_id") or "",
+                device_token=d.get("device_token") or "",
+                payload=payload,
+                idempotency_key=idempotency_key,
+                apns_priority="5",
+                push_type="background",
+                apns_expiration=expiration,
+            )
+
+    results = await asyncio.gather(*(_guarded(d) for d in devices))
+    return {
+        "payload": payload,
+        "events": [r.as_dict() for r in results],
+    }

@@ -2042,6 +2042,111 @@ async def redact_notes(
 
 
 
+class StandDownBody(BaseModel):
+    # #199 (false alarm) or #202 (incident closed). Keep it two-way so
+    # a future incident-lifecycle change can drive both paths.
+    reason: str = "false_alarm"
+    unid: Optional[str] = None
+    confirmation_phrase: Optional[str] = None
+
+
+STAND_DOWN_CONFIRMATION = "STAND DOWN THIS ALERT"
+
+
+@api_router.post("/admin/alert/stand-down")
+async def alert_stand_down(
+    body: StandDownBody,
+    request: Request = None,
+    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
+):
+    """#199 / #202 (Batch 7 R4, 2026-08-19 night — Paul):
+      "Add a clear-on-stand-down path now while you're in that code."
+
+    Sends a SILENT push to every registered iOS device telling their
+    app to clear its local unanswered-alert marker. Optional `unid`
+    limits the stand-down to a specific incident (leave blank for a
+    blanket stand-down, which is what #199 needs today).
+
+    Same type-to-confirm pattern as #245. The typed phrase is written
+    to the audit log alongside the reason so an inquiry can
+    reconstruct exactly what happened. Case-insensitive check.
+    """
+    principal = await resolve_principal(request, x_admin_token, ADMIN_TRIGGER_PASSWORD, db)
+    require_role(principal, "admin", "operator")
+
+    typed = (body.confirmation_phrase or "").strip().upper()
+    expected = STAND_DOWN_CONFIRMATION.strip().upper()
+    if typed != expected:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Confirmation phrase missing or wrong. "
+                "Type the phrase shown in the confirm dialog exactly, "
+                "then send again."
+            ),
+        )
+
+    devices = await db.push_devices.find(
+        {}, {"_id": 0, "user_id": 1, "device_token": 1, "platform": 1},
+    ).to_list(20000)
+    ios = [
+        {"user_id": d.get("user_id") or "", "device_token": d.get("device_token") or ""}
+        for d in devices
+        if (d.get("platform") or "").lower() == "ios" and d.get("device_token")
+    ]
+
+    idempotency_key = f"stand-down-{uuid.uuid4().hex}"
+    from apns import send_stand_down as _send_stand_down
+    stand_result = (
+        await _send_stand_down(
+            db, ios,
+            reason=body.reason or "false_alarm",
+            unid=body.unid,
+            idempotency_key=idempotency_key,
+        )
+        if ios
+        else {"payload": None, "events": []}
+    )
+
+    await db.push_events.insert_one({
+        "kind": "alert_stood_down",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "triggered_by": audit_attribution(principal),
+        "reason": body.reason or "false_alarm",
+        "unid": body.unid,
+        "recipients": len(ios),
+        "apns_events": stand_result.get("events") or [],
+        "apns_payload": stand_result.get("payload"),
+        "confirmation_expected": STAND_DOWN_CONFIRMATION,
+        "confirmation_typed": body.confirmation_phrase or "",
+    })
+
+    return {
+        "ok": True,
+        "recipients": len(ios),
+        "reason": body.reason or "false_alarm",
+    }
+
+
+@api_router.get("/admin/alert/stand-down/preview")
+async def alert_stand_down_preview(
+    request: Request,
+    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
+):
+    """Count the operator sees before confirming a stand-down.
+
+    Same shape as /trigger-alert/preview so the dashboard modal has
+    one code path for both."""
+    principal = await resolve_principal(request, x_admin_token, ADMIN_TRIGGER_PASSWORD, db)
+    require_role(principal, "admin", "operator")
+    ios = await db.push_devices.count_documents({"platform": "ios"})
+    return {
+        "total": ios,
+        "confirmation_phrase": STAND_DOWN_CONFIRMATION,
+    }
+
+
+
 @api_router.get("/admin/trigger-alert/preview")
 async def trigger_alert_preview(
     request: Request,

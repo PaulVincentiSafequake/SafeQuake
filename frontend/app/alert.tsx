@@ -296,6 +296,12 @@ export default function AlertScreen() {
   // explicit "Update my status" button, because deciding for them is how you
   // end up with a rescue list that doesn't match reality.
   const [aftershock, setAftershock] = useState<CriticalAlertEvent | null>(null);
+  // #199/#202 (R4 companion): a stand-down push arriving on the alert
+  // bus flips this to true, which replaces the check-in buttons with a
+  // clear "stood down" panel and a home button. The user is NEVER
+  // stranded on a check-in screen for an incident that no longer
+  // exists. See handleStoodDown below.
+  const [stoodDown, setStoodDown] = useState<{ reason: string } | null>(null);
 
   useEffect(() => {
     setAlertScreenMounted(true);
@@ -303,7 +309,23 @@ export default function AlertScreen() {
   }, []);
 
   useEffect(() => {
-    return subscribeToAlerts((event) => {
+    return subscribeToAlerts((event: any) => {
+      // Stand-down / incident-closed signal (silent push received while
+      // this screen is mounted). Kill the siren immediately, mark the
+      // screen as stood down. Do NOT auto-navigate — let the user tap
+      // OK and go home themselves, so they see WHY the check-in is
+      // gone. Silent auto-nav in a stress situation reads as a bug.
+      if (event && event.stood_down) {
+        shouldPlayRef.current = false;
+        try { sirenPlayer.stop(); } catch { /* non-fatal */ }
+        setStoodDown({
+          reason:
+            typeof event.stood_down_reason === "string"
+              ? event.stood_down_reason
+              : "false_alarm",
+        });
+        return;
+      }
       setAftershock(event);
       // DELIBERATELY NO SIREN RE-ARM HERE.
       //
@@ -981,8 +1003,41 @@ export default function AlertScreen() {
             </View>
           )}
 
+          {/* #199/#202 (R4 companion): stand-down / incident-closed
+              overrides the check-in buttons. The user sees a plain
+              message saying the alert has been called off, plus a
+              single home button. Layered ABOVE the buttons rather
+              than removing them, so the button layout doesn't jump
+              around; the buttons still exist but they render below
+              this panel. */}
+          {stoodDown && (
+            <View
+              accessibilityRole="alert"
+              accessibilityLabel="This alert has been stood down. It was a false alarm."
+              style={styles.stoodDownPanel}
+            >
+              <Ionicons name="checkmark-circle" size={40} color="#4EE0A5" />
+              <Text style={styles.stoodDownTitle}>Alert called off.</Text>
+              <Text style={styles.stoodDownBody}>
+                {stoodDown.reason === "incident_closed"
+                  ? "The incident has been closed. You don't need to check in."
+                  : "This turned out to be a false alarm. You don't need to check in."}
+              </Text>
+              <Pressable
+                onPress={() => router.replace("/" as any)}
+                style={({ pressed }) => [
+                  styles.stoodDownHomeBtn,
+                  pressed && { opacity: 0.9 },
+                ]}
+                testID="stood-down-home-btn"
+              >
+                <Text style={styles.stoodDownHomeBtnText}>Back to home</Text>
+              </Pressable>
+            </View>
+          )}
+
           {/* Primary: I'M SAFE (green) — hidden once a trapped report was sent */}
-          {!(status === "sent" && outcome === "trapped") && (
+          {!(status === "sent" && outcome === "trapped") && !stoodDown && (
             <Pressable
               onPress={handleImSafe}
               disabled={status === "sending" || status === "sent"}
@@ -1022,7 +1077,7 @@ export default function AlertScreen() {
               entrapment into two questions for everyone was considered and
               rejected, because it adds a tap for the person least able to make
               one, and the dashboard records both facts separately anyway. */}
-          {status !== "sent" && (
+          {status !== "sent" && !stoodDown && (
             <Pressable
               onPress={openTriage}
               disabled={status === "sending"}
@@ -1523,6 +1578,50 @@ const styles = StyleSheet.create({
     fontWeight: "800",
     lineHeight: 24,
   },
+  // #199/#202 (Batch 7 R4 companion): stood-down panel styling. High
+  // contrast with clear success colour so the "you can stop" message
+  // reads as calm rather than as another alert.
+  stoodDownPanel: {
+    marginBottom: spacing.lg,
+    padding: spacing.lg,
+    borderRadius: radius.lg,
+    backgroundColor: "#0F2A1E",
+    borderWidth: 1,
+    borderColor: "#2A6F52",
+    alignItems: "center",
+  },
+  stoodDownTitle: {
+    marginTop: spacing.sm,
+    color: "#EAF7F0",
+    fontSize: 20,
+    fontWeight: "800",
+    letterSpacing: 0.3,
+  },
+  stoodDownBody: {
+    marginTop: 6,
+    color: "#B9D9C9",
+    fontSize: 15,
+    lineHeight: 21,
+    textAlign: "center",
+  },
+  stoodDownHomeBtn: {
+    marginTop: spacing.md,
+    paddingVertical: 14,
+    paddingHorizontal: 28,
+    borderRadius: 12,
+    backgroundColor: "#4EE0A5",
+    minHeight: 48,
+    minWidth: 200,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  stoodDownHomeBtnText: {
+    color: "#0B1F16",
+    fontSize: 16,
+    fontWeight: "800",
+    letterSpacing: 0.3,
+  },
+
   safeBtn: {
     flexDirection: "row",
     alignItems: "center",

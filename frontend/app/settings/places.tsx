@@ -57,7 +57,18 @@ export default function PlacesScreen() {
 
   const [name, setName] = useState("");
   const [search, setSearch] = useState("");
-  const [resolved, setResolved] = useState<{ latitude: number; longitude: number } | null>(null);
+  const [resolved, setResolved] = useState<{
+    latitude: number;
+    longitude: number;
+    /** The exact text the user searched when Find succeeded. If the
+     * search text later changes, resolved is cleared so the user cannot
+     * save a "Catania" label against Athens coordinates (#247). */
+    searchedAs: string;
+    /** Reverse-geocoded description of the coords (e.g. "Catania,
+     * Metropolitan City of Catania, Italy") so the user can see what
+     * the OS geocoder actually chose before committing. */
+    address: string | null;
+  } | null>(null);
   const [busy, setBusy] = useState<"find" | "save" | null>(null);
 
   const load = useCallback(async () => {
@@ -96,7 +107,27 @@ export default function PlacesScreen() {
         );
         return;
       }
-      setResolved({ latitude: hits[0].latitude, longitude: hits[0].longitude });
+      const { latitude, longitude } = hits[0];
+      // Reverse-geocode so the user sees what the OS actually chose.
+      // #247: users typed one city, the geocoder returned another, and
+      // the mismatch was only visible in the tiny "lat°, lng°" preview.
+      // Now the resolved address is shown in words so a wrong hit is
+      // obvious before Save.
+      let address: string | null = null;
+      try {
+        const parts = await Location.reverseGeocodeAsync({ latitude, longitude });
+        if (parts.length) {
+          const p = parts[0];
+          address = [p.city ?? p.subregion, p.region, p.country]
+            .filter((s) => !!s && s !== "")
+            .join(", ") || null;
+        }
+      } catch {
+        // Reverse geocode is a UX aid, not a safety gate. If it fails
+        // we still show the coordinates — the user can always tap Find
+        // again to re-check.
+      }
+      setResolved({ latitude, longitude, searchedAs: query, address });
       if (!name.trim()) setName(query.split(",")[0].trim().slice(0, 40));
     } catch {
       Alert.alert(
@@ -286,7 +317,17 @@ export default function PlacesScreen() {
                   <View style={styles.searchRow}>
                     <TextInput
                       value={search}
-                      onChangeText={setSearch}
+                      onChangeText={(t) => {
+                        setSearch(t);
+                        // #247 fix: any edit to the search text invalidates
+                        // the previously-resolved coordinates. Without this,
+                        // a user could type "Catania", tap Find, then change
+                        // the text to "Athens" and tap Save — and the saved
+                        // coordinates would still be Catania's.
+                        if (resolved && t.trim() !== resolved.searchedAs) {
+                          setResolved(null);
+                        }
+                      }}
                       placeholder="Catania, Sicily"
                       placeholderTextColor="#61708A"
                       style={styles.input}
@@ -315,10 +356,25 @@ export default function PlacesScreen() {
 
                   {resolved && (
                     <>
-                      <Text style={styles.resolvedText}>
-                        Found: {resolved.latitude.toFixed(3)}°,{" "}
-                        {resolved.longitude.toFixed(3)}°
-                      </Text>
+                      <View style={styles.resolvedCard} testID="place-resolved-card">
+                        <Ionicons name="location" size={16} color="#B3E5C4" />
+                        <View style={{ flex: 1 }}>
+                          <Text style={styles.resolvedHeader}>Found this place</Text>
+                          {resolved.address ? (
+                            <Text style={styles.resolvedAddress}>
+                              {resolved.address}
+                            </Text>
+                          ) : null}
+                          <Text style={styles.resolvedText}>
+                            {resolved.latitude.toFixed(3)}°,{" "}
+                            {resolved.longitude.toFixed(3)}°
+                          </Text>
+                          <Text style={styles.resolvedHint}>
+                            Not the right place? Change the search above and
+                            tap Find again.
+                          </Text>
+                        </View>
+                      </View>
                       <Text style={styles.inputLabel}>Call it</Text>
                       <TextInput
                         value={name}
@@ -422,7 +478,23 @@ const styles = StyleSheet.create({
     alignItems: "center", justifyContent: "center", paddingHorizontal: 16,
   },
   findBtnText: { color: "#0B1220", fontSize: 16, fontWeight: "800" },
-  resolvedText: { color: "#B3E5C4", fontSize: 13 },
+  resolvedCard: {
+    flexDirection: "row", gap: 10, alignItems: "flex-start",
+    backgroundColor: "#0F2818", borderColor: "#1F8A3A", borderWidth: 1,
+    borderRadius: 10, padding: 12, marginVertical: 4,
+  },
+  resolvedHeader: {
+    color: "#B3E5C4", fontSize: 11, fontWeight: "800",
+    letterSpacing: 0.5, textTransform: "uppercase", marginBottom: 4,
+  },
+  resolvedAddress: {
+    color: "#E7EDF5", fontSize: 15, fontWeight: "700", marginBottom: 2,
+  },
+  resolvedText: { color: "#B3E5C4", fontSize: 12 },
+  resolvedHint: {
+    color: "#8FA0BC", fontSize: 11, fontStyle: "italic",
+    marginTop: 6, lineHeight: 15,
+  },
   saveBtn: {
     minHeight: 50, borderRadius: 10, backgroundColor: "#1F8A3A",
     alignItems: "center", justifyContent: "center", marginTop: 4,

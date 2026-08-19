@@ -273,8 +273,8 @@ class TestAppSideInvariants:
     def test_app_version_bumped(self):
         import json
         cfg = json.load(open("/app/frontend/app.json"))
-        # #251 (Batch 7 R4): bumped to 1.0.31 with #208/#205/#253/#245 fixes.
-        assert cfg["expo"]["version"] == "1.0.31"
+        # #199 (Batch 7 R4 companion): bumped to 1.0.32 with clear-on-stand-down.
+        assert cfg["expo"]["version"] == "1.0.32"
         info = cfg["expo"]["ios"]["infoPlist"]
         # export-compliance answer baked in so App Store Connect stops asking
         assert info["ITSAppUsesNonExemptEncryption"] is False
@@ -491,22 +491,38 @@ class TestAftershockDoesNotDestroyAnswers:
 
     def test_aftershock_touches_no_answer_state(self):
         """The subscriber may set the notice and NOTHING else — no setStatus,
-        no clearing of severity/mobility, no closing of the sheets."""
+        no clearing of severity/mobility, no closing of the sheets.
+        (Signature updated in Batch 7 R4 when the stand-down branch was
+        added to the same subscriber — the invariant still holds for
+        the aftershock branch.)"""
         alert = open("/app/frontend/app/alert.tsx").read()
-        body = alert.split("return subscribeToAlerts((event) => {")[1].split("});", 1)[0]
+        # Slice the callback body: everything between `(event: any) => {`
+        # and the callback's own closing `    });` (four-space indent —
+        # the useEffect's `}, []);` is two-space, so the two are
+        # unambiguous).
+        body = alert.split("return subscribeToAlerts((event: any) => {", 1)[1] \
+                    .split("\n    });\n", 1)[0]
         assert "setAftershock(event);" in body
+        # The aftershock branch = everything AFTER the stand-down early
+        # return. Locking the invariant on that specific branch, so the
+        # stand-down branch is free to call sirenPlayer.stop() etc.
+        aftershock_branch = body.split("setAftershock(event);", 1)[1]
         for forbidden in ("setStatus(", "setTriageOpen(", "setMobilityOpen(",
                           "setChosenSeverity(", "setChosenMobility(",
                           "submitCheckIn("):
-            assert forbidden not in body, forbidden
+            assert forbidden not in aftershock_branch, forbidden
 
     def test_aftershock_never_resurrects_a_silenced_siren(self):
-        """#31/#50 shape: a siren that comes back after the user silenced it
-        teaches them the button doesn't work."""
+        """#31/#50 shape: a siren that comes back after the user silenced
+        it teaches them the button doesn't work. Locked on the AFTERSHOCK
+        branch specifically; the stand-down branch is allowed to CALL
+        sirenPlayer.stop() (killing the siren, not resurrecting it)."""
         alert = open("/app/frontend/app/alert.tsx").read()
-        body = alert.split("return subscribeToAlerts((event) => {")[1].split("});", 1)[0]
-        assert "sirenPlayer.play()" not in body
-        assert "shouldPlayRef.current = true" not in body
+        body = alert.split("return subscribeToAlerts((event: any) => {", 1)[1] \
+                    .split("\n    });\n", 1)[0]
+        aftershock_branch = body.split("setAftershock(event);", 1)[1]
+        assert "sirenPlayer.play()" not in aftershock_branch
+        assert "shouldPlayRef.current = true" not in aftershock_branch
 
     def test_already_answered_users_are_not_silently_reset(self):
         """An explicit Update button, never an automatic reset — the rescue

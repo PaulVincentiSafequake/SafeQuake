@@ -1868,6 +1868,16 @@
     <span aria-hidden="true">🔇</span>
     Stop reminder notifications
   </button>
+  <!-- #199 (Batch 7 R4): stand-down. Sends a silent push clearing the
+       unanswered-alert marker on every phone, so nobody is stuck on
+       the check-in screen for an alert that was called off. Same
+       type-to-confirm pattern as the trigger button. -->
+  <button id="qg-stand-down-btn" type="button"
+          aria-label="Call off the earthquake alert (false alarm)"
+          title="Tells every phone the alert has been called off. Silent — no siren, no banner. Used when the alert was a false alarm or the incident is closed.">
+    <span aria-hidden="true">🟢</span>
+    Call alert off (false alarm)
+  </button>
 </div>
 
 <div id="qg-banner" role="status" aria-live="assertive">
@@ -5813,6 +5823,86 @@ window.QuakeAngelRescue = (function () {
     // confirmTyping only resolves true when typed matches expected, so
     // we can send the phrase itself — it's what the operator typed.
     sendTriggerAlert(phrase);
+  });
+
+  // ── #199 (Batch 7 R4): stand-down / call off alert ──────────────────────
+  // Sends a silent push clearing the unanswered-alert marker on every
+  // phone. Same type-to-confirm pattern as the trigger button so the
+  // operator recognises the shape from other high-stakes actions.
+  var standDownBtn = document.getElementById("qg-stand-down-btn");
+  if (standDownBtn) standDownBtn.addEventListener("click", async function () {
+    if (!window.qaApi || !window.qaAuth || !window.qaAuth.jwt()) {
+      showBanner("err", "Please sign in first.", 6000);
+      if (window.qaAuth) window.qaAuth.signIn();
+      return;
+    }
+    var preview;
+    try {
+      var r = await window.qaApi("/api/admin/alert/stand-down/preview", { method: "GET" });
+      if (r.status === 401) {
+        showBanner("err", "You've been signed out. Please sign in again.", 6000);
+        if (window.qaAuth) window.qaAuth.signIn();
+        return;
+      }
+      if (!r.ok) {
+        showBanner("err", "Could not check how many phones would be told. Stand-down NOT sent.", 8000);
+        return;
+      }
+      preview = await r.json();
+    } catch (e) {
+      showBanner("err", "Network error preparing the stand-down. Nothing was sent.", 8000);
+      return;
+    }
+    var total = Number(preview && preview.total) || 0;
+    var phrase = (preview && preview.confirmation_phrase) || "STAND DOWN THIS ALERT";
+    if (total === 0) {
+      window.alert("No phones are registered on this system. There is nothing to stand down.");
+      return;
+    }
+    var body =
+      "This will tell " + total + " " + (total === 1 ? "phone" : "phones") +
+      " that the alert has been called off. Anyone stuck on the check-in " +
+      "screen will be shown a calm 'Alert called off' message and taken " +
+      "back home. Silent — no siren, no banner.\n\n" +
+      "Type this phrase exactly to confirm:";
+    var ok;
+    try {
+      ok = await confirmTyping("Call the alert off?", body, phrase);
+    } catch (_) { ok = false; }
+    if (!ok) return;
+
+    standDownBtn.disabled = true;
+    showBanner("ok", "Standing down…", 0);
+    try {
+      var res = await window.qaApi("/api/admin/alert/stand-down", {
+        method: "POST",
+        body: JSON.stringify({
+          reason: "false_alarm",
+          confirmation_phrase: phrase,
+        }),
+      });
+      if (res.status === 400) {
+        var d = await res.json().catch(function () { return {}; });
+        showBanner("err", (d && d.detail) || "The confirmation didn't match — stand-down NOT sent.", 8000);
+        return;
+      }
+      if (res.status === 401) {
+        showBanner("err", "You've been signed out. Please sign in again, then try again.", 6000);
+        if (window.qaAuth) window.qaAuth.signIn();
+        return;
+      }
+      if (!res.ok) {
+        showBanner("err", "The server rejected the request. Stand-down NOT sent. Please contact support.", 0);
+        return;
+      }
+      var data = await res.json();
+      var n = Number(data && data.recipients) || 0;
+      showBanner("ok", "Alert called off — sent silently to " + n + " " + (n === 1 ? "phone" : "phones") + ".", 8000);
+    } catch (e) {
+      showBanner("err", "Network error. Stand-down NOT sent. Check your connection and try again.");
+    } finally {
+      standDownBtn.disabled = false;
+    }
   });
 
   // ── False-alarm recovery: stop the repeating check-in reminders ─────────

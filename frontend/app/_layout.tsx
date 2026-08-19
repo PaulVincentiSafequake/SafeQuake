@@ -13,7 +13,7 @@ import { useIconFonts } from "@/src/hooks/use-icon-fonts";
 import { registerForPushNotifications } from "@/src/utils/push";
 import { getDeviceId } from "@/src/utils/checkin";
 import { flushRecheckQueue, submitRecheckAnswer } from "@/src/utils/recheck";
-import { markAlertActive } from "@/src/utils/activeAlert";
+import { clearActiveAlert, markAlertActive } from "@/src/utils/activeAlert";
 import { isAlertScreenMounted, publishAlert } from "@/src/utils/alertBus";
 import {
   cancelCheckInReminders,
@@ -335,6 +335,35 @@ export default function RootLayout() {
         return;
       }
 
+      // #199 / #202 companion path (2026-08-19 night, Paul):
+      //   "The unanswered-alert flag is cleared only by a check-in. If
+      //    an alert is stood down as a false alarm (#199) or an incident
+      //    is closed (#202), every phone would keep forcing people to
+      //    the check-in screen with no way out."
+      //
+      // A stand-down push clears the local unanswered-alert marker so
+      // the home screen stops redirecting to /alert. If the user is
+      // currently ON /alert, we publish through the alert bus so the
+      // screen can show a "This alert has been stood down" note and
+      // route them home cleanly — never leave them stranded on a
+      // check-in screen for an incident that no longer exists.
+      if (kind === "alert_stood_down" || kind === "incident_closed") {
+        clearActiveAlert().catch(() => {});
+        // If the user tapped this notification, take them home.
+        // Publishing on the bus is a signal to any mounted /alert
+        // screen; the home screen itself needs no message here.
+        publishAlert({
+          magnitude: null, distance_km: null, intensity: null,
+          depth_km: null, region: null, unid: data.unid ?? null,
+          // A synthetic "stood down" flag the alert screen watches for.
+          stood_down: true,
+          stood_down_reason:
+            typeof data.reason === "string" ? data.reason : "false_alarm",
+        } as any);
+        router.replace("/" as any);
+        return;
+      }
+
       // External web links still open in the browser.
       const explicit = data.action_url || data.deeplink;
       if (explicit && typeof explicit === "string" && explicit.startsWith("http")) {
@@ -399,6 +428,22 @@ export default function RootLayout() {
       const kind = String(data.kind ?? "").trim();
       if (kind === "cancel_reminders") {
         cancelCheckInReminders().catch(() => {});
+        return;
+      }
+      // #199/#202 (R4 companion): a stand-down / incident-closed push
+      // arriving while the app is open must clear the unanswered-alert
+      // flag AND signal any mounted /alert screen so the user isn't
+      // stuck on a check-in for an incident that no longer exists.
+      // Silent push — no navigation from the receipt path, only state.
+      if (kind === "alert_stood_down" || kind === "incident_closed") {
+        clearActiveAlert().catch(() => {});
+        publishAlert({
+          magnitude: null, distance_km: null, intensity: null,
+          depth_km: null, region: null, unid: data.unid ?? null,
+          stood_down: true,
+          stood_down_reason:
+            typeof data.reason === "string" ? data.reason : "false_alarm",
+        } as any);
         return;
       }
       if (kind === "critical_alert") {
