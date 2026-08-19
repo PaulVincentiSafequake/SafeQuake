@@ -53,6 +53,12 @@ export default function DiagScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
+  // #252 (Batch 7 D): the Diagnostics screen was shipping developer
+  // content — push tokens, device IDs, "HTTP 201", "bundled in the
+  // IPA" — to every user. That is developer content on a consumer
+  // screen. New default: show a human "Is this working?" summary and
+  // hide all technical rows behind an explicit reveal.
+  const [showTech, setShowTech] = useState(false);
 
   // Test-siren players. We keep two independent players so the user can
   // validate BOTH bundled audio assets (the .caf used by APNs Critical
@@ -215,45 +221,81 @@ export default function DiagScreen() {
         }
       >
         <View style={styles.header}>
-          <Text style={styles.h1}>Push Diagnostics</Text>
+          <Text style={styles.h1}>Is this working?</Text>
           <Text style={styles.subtitle}>
-            Verify this device&apos;s identity and push registration state.
+            A plain-language health check for the parts that keep you
+            alerted. Pull down to refresh.
           </Text>
         </View>
 
-        <Section title="Device identity">
-          <Row label="user_id" value={info?.user_id ?? "—"} mono onPress={onCopyUserId} />
-          {/* Rescue code — the same 5-char tail shown prominently on the
-              main screen and on the persistent lock-screen card fired
-              after a trapped submission. Displayed here so support can
-              read it back to a caller over the phone. */}
+        {/* #252 (Batch 7 D): the top of the screen is now a human
+            "yes/no" health summary. Every line reads as an answer the
+            person could give out loud on the phone — no tokens, no
+            HTTP codes, no "bundled in the IPA". */}
+        <Section title="Health check">
+          {(() => {
+            const critical = perm?.ios?.allowsCriticalAlerts ?? null;
+            const alertsOn = !!(perm?.granted && perm?.ios?.allowsAlert !== false);
+            const soundOn = !!perm?.ios?.allowsSound;
+            const registered = !!info?.token_length && info.token_length > 0;
+            const lastStatus = String(info?.last_register_status ?? "");
+            // Ok if the last registration reached the server — the
+            // backend confirms with a 2xx (usually 201). We check the
+            // FIRST digit rather than the exact code so a switch from
+            // 201 to 200 doesn't silently break the summary.
+            const serverOk = /^2\d\d/.test(lastStatus);
+            const overallReady = alertsOn && registered && serverOk;
+            return (
+              <>
+                <HealthRow
+                  ok={overallReady}
+                  yes="Yes — this app is ready to alert you"
+                  no="Not quite — something below needs attention"
+                />
+                <HealthRow
+                  ok={alertsOn}
+                  yes="Alerts are switched on for this app"
+                  no="Alerts are switched off. Open Settings › Notifications › Quake Angel and turn them on."
+                />
+                {Platform.OS === "ios" ? (
+                  <HealthRow
+                    ok={!!critical}
+                    yes="This app can override Do Not Disturb (Critical Alerts)"
+                    no="Critical Alerts are off — a real alarm will still ring, but a call or Do Not Disturb can mute it. Open Settings › Notifications › Quake Angel and turn on Critical Alerts."
+                  />
+                ) : null}
+                <HealthRow
+                  ok={soundOn}
+                  yes="This app can make sound"
+                  no="Sound for this app is off — the siren can't play. Turn it on in Settings."
+                />
+                <HealthRow
+                  ok={registered}
+                  yes="Your phone is signed up to receive alerts"
+                  no="Your phone hasn't finished signing up. Tap Try again below."
+                />
+                <HealthRow
+                  ok={serverOk}
+                  yes="The server has confirmed it can reach your phone"
+                  no="The server hasn't confirmed reach yet. Pull down to refresh, or tap Try again below."
+                />
+              </>
+            );
+          })()}
+        </Section>
+
+        <Section title="This build">
+          {/* #251 (Batch 7 R4): the leading version number here reads
+              from the SAME `info.app_version` as the version row, so
+              the two are guaranteed to agree. The DESCRIPTION stays a
+              hard-coded string so a build shipping without the fix is
+              caught by the mismatch. */}
+          <Row label="Version" value={info?.app_version ?? "—"} />
           <Row
-            label="rescue code"
-            value={
-              info?.user_id
-                ? String(info.user_id).slice(-5).toUpperCase()
-                : "—"
-            }
-            mono
-          />
-          <Row label="platform" value={info?.platform?.toUpperCase() ?? "—"} />
-          <Row label="app version" value={info?.app_version ?? "—"} />
-          <Row label="build number" value={info?.build_number ?? "—"} />
-          {/* #251 (Batch 7 R4): the leading version number here now
-              reads from the SAME `info.app_version` as the two rows
-              above — so all three rows are guaranteed to agree. The
-              DESCRIPTION of the fixes stays a hard-coded string (Paul
-              2026-08-18: "what must never change is that it is
-              HARD-CODED, not derived from the version — that is how a
-              build shipping without the fix gets caught"), but the
-              version number is a single source. Last round the two
-              got out of sync: shipped as 1.0.29 while this row still
-              read 1.0.30, and Paul nearly skipped the build. */}
-          <Row
-            label="fixes in this build"
+            label="What's fixed in it"
             value={
               (info?.app_version ?? "?") +
-              " — #208 R4 primary alert routes to check-in + unanswered-alert redirect on cold-open, #205 single-source event readings, #253 safety-instruction never clips, #245 type-to-confirm on trigger-alert, #199 clear-on-stand-down (silent push clears the unanswered flag), #212 caption honest at any zoom, #251 version rows share one source"
+              " — #208 R4 primary alert routes to check-in, #245 type-to-confirm on trigger, #199 clear-on-stand-down, #247 saved place no longer points at wrong city, #249 saved places on the map, #211 recency-ramp map key, #243 zoom in to epicentre, #250 not-responding wording, #252 human-first diagnostics, #244 honest test-button wording."
             }
           />
         </Section>
@@ -264,9 +306,15 @@ export default function DiagScreen() {
             within about a second of the red screen appearing, and stop the
             instant you tap I&apos;M SAFE or choose an injury option.
             {"\n\n"}
-            If the row above is missing, this build predates the #169 fix and
-            the test button will be silent — the fix is app-side, so no
-            backend publish can change that.
+            <Text style={styles.helpBold}>What this test proves:</Text> the
+            red alert screen, the siren audio, and the check-in buttons all
+            work on THIS phone right now.
+            {"\n"}
+            <Text style={styles.helpBold}>What it does NOT prove:</Text> that
+            a real push notification would reach your phone from the server.
+            That path involves Apple/Google, and we can only confirm it end
+            to end from the dashboard&apos;s Trigger Earthquake Alert button
+            or by watching a real notification arrive.
           </Text>
         </Section>
 
@@ -279,13 +327,12 @@ export default function DiagScreen() {
             {"\n\n"}
             What you should see: the screen does NOT restart. An amber notice
             appears at the top saying another alert arrived, and your
-            part-finished answer is exactly where you left it. If you had
-            already sent a report, the notice says so and offers an Update
-            button instead — it never resets you on its own.
+            part-finished answer is exactly where you left it.
             {"\n\n"}
-            This uses the same internal path a real second alert uses. The one
-            thing it cannot test is Apple&apos;s delivery of the second
-            notification.
+            This uses the same internal path a real second alert uses. The
+            one thing it cannot test is Apple&apos;s delivery of the second
+            notification — that's a network round-trip, and this rehearsal
+            runs entirely on your phone.
           </Text>
         </Section>
 
@@ -297,74 +344,12 @@ export default function DiagScreen() {
           <Text style={styles.btnGhostText}>Rehearse an aftershock mid-answer</Text>
         </TouchableOpacity>
 
-        <Section title="Push token">
-          <Row
-            label="fingerprint"
-            value={info?.token_fingerprint ?? "(no token)"}
-            mono
-            onPress={info?.device_token ? onCopyToken : undefined}
-          />
-          <Row label="length" value={String(info?.token_length ?? 0)} />
-          <Row
-            label="expected"
-            value={
-              info?.platform === "ios"
-                ? "~64 hex chars (APNs)"
-                : "~150+ chars (FCM)"
-            }
-            hint
-          />
-        </Section>
-
-        <Section title="Permissions">
-          <Row
-            label="status"
-            value={perm?.status ?? "—"}
-            valueColor={perm?.granted ? "#1F8A3A" : "#c21818"}
-          />
-          <Row label="canAskAgain" value={perm?.canAskAgain ? "yes" : "no"} />
-          {perm?.ios ? (
-            <>
-              <Row label="alert" value={perm.ios.allowsAlert ? "yes" : "no"} />
-              <Row label="sound" value={perm.ios.allowsSound ? "yes" : "no"} />
-              <Row
-                label="critical alerts"
-                value={perm.ios.allowsCriticalAlerts ? "yes" : "no"}
-                valueColor={perm.ios.allowsCriticalAlerts ? "#1F8A3A" : "#c21818"}
-              />
-            </>
-          ) : null}
-        </Section>
-
-        <Section title="Registration">
-          <Row label="backend" value={info?.backend_url ?? "—"} mono />
-          <Row label="last at" value={info?.last_registered_at ?? "never"} />
-          <Row label="last status" value={info?.last_register_status ?? "—"} />
-        </Section>
-
-        {Platform.OS !== "android" ? (
-          <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Apple Watch behavior</Text>
-            <AppleWatchNote variant="compact" />
-          </View>
-        ) : null}
-
-        <Section title="Test siren (local playback)">
-          <Row
-            label="siren.caf"
-            value={cafStatus?.isLoaded ? (cafPlaying ? "playing" : "loaded") : "not loaded"}
-            valueColor={cafStatus?.isLoaded ? "#1F8A3A" : "#c21818"}
-          />
-          <Row
-            label="siren.mp3"
-            value={mp3Status?.isLoaded ? (mp3Playing ? "playing" : "loaded") : "not loaded"}
-            valueColor={mp3Status?.isLoaded ? "#1F8A3A" : "#c21818"}
-          />
-          <Row
-            label="hint"
-            value="Plays locally to verify assets are bundled in the IPA."
-            hint
-          />
+        <Section title="Test siren on this phone">
+          <Text style={styles.help}>
+            Plays the siren sound locally so you can check it&apos;s not
+            silenced by your phone&apos;s ringer or volume settings. This
+            plays entirely on your device — no notification is sent.
+          </Text>
         </Section>
 
         <View style={styles.testRow}>
@@ -374,7 +359,7 @@ export default function DiagScreen() {
             activeOpacity={0.85}
           >
             <Text style={styles.testBtnText}>
-              {cafPlaying ? "Stop .caf" : "Play siren.caf"}
+              {cafPlaying ? "Stop siren" : "Play siren (alert sound)"}
             </Text>
           </TouchableOpacity>
           <TouchableOpacity
@@ -383,7 +368,7 @@ export default function DiagScreen() {
             activeOpacity={0.85}
           >
             <Text style={styles.testBtnText}>
-              {mp3Playing ? "Stop .mp3" : "Play siren.mp3"}
+              {mp3Playing ? "Stop siren" : "Play siren (in-app)"}
             </Text>
           </TouchableOpacity>
         </View>
@@ -400,9 +385,16 @@ export default function DiagScreen() {
           disabled={busy !== null}
         >
           <Text style={styles.btnText}>
-            {busy === "registering" ? "Re-registering…" : "Re-register with backend"}
+            {busy === "registering" ? "Trying…" : "Try again"}
           </Text>
         </TouchableOpacity>
+
+        {Platform.OS !== "android" ? (
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>Apple Watch behavior</Text>
+            <AppleWatchNote variant="compact" />
+          </View>
+        ) : null}
 
         <TouchableOpacity
           style={styles.btnGhost}
@@ -410,6 +402,100 @@ export default function DiagScreen() {
         >
           <Text style={styles.btnGhostText}>Reset Apple Watch reminder</Text>
         </TouchableOpacity>
+
+        {/* #252 (Batch 7 D): all technical rows live behind an explicit
+            reveal. If a support caller needs a rescue code or token
+            fingerprint they can find it in one tap; nothing else needs
+            to see it. */}
+        <TouchableOpacity
+          style={styles.techToggle}
+          onPress={() => setShowTech((v) => !v)}
+          accessibilityRole="button"
+          accessibilityState={{ expanded: showTech }}
+          testID="diag-tech-toggle"
+        >
+          <Text style={styles.techToggleText}>
+            {showTech ? "Hide technical details" : "Show technical details (for support)"}
+          </Text>
+        </TouchableOpacity>
+
+        {showTech ? (
+          <>
+            <Section title="For support">
+              <Row label="Rescue code" value={
+                info?.user_id ? String(info.user_id).slice(-5).toUpperCase() : "—"
+              } mono />
+              <Row label="Device identifier" value={info?.user_id ?? "—"} mono onPress={onCopyUserId} />
+              <Row label="Phone type" value={info?.platform?.toUpperCase() ?? "—"} />
+              <Row label="Build number" value={info?.build_number ?? "—"} />
+            </Section>
+
+            <Section title="Push token">
+              <Row
+                label="Fingerprint"
+                value={info?.token_fingerprint ?? "(no token)"}
+                mono
+                onPress={info?.device_token ? onCopyToken : undefined}
+              />
+              <Row label="Length" value={String(info?.token_length ?? 0)} />
+              <Row
+                label="Expected"
+                value={
+                  info?.platform === "ios"
+                    ? "~64 hex chars (APNs)"
+                    : "~150+ chars (FCM)"
+                }
+                hint
+              />
+            </Section>
+
+            <Section title="Permissions">
+              <Row
+                label="Status"
+                value={perm?.status ?? "—"}
+                valueColor={perm?.granted ? "#1F8A3A" : "#c21818"}
+              />
+              <Row label="Can ask again" value={perm?.canAskAgain ? "yes" : "no"} />
+              {perm?.ios ? (
+                <>
+                  <Row label="Alert" value={perm.ios.allowsAlert ? "yes" : "no"} />
+                  <Row label="Sound" value={perm.ios.allowsSound ? "yes" : "no"} />
+                  <Row
+                    label="Critical Alerts"
+                    value={perm.ios.allowsCriticalAlerts ? "yes" : "no"}
+                    valueColor={perm.ios.allowsCriticalAlerts ? "#1F8A3A" : "#c21818"}
+                  />
+                </>
+              ) : null}
+            </Section>
+
+            <Section title="Registration with server">
+              <Row label="Server" value={info?.backend_url ?? "—"} mono />
+              <Row label="Last attempt" value={info?.last_registered_at ?? "never"} />
+              <Row
+                label="Last result"
+                value={(() => {
+                  const s = String(info?.last_register_status ?? "");
+                  if (!s || s === "—") return "—";
+                  if (/^2\d\d/.test(s)) return "OK — server confirmed";
+                  if (/^4\d\d/.test(s)) return "Not accepted — try Re-register above";
+                  if (/^5\d\d/.test(s)) return "Server had trouble — will retry";
+                  return s;
+                })()}
+              />
+              <Row
+                label="Siren asset"
+                value={cafStatus?.isLoaded ? "loaded" : "not loaded"}
+                valueColor={cafStatus?.isLoaded ? "#1F8A3A" : "#c21818"}
+              />
+              <Row
+                label="In-app siren"
+                value={mp3Status?.isLoaded ? "loaded" : "not loaded"}
+                valueColor={mp3Status?.isLoaded ? "#1F8A3A" : "#c21818"}
+              />
+            </Section>
+          </>
+        ) : null}
 
         <TouchableOpacity
           style={styles.btnGhost}
@@ -419,7 +505,7 @@ export default function DiagScreen() {
         </TouchableOpacity>
 
         <Text style={styles.footer}>
-          Pull down to refresh. Long-press user_id / token fingerprint to share.
+          Pull down to refresh. Long-press a code to share it with support.
         </Text>
       </ScrollView>
     </SafeAreaView>
@@ -431,6 +517,21 @@ function Section({ title, children }: { title: string; children: React.ReactNode
     <View style={styles.section}>
       <Text style={styles.sectionTitle}>{title}</Text>
       <View style={styles.card}>{children}</View>
+    </View>
+  );
+}
+
+/** #252 (Batch 7 D): a single yes/no line in the "Is this working?"
+ *  panel. Green tick + short sentence when things are OK; red circle
+ *  + plain-language "what to do next" when they aren't. Never shows
+ *  a status code, token, or URL. */
+function HealthRow({ ok, yes, no }: { ok: boolean; yes: string; no: string }) {
+  return (
+    <View style={styles.healthRow}>
+      <Text style={[styles.healthGlyph, ok ? styles.healthGlyphOk : styles.healthGlyphBad]}>
+        {ok ? "✓" : "✕"}
+      </Text>
+      <Text style={styles.healthText}>{ok ? yes : no}</Text>
     </View>
   );
 }
@@ -483,6 +584,38 @@ const styles = StyleSheet.create({
   scrollBody: { padding: 16, paddingBottom: 40 },
   header: { marginBottom: 16 },
   help: { color: "#8a94a6", fontSize: 13, lineHeight: 19 },
+  helpBold: { color: "#e6e8ec", fontWeight: "700" },
+  healthRow: {
+    flexDirection: "row",
+    gap: 12,
+    alignItems: "flex-start",
+    paddingVertical: 10,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: "#242a34",
+  },
+  healthGlyph: {
+    fontSize: 18,
+    fontWeight: "800",
+    lineHeight: 22,
+    width: 22,
+    textAlign: "center",
+  },
+  healthGlyphOk: { color: "#1F8A3A" },
+  healthGlyphBad: { color: "#c21818" },
+  healthText: { color: "#e6e8ec", fontSize: 14, flex: 1, lineHeight: 20 },
+  techToggle: {
+    borderRadius: 10,
+    paddingVertical: 12,
+    alignItems: "center",
+    marginTop: 20,
+    marginBottom: 4,
+    borderWidth: 1,
+    borderStyle: "dashed",
+    borderColor: "#3a4051",
+  },
+  techToggleText: {
+    color: "#8a94a6", fontSize: 13, fontWeight: "600",
+  },
   h1: { color: "#fff", fontSize: 22, fontWeight: "700" },
   subtitle: { color: "#8a94a6", fontSize: 13, marginTop: 4 },
   section: { marginBottom: 16 },

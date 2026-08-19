@@ -11,8 +11,11 @@
  * refuses to serve to web bundles, even from inside a Platform.OS
  * guard. So the import path itself has to be platform-conditional.
  */
-import type { MapCanvasProps } from "./MapCanvas.types";
+import { forwardRef } from "react";
+import type { MapCanvasProps, MapCanvasHandle } from "./MapCanvas.types";
 
-export default function MapCanvas(_props: MapCanvasProps): null {
+export default forwardRef<MapCanvasHandle, MapCanvasProps>(function MapCanvas(_props, _ref): null {
+  // The imperative handle is a no-op on web — the seismic-map screen
+  // uses a list layout there, so animateToWideView has nothing to do.
   return null;
-}
+});

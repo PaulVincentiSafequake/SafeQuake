@@ -876,6 +876,16 @@ export default function HomeScreen() {
             {triggering ? "TRIGGERING…" : "TRIGGER TEST ALERT"}
           </Text>
         </Pressable>
+        {/* #244 (Batch 7 D): honest wording about what this test does
+            and does not prove. Full APNs round-trip (dashboard →
+            Apple/Google → this phone) is a bigger cut and lives in
+            the diagnostics screen. This one line prevents the "I
+            tested the alert and it works" reading from concealing
+            the fact that the network path was never exercised. */}
+        <Text style={styles.triggerHonestyNote}>
+          Plays the siren and check-in screen on THIS phone. It does not send
+          a real notification to anyone.
+        </Text>
       </View>
 
       {/* Apple Watch help modal — opened from the post-update reminder card */}
@@ -1228,6 +1238,16 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: "800",
     letterSpacing: 2,
+  },
+  // #244 (Batch 7 D): honest disclaimer under the test button.
+  triggerHonestyNote: {
+    color: colors.onSurfaceTertiary,
+    fontSize: 11,
+    lineHeight: 15,
+    textAlign: "center",
+    marginTop: 6,
+    paddingHorizontal: spacing.md,
+    fontStyle: "italic",
   },
   diagLinkRow: {
     flexDirection: "row",

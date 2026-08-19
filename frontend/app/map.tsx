@@ -35,7 +35,7 @@
  *    development, and matches the "informational" framing of the whole
  *    feature. The platform split lives in `src/components/MapCanvas.*`.
  */
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   View, Text, StyleSheet, TouchableOpacity, ScrollView, ActivityIndicator, Platform, RefreshControl,
 } from "react-native";
@@ -45,7 +45,7 @@ import { useLocalSearchParams, useRouter } from "expo-router";
 import { getDeviceId } from "@/src/utils/checkin";
 import { parseUtc } from "@/src/utils/time";
 import MapCanvas from "@/src/components/MapCanvas";
-import type { MapCanvasEvent } from "@/src/components/MapCanvas.types";
+import type { MapCanvasEvent, MapCanvasHandle } from "@/src/components/MapCanvas.types";
 
 const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL ?? "";
 
@@ -105,6 +105,38 @@ function magnitudeColor(m: number | null): string {
   return "#5D8AB8";
 }
 
+// #211 (Batch 7 D5): USGS-style recency ramp. Colour is a function of
+// how RECENT the event is relative to the currently-selected window,
+// not its magnitude. Red = brand new (top quarter of the window),
+// green = oldest still in view. Ramp is RELATIVE to the window, so a
+// "red" pin at 7d means the last day and a bit; at 1h it means the
+// last fifteen minutes. The visible legend at the bottom of the map
+// spells this out with the window's actual name.
+const RECENCY_STOPS = [
+  { color: "#D9251C", label: "Just now" },        // top ~25% of the window
+  { color: "#F08A2E", label: "Recent" },          // 25–50%
+  { color: "#F4C842", label: "A while back" },    // 50–75%
+  { color: "#2E7D32", label: "Oldest in view" },  // 75–100%
+];
+
+function recencyColor(observedIso: string, windowHours: number): string {
+  const then = parseUtc(observedIso)?.getTime();
+  if (!then || !Number.isFinite(then)) return RECENCY_STOPS[3].color;
+  const ageHours = Math.max(0, (Date.now() - then) / 3_600_000);
+  const frac = Math.min(1, ageHours / Math.max(0.0001, windowHours));
+  if (frac < 0.25) return RECENCY_STOPS[0].color;
+  if (frac < 0.50) return RECENCY_STOPS[1].color;
+  if (frac < 0.75) return RECENCY_STOPS[2].color;
+  return RECENCY_STOPS[3].color;
+}
+
+function windowLabel(hours: number): string {
+  if (hours <= 1) return "the last hour";
+  if (hours <= 24) return "the last 24 hours";
+  if (hours <= 168) return "the last 7 days";
+  return "the last 30 days";
+}
+
 function timeAgo(iso: string): string {
   const then = parseUtc(iso)?.getTime() ?? NaN;
   if (!Number.isFinite(then)) return "";
@@ -155,6 +187,11 @@ export default function SeismicMapScreen() {
   // #249 (Batch 7 D): user's saved places, rendered as small markers so
   // "the place I care about" is visible in relation to real activity.
   const [places, setPlaces] = useState<SavedPlace[]>([]);
+  // #243 (Batch 7 D6): a ref to the native map so the "See wide view"
+  // button can animate back out to the basin overview after the user
+  // opens the map focused on a single event.
+  const mapRef = useRef<MapCanvasHandle>(null);
+  const [wideView, setWideView] = useState<boolean>(!focus);
 
   const fetchEvents = useCallback(async (hours: WindowChoice) => {
     setErrText(null);
@@ -251,6 +288,14 @@ export default function SeismicMapScreen() {
   const presetRadiusM = PRESET_RADIUS_M[preset];
   const presetIsSolid = preset === "everything";
 
+  // #211 (Batch 7 D5): tag each event with its recency colour once,
+  // window-aware, so both the native map and the web-fallback list
+  // read from the same computation.
+  const eventsColored: MapEvent[] = events.map((ev) => ({
+    ...ev,
+    recency_color: recencyColor(ev.observed_at, windowHours),
+  }));
+
   const headerNode = (
     <View style={styles.header}>
       <TouchableOpacity
@@ -337,6 +382,45 @@ export default function SeismicMapScreen() {
     </View>
   );
 
+  // #211 (Batch 7 D5): always-visible key. Circle SIZE = magnitude,
+  // COLOUR = recency (USGS convention). Names the current window so
+  // "red" is honest: at 7d it means the last day and a half, at 1h
+  // it means the last fifteen minutes. The one-line summary at the
+  // top answers "what do these colours mean?" before the reader has
+  // to read the swatches.
+  const legendNode = (
+    <View
+      style={styles.legend}
+      accessibilityRole="summary"
+      accessibilityLabel={`Map key: bigger circles are stronger, redder circles are more recent, within ${windowLabel(windowHours)}`}
+    >
+      <Text style={styles.legendHeadline}>
+        Bigger = stronger. Redder = more recent, within {windowLabel(windowHours)}.
+      </Text>
+      <View style={styles.legendRow}>
+        <Text style={styles.legendCaption}>Size (magnitude):</Text>
+        <View style={styles.legendSizeSwatch}>
+          <View style={[styles.legendSizeDot, { width: 8,  height: 8,  borderRadius: 4  }]} />
+          <View style={[styles.legendSizeDot, { width: 12, height: 12, borderRadius: 6  }]} />
+          <View style={[styles.legendSizeDot, { width: 18, height: 18, borderRadius: 9  }]} />
+          <View style={[styles.legendSizeDot, { width: 24, height: 24, borderRadius: 12 }]} />
+        </View>
+        <Text style={styles.legendCaptionRight}>M2 · M3 · M4 · M5+</Text>
+      </View>
+      <View style={styles.legendRow}>
+        <Text style={styles.legendCaption}>Colour (age within {windowLabel(windowHours)}):</Text>
+      </View>
+      <View style={styles.legendRampRow}>
+        {RECENCY_STOPS.map((s) => (
+          <View key={s.color} style={styles.legendRampCell}>
+            <View style={[styles.legendRampSwatch, { backgroundColor: s.color }]} />
+            <Text style={styles.legendRampLabel}>{s.label}</Text>
+          </View>
+        ))}
+      </View>
+    </View>
+  );
+
   // ----- Web fallback -----
   if (Platform.OS === "web") {
     return (
@@ -400,6 +484,7 @@ export default function SeismicMapScreen() {
           </ScrollView>
         )}
 
+        {legendNode}
         {attributionNode}
       </SafeAreaView>
     );
@@ -414,7 +499,8 @@ export default function SeismicMapScreen() {
 
       <View style={{flex: 1}}>
         <MapCanvas
-          events={events}
+          ref={mapRef}
+          events={eventsColored}
           center={MALTA}
           focus={focus}
           highlightExternalId={focusParams.focus_unid ?? null}
@@ -424,6 +510,30 @@ export default function SeismicMapScreen() {
           onRegionChange={(lat, lng) => setMapCenter({ lat, lng })}
           places={places}
         />
+        {/* #243 (Batch 7 D6): "See wide view" pill appears when we
+            landed focused on an event. Spec wording: "Zoom in to where
+            it happened (epicentre)" is what the source button says;
+            here we offer the reverse. */}
+        {focus && !wideView ? (
+          <View style={styles.wideBtnWrap} pointerEvents="box-none">
+            <TouchableOpacity
+              style={styles.wideBtn}
+              onPress={() => {
+                mapRef.current?.animateToWideView();
+                setWideView(true);
+              }}
+              accessibilityRole="button"
+              accessibilityLabel="See wider view of the Mediterranean"
+              testID="map-wide-view-btn"
+            >
+              <Ionicons name="contract-outline" size={16} color="#0B1220" />
+              <Text style={styles.wideBtnText}>See wider view</Text>
+            </TouchableOpacity>
+            <Text style={styles.wideBtnCaption}>
+              Zoomed in to where it happened (epicentre)
+            </Text>
+          </View>
+        ) : null}
         {loading && (
           <View style={styles.mapLoader}>
             <ActivityIndicator color="#5DB1FF" />
@@ -431,6 +541,7 @@ export default function SeismicMapScreen() {
         )}
       </View>
 
+      {legendNode}
       {attributionNode}
     </SafeAreaView>
   );
@@ -482,6 +593,27 @@ const styles = StyleSheet.create({
     borderRadius: 999,
   },
 
+  // #243 (Batch 7 D6): "See wider view" pill overlaid at the bottom
+  // of the map when we landed focused on an event, plus the caption
+  // that confirms why we're zoomed in.
+  wideBtnWrap: {
+    position: "absolute", bottom: 16, left: 0, right: 0,
+    alignItems: "center", gap: 6,
+  },
+  wideBtn: {
+    flexDirection: "row", alignItems: "center", gap: 6,
+    backgroundColor: "#5DB1FF", borderRadius: 999,
+    paddingHorizontal: 14, paddingVertical: 8,
+    shadowColor: "#000", shadowOpacity: 0.35, shadowRadius: 4, shadowOffset: {width: 0, height: 2},
+    elevation: 4,
+  },
+  wideBtnText: { color: "#0B1220", fontWeight: "800", fontSize: 13 },
+  wideBtnCaption: {
+    color: "#E7EDF5", fontSize: 11, fontWeight: "600",
+    backgroundColor: "rgba(11,18,32,0.75)",
+    paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6,
+  },
+
   listContent: { paddingHorizontal: 16, paddingBottom: 20 },
   webNoticeBox: {
     flexDirection: "row", alignItems: "center", gap: 8,
@@ -521,4 +653,43 @@ const styles = StyleSheet.create({
   },
   attributionText: { color: "#8FA0BC", fontSize: 11, fontWeight: "600" },
   attributionSub: { color: "#5A6B85", fontSize: 10, marginTop: 2 },
+
+  // #211 (Batch 7 D5): always-visible map key. Sits above the
+  // attribution bar so it never scrolls off. Compact but honest —
+  // headline sentence first, then swatches.
+  legend: {
+    backgroundColor: "#0B1220",
+    borderTopWidth: 1, borderTopColor: "#25324A",
+    paddingHorizontal: 12, paddingTop: 8, paddingBottom: 8, gap: 6,
+  },
+  legendHeadline: {
+    color: "#E7EDF5", fontSize: 12, fontWeight: "700", lineHeight: 16,
+  },
+  legendRow: {
+    flexDirection: "row", alignItems: "center", gap: 8,
+  },
+  legendCaption: {
+    color: "#8FA0BC", fontSize: 10, fontWeight: "600",
+  },
+  legendCaptionRight: {
+    color: "#8FA0BC", fontSize: 10, marginLeft: "auto",
+  },
+  legendSizeSwatch: {
+    flexDirection: "row", alignItems: "center", gap: 6,
+  },
+  legendSizeDot: {
+    backgroundColor: "#F4C842", borderWidth: 1, borderColor: "#0B1220",
+  },
+  legendRampRow: {
+    flexDirection: "row", gap: 6, marginTop: 2,
+  },
+  legendRampCell: {
+    flex: 1, alignItems: "center", gap: 2,
+  },
+  legendRampSwatch: {
+    width: "100%", height: 8, borderRadius: 2,
+  },
+  legendRampLabel: {
+    color: "#8FA0BC", fontSize: 9, textAlign: "center",
+  },
 });

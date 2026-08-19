@@ -18,9 +18,10 @@
  *   worked-around with a client-drawn SVG overlay because the
  *   iOS-first delivery target treats iOS behaviour as authoritative.
  */
+import { forwardRef, useImperativeHandle, useRef } from "react";
 import { View, StyleSheet, Text as RNText } from "react-native";
 import MapView, { Marker, Circle, PROVIDER_DEFAULT } from "react-native-maps";
-import type { MapCanvasProps, MapCanvasEvent } from "./MapCanvas.types";
+import type { MapCanvasProps, MapCanvasEvent, MapCanvasHandle } from "./MapCanvas.types";
 import { parseUtc } from "@/src/utils/time";
 
 // Initial camera framing: shows central-and-eastern Mediterranean
@@ -33,6 +34,8 @@ const INITIAL_REGION = {
 };
 
 function magnitudeColor(m: number | null): string {
+  // Fallback only — used when the parent hasn't computed a recency
+  // colour (e.g. web-list fallback where colour still tracks size).
   if (m == null) return "#8FA0BC";
   if (m >= 5.0) return "#E64545";
   if (m >= 4.0) return "#F08A2E";
@@ -56,24 +59,41 @@ function timeAgoShort(iso: string): string {
   return `${Math.floor(s/86400)}d ago`;
 }
 
-export default function MapCanvas(props: MapCanvasProps) {
+export default forwardRef<MapCanvasHandle, MapCanvasProps>(function MapCanvas(props, ref) {
   const {
     events, center, radiusMeters, radiusIsSolid, onEventPress,
     focus = null, highlightExternalId = null, onRegionChange,
     places = [],
   } = props;
-  // Opened from an event ("see this on the map"): start tight on that
-  // event instead of the whole basin, so it doesn't have to be hunted for.
+  const mapRef = useRef<MapView | null>(null);
+  // #243 (Batch 7 D6): imperative API used by the "See wide view"
+  // button in map.tsx to animate back to the basin overview from a
+  // deep event focus.
+  useImperativeHandle(ref, () => ({
+    animateToWideView: () => {
+      try { mapRef.current?.animateToRegion(INITIAL_REGION, 400); } catch { /* non-fatal */ }
+    },
+  }), []);
+  // Opened from an event ("See this on the map"): start tight on the
+  // epicentre so the user doesn't have to hunt for it. #243 (Batch 7
+  // D6): the previous 4° delta (~440 km) landed as a wide Malta-and-
+  // Sicily view — the person had to guess which pin was theirs. The
+  // spec is "Zoom in to where it happened (epicentre)", so we frame
+  // roughly 1.4° (~155 km) which sits an event pin comfortably in
+  // the centre with enough context to see neighbouring pins and the
+  // nearest coastline. Zooming BACK out to the basin is a one-tap
+  // button in the parent screen.
   const initialRegion = focus
     ? {
         latitude: focus.latitude,
         longitude: focus.longitude,
-        latitudeDelta: 4.0,
-        longitudeDelta: 4.0,
+        latitudeDelta: 1.4,
+        longitudeDelta: 1.4,
       }
     : INITIAL_REGION;
   return (
     <MapView
+      ref={mapRef}
       style={StyleSheet.absoluteFillObject}
       provider={PROVIDER_DEFAULT}
       initialRegion={initialRegion}
@@ -131,7 +151,13 @@ export default function MapCanvas(props: MapCanvasProps) {
                   width: size,
                   height: size,
                   borderRadius: size / 2,
-                  backgroundColor: magnitudeColor(ev.magnitude),
+                  // #211 (Batch 7 D5): map colour is RECENCY (parent
+                  // computed against the visible window) — magnitude
+                  // drives SIZE, following USGS convention. If no
+                  // recency colour arrived (shouldn't happen), fall
+                  // back to the magnitude palette so pins never turn
+                  // grey silently.
+                  backgroundColor: ev.recency_color ?? magnitudeColor(ev.magnitude),
                 },
                 highlighted && styles.markerHighlighted,
               ]}
@@ -167,7 +193,7 @@ export default function MapCanvas(props: MapCanvasProps) {
       ))}
     </MapView>
   );
-}
+});
 
 const styles = StyleSheet.create({
   markerHighlighted: {

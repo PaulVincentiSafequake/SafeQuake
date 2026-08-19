@@ -596,7 +596,15 @@ class TestBuildIdentification:
         # from `info.app_version` — so all three version rows on the
         # Diagnostics card are guaranteed to agree.
         assert "#208 R4 primary alert" in diag
-        assert 'label="fixes in this build"' in diag
+        # Batch 7 D (#252): the label was renamed from "fixes in this
+        # build" to "What's fixed in it" when the Diagnostics screen
+        # was rewritten human-first — either wording carries the
+        # marker's job (a hard-coded string that must be updated per
+        # build so a stale IPA is caught).
+        assert (
+            'label="fixes in this build"' in diag
+            or 'label="What\'s fixed in it"' in diag
+        ), "diag screen must carry a hard-coded fixes-in-this-build label"
 
 
 # ── A1 (batch 6): the chart counted events while the table counted people ─

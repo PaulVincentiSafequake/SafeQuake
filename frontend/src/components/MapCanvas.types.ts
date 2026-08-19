@@ -12,6 +12,11 @@ export type MapCanvasEvent = {
   latitude: number;
   longitude: number;
   region?: string | null;
+  /** #211 (Batch 7 D5): USGS convention — colour on the map is
+   *  RECENCY relative to the selected time window, not magnitude.
+   *  The parent computes this so a single window-aware ramp lives
+   *  in one place and every renderer stays in sync. */
+  recency_color?: string;
 };
 
 /** #249 (Batch 7 D): a user's saved place, drawn as a small labelled
@@ -52,4 +57,12 @@ export type MapCanvasProps = {
    * gesture-only filter missed the "See on map" case.
    */
   onRegionChange?: (latitude: number, longitude: number) => void;
+};
+
+/** #243 (Batch 7 D6): imperative handle exposed by the native map so
+ *  the parent screen can offer a "See wide view" button that animates
+ *  back to the basin overview when the map is opened focused on an
+ *  event. */
+export type MapCanvasHandle = {
+  animateToWideView: () => void;
 };

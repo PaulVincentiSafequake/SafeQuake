@@ -290,7 +290,7 @@ export default function QuakeDetailScreen() {
             testID="see-on-map-btn"
           >
             <Ionicons name="map-outline" size={20} color={colors.text} />
-            <Text style={styles.mapBtnText}>See location on map</Text>
+            <Text style={styles.mapBtnText}>Zoom in to where it happened (epicentre)</Text>
             <Ionicons name="chevron-forward" size={18} color={colors.textDim} />
           </TouchableOpacity>
         )}

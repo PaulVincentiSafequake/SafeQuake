@@ -1096,6 +1096,21 @@ export default function AlertScreen() {
             </Pressable>
           )}
 
+          {/* #250 (Batch 7 D1): what happens if you don't answer? Users
+              wondered whether silence would mark them as trapped and
+              scramble a rescue. It does NOT — the correct default is
+              "not responding", not "trapped". Written out here so the
+              behaviour matches the wording on the dashboard exactly. */}
+          {status !== "sent" && !stoodDown && (
+            <Text style={styles.unansweredNote} testID="alert-unanswered-note">
+              If you don&apos;t answer, we mark you as{" "}
+              <Text style={styles.unansweredNoteBold}>not responding</Text>
+              {" "}— never as trapped. The siren stops when you tap I&apos;m
+              safe or I need help, when someone else calls off the alert, or
+              about a minute after it started if neither has happened.
+            </Text>
+          )}
+
           {/* Task #14: the "Dismiss alert" escape hatch is gone — an
               unanswered alert must not be dismissable, because a dismissal
               looks identical to silence on the dashboard. The only way off
@@ -1654,6 +1669,21 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: "700",
     letterSpacing: 1,
+  },
+  // #250 (Batch 7 D1): "if you don't answer" note. Small enough not
+  // to compete with the buttons, prominent enough to read at a
+  // glance while the siren is going.
+  unansweredNote: {
+    color: "rgba(255,255,255,0.82)",
+    fontSize: 13,
+    lineHeight: 18,
+    textAlign: "center",
+    marginTop: spacing.md,
+    marginHorizontal: spacing.md,
+  },
+  unansweredNoteBold: {
+    fontWeight: "800",
+    color: "#FFFFFF",
   },
 
   /* Trapped / triage — secondary CTA on the alert screen */
