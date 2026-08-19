@@ -1,0 +1,796 @@
+diff --git a/memory/dashboard_build/index.html b/memory/dashboard_build/index.html
+index 969bd6f..2c42228 100644
+--- a/memory/dashboard_build/index.html
++++ b/memory/dashboard_build/index.html
+@@ -752,6 +752,61 @@
+     font-size: 12px;
+     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+   }
++
++  /* ── B6 (2026-06-18): activity feed grouped BY PERSON ────────────────
++     The feed was a raw event log: one row per update, so a person who
++     re-reported four times filled the panel four times and the operator
++     had to reconstruct "who is where, and how are they now" by reading
++     backwards. It also printed wire values like `not_responding` at the
++     operator. Rows are now one per person, in plain sentences, and every
++     state carries a SHAPE and a WORD as well as a colour so it survives
++     greyscale printing and colour-blindness. */
++  #qg-audit .qg-feed-modes { display: inline-flex; border: 1px solid #cbd0d8; border-radius: 8px; overflow: hidden; }
++  #qg-audit .qg-feed-mode {
++    background: #fff; border: 0; padding: 6px 12px; font: 600 12.5px/1.2 inherit;
++    color: #34455c; cursor: pointer; min-height: 32px;
++  }
++  #qg-audit .qg-feed-mode + .qg-feed-mode { border-left: 1px solid #cbd0d8; }
++  #qg-audit .qg-feed-mode[aria-pressed="true"] { background: #223b63; color: #fff; }
++  #qg-audit .qg-feed-section {
++    font: 800 12px/1.2 inherit; letter-spacing: 0.3px; color: #5a6a80;
++    text-transform: uppercase; margin: 14px 0 6px;
++  }
++  #qg-audit .qg-person-row {
++    background: #fff; border: 1px solid #e6e6ea; border-left-width: 5px;
++    border-radius: 8px; padding: 10px 14px; margin-bottom: 8px;
++  }
++  #qg-audit .qg-person-row.immediate { border-left-color: #C21818; background: #fff7f7; }
++  #qg-audit .qg-person-row.serious   { border-left-color: #EA9500; background: #fffaf0; }
++  #qg-audit .qg-person-row.minor     { border-left-color: #2E7D32; }
++  #qg-audit .qg-person-row.found     { border-left-color: #1F8A3A; background: #f7fdf9; }
++  #qg-audit .qg-person-row.safe      { border-left-color: #7A8CA0; }
++  #qg-audit .qg-person-row.silent    { border-left-color: #455a64; background: #f6f7f9; }
++  #qg-audit .qg-person-top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
++  #qg-audit .qg-state-chip {
++    display: inline-flex; align-items: center; gap: 5px;
++    padding: 2px 9px; border-radius: 999px; font: 800 11.5px/1.6 inherit;
++    border: 1.5px solid currentColor; background: #fff;
++  }
++  #qg-audit .qg-state-chip.immediate { color: #8f1010; }
++  #qg-audit .qg-state-chip.serious   { color: #8a5200; }
++  #qg-audit .qg-state-chip.minor     { color: #1d5c21; }
++  #qg-audit .qg-state-chip.found     { color: #14602a; }
++  #qg-audit .qg-state-chip.safe      { color: #43536b; }
++  #qg-audit .qg-state-chip.silent    { color: #37474f; }
++  #qg-audit .qg-person-name { font-weight: 800; font-size: 14.5px; color: #16202e; }
++  #qg-audit .qg-person-sentence { font-size: 13.5px; color: #2c3a4d; margin-top: 5px; line-height: 1.5; }
++  #qg-audit .qg-person-meta { font-size: 12px; color: #66748a; margin-top: 4px; }
++  #qg-audit .qg-person-actions { margin-left: auto; display: flex; gap: 8px; }
++  #qg-audit .qg-person-hist {
++    background: #fff; border: 1px solid #9aa4b4; border-radius: 6px;
++    padding: 4px 10px; font: 600 12px/1.2 inherit; color: #2c3a4d; cursor: pointer; min-height: 30px;
++  }
++  #qg-audit .qg-person-hist:hover { background: #eef2f9; border-color: #2f5fd0; }
++  #qg-audit .qg-person-flag {
++    display: inline-block; padding: 1px 7px; border-radius: 999px;
++    font: 700 11px/1.7 inherit; border: 1.5px solid currentColor; color: #8f1010; background: #fff;
++  }
+ </style>
+ </head>
+ <body>
+@@ -2268,9 +2323,190 @@
+   .qg-export-btn:hover:not(:disabled) { background:#f0f2f6; border-color:#a8b0bd; }
+ </style>
+ 
++<!-- ═════════════════════════════════════════════════════════════════════
++     C1 phase 2 — the re-check panel (operator-initiated ask).
++     Live operations, so it sits with them: above the activity feed, not in
++     the admin testing drawer. The ASK button is a two-step by design — the
++     first press only previews, because pressing it wakes injured people's
++     phones and the operator must see that cost before it happens, not after.
++     ═════════════════════════════════════════════════════════════════════ -->
++<style>
++  #qg-recheck { margin: 16px 12px; padding: 14px 16px; background: var(--surface, #fff);
++    border: 1px solid var(--border, #dcdfe5); border-left: 4px solid #2f5fd0; border-radius: 8px; }
++  #qg-recheck h3 { margin: 0 0 6px; font-size: 15px; font-weight: 800; color: var(--text, #1a2330); }
++  #qg-recheck .qg-rc-state { font-size: 12.5px; color: var(--text-muted, #5a6a80); line-height: 1.6; }
++  #qg-recheck .qg-rc-actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
++  #qg-recheck button {
++    font: 700 13px/1.2 inherit; padding: 9px 14px; border-radius: 6px; cursor: pointer;
++    min-height: 40px; border: 1px solid #7e8898; background: #fff; color: #1a2330;
++  }
++  #qg-recheck button.primary { background: #2f5fd0; border-color: #2f5fd0; color: #fff; }
++  #qg-recheck button.danger  { background: #C21818; border-color: #C21818; color: #fff; }
++  #qg-recheck button:disabled { opacity: 0.55; cursor: not-allowed; }
++  #qg-recheck .qg-rc-confirm {
++    margin-top: 12px; padding: 12px 14px; border: 2px solid #C21818; border-radius: 8px;
++    background: #fff7f7; font-size: 13.5px; color: #2c3a4d; line-height: 1.55;
++  }
++  #qg-recheck .qg-rc-confirm ul { margin: 6px 0 10px 18px; padding: 0; }
++  #qg-recheck .qg-rc-skipped { font-size: 12px; color: #66748a; margin-top: 6px; }
++  #qg-recheck .qg-rc-msg { font-size: 12.5px; margin-top: 8px; }
++  #qg-recheck .qg-rc-msg.error { color: #b0141a; font-weight: 700; }
++  #qg-recheck .qg-rc-msg.ok { color: #1a7f37; font-weight: 700; }
++  #qg-recheck .qg-rc-paused { color: #8a5200; font-weight: 800; }
++</style>
++<div id="qg-recheck" style="display:none">
++  <h3>Checking on people who need help</h3>
++  <div class="qg-rc-state" id="qg-rc-state">Loading…</div>
++  <div class="qg-rc-actions">
++    <button type="button" class="primary" id="qg-rc-ask">Ask everyone how they are now</button>
++    <button type="button" id="qg-rc-pause">Pause automatic checks</button>
++  </div>
++  <div id="qg-rc-confirm-slot"></div>
++  <div class="qg-rc-msg" id="qg-rc-msg"></div>
++</div>
++<script>
++(function () {
++  var root = document.getElementById("qg-recheck");
++  if (!root) return;
++  var stateEl = document.getElementById("qg-rc-state");
++  var askBtn = document.getElementById("qg-rc-ask");
++  var pauseBtn = document.getElementById("qg-rc-pause");
++  var slot = document.getElementById("qg-rc-confirm-slot");
++  var msg = document.getElementById("qg-rc-msg");
++  var enabled = true;
++
++  function esc(s) {
++    return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;")
++      .replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
++  }
++  function say(text, kind) {
++    msg.className = "qg-rc-msg" + (kind ? " " + kind : "");
++    msg.textContent = text || "";
++  }
++  function signedIn() {
++    return !!(window.qaAuth && window.qaAuth.jwt && window.qaAuth.jwt());
++  }
++
++  async function refreshState() {
++    root.style.display = signedIn() ? "" : "none";
++    if (!signedIn()) return;
++    try {
++      var r = await window.qaApi("/api/admin/recheck/status", { cache: "no-store" });
++      if (!r.ok) { stateEl.textContent = "Could not read the re-check state (HTTP " + r.status + ")."; return; }
++      var d = await r.json();
++      enabled = !!d.enabled;
++      var people = d.trapped_count === 1 ? "1 person" : (d.trapped_count || 0) + " people";
++      var last = d.last_sweep_at
++        ? (window.qgDurWords ? window.qgDurWords(Date.now() - new Date(d.last_sweep_at).getTime()) + " ago" : d.last_sweep_at)
++        : "not yet";
++      var sent = d.last_result && d.last_result.sent != null ? d.last_result.sent : 0;
++      stateEl.innerHTML =
++        (enabled
++          ? "Automatic checks are <b>on</b>. "
++          : '<span class="qg-rc-paused">Automatic checks are PAUSED — nobody is being asked.</span> ') +
++        people + " currently need help. Last check ran " + esc(last) +
++        (d.last_sweep_at ? " and asked " + sent + "." : ".") +
++        "<br>People are asked more often at first and less often as time passes, and less often again when their battery is low.";
++      pauseBtn.textContent = enabled ? "Pause automatic checks" : "Resume automatic checks";
++      pauseBtn.className = enabled ? "" : "danger";
++    } catch (e) {
++      stateEl.textContent = "Could not read the re-check state.";
++    }
++  }
++
++  // Step 1: preview. Nothing is sent — the server is asked what WOULD happen.
++  askBtn.addEventListener("click", async function () {
++    askBtn.disabled = true;
++    say("");
++    slot.innerHTML = "";
++    try {
++      var r = await window.qaApi("/api/admin/recheck", {
++        method: "POST",
++        headers: { "Content-Type": "application/json" },
++        body: JSON.stringify({ confirm: false })
++      });
++      if (!r.ok) { say("Could not prepare the check (HTTP " + r.status + ").", "error"); return; }
++      var d = await r.json();
++      if (!d.would_ask) {
++        say("There is no one to ask right now — nobody is currently marked as needing help with a phone that can answer.", "error");
++        return;
++      }
++      var lines = (d.cost && d.cost.lines ? d.cost.lines : []).map(function (l) {
++        return "<li>" + esc(l) + "</li>";
++      }).join("");
++      var dark = (d.skipped || []).length;
++      slot.innerHTML =
++        '<div class="qg-rc-confirm" role="alertdialog" aria-live="polite">' +
++          "<b>Ask " + (d.would_ask === 1 ? "1 person" : d.would_ask + " people") + " now?</b>" +
++          "<ul>" + lines + "</ul>" +
++          (dark ? '<div class="qg-rc-skipped">' + dark +
++            (dark === 1 ? " phone is" : " phones are") +
++            " being left out — either it has gone dark and cannot answer, or that person is no longer marked as needing help.</div>" : "") +
++          '<div style="margin-top:10px;display:flex;gap:10px;flex-wrap:wrap">' +
++            '<button type="button" class="danger" id="qg-rc-confirm">Yes — ask them now</button>' +
++            '<button type="button" id="qg-rc-cancel">Cancel</button>' +
++          "</div>" +
++        "</div>";
++      document.getElementById("qg-rc-cancel").addEventListener("click", function () {
++        slot.innerHTML = "";
++        say("Nothing was sent.");
++      });
++      document.getElementById("qg-rc-confirm").addEventListener("click", async function () {
++        this.disabled = true;
++        try {
++          var r2 = await window.qaApi("/api/admin/recheck", {
++            method: "POST",
++            headers: { "Content-Type": "application/json" },
++            body: JSON.stringify({ confirm: true })
++          });
++          if (!r2.ok) { say("Could not send the check (HTTP " + r2.status + ").", "error"); return; }
++          var d2 = await r2.json();
++          slot.innerHTML = "";
++          say("Asked " + d2.asked + " " + (d2.asked === 1 ? "person" : "people") +
++              " — " + d2.sent + " reached their phone. Answers will appear in the activity feed below.", "ok");
++        } finally { refreshState(); }
++      });
++    } finally {
++      askBtn.disabled = false;
++    }
++  });
++
++  pauseBtn.addEventListener("click", async function () {
++    pauseBtn.disabled = true;
++    try {
++      var r = await window.qaApi("/api/admin/recheck/enabled", {
++        method: "POST",
++        headers: { "Content-Type": "application/json" },
++        body: JSON.stringify({ enabled: !enabled })
++      });
++      if (r.status === 401 || r.status === 403) {
++        say("Only an admin can pause or resume automatic checks.", "error");
++        return;
++      }
++      if (!r.ok) { say("Could not change that (HTTP " + r.status + ").", "error"); return; }
++      say(enabled
++        ? "Automatic checks are paused. Nobody will be asked until you resume them."
++        : "Automatic checks are back on.", "ok");
++      await refreshState();
++    } finally {
++      pauseBtn.disabled = false;
++    }
++  });
++
++  refreshState();
++  setInterval(refreshState, 20000);
++})();
++</script>
++
+ <div id="qg-audit">
+   <div class="qg-audit-header">
+     <h3>Recent activity</h3>
++    <!-- B6: grouped by person by default. The raw event log is still one
++         click away — an operator reconstructing a sequence needs it. -->
++    <div class="qg-feed-modes" role="group" aria-label="How to group the activity feed">
++      <button type="button" class="qg-feed-mode" id="qg-feed-person" aria-pressed="true">By person</button>
++      <button type="button" class="qg-feed-mode" id="qg-feed-event" aria-pressed="false">Every update</button>
++    </div>
+     <span class="qg-audit-meta" id="qg-audit-meta">Loading…</span>
+   </div>
+ 
+@@ -2365,6 +2601,25 @@
+     if (s === "green")  return "#2E7D32";
+     return "#666";
+   }
++  // B6: a wire value ("red", "yellow") is never shown to an operator. Used
++  // only if qgSeverityChip has not loaded — the wording matches it.
++  function sevWord(s) {
++    if (s === "red")    return "IMMEDIATE";
++    if (s === "yellow") return "SERIOUS";
++    if (s === "green")  return "MINOR";
++    return "UNKNOWN";
++  }
++  // "14 minutes ago · 13:05 UTC" — an operator needs both the elapsed time
++  // (how stale is this?) and the absolute one (for the radio and the record).
++  function whenWords(at) {
++    if (!at) return "";
++    var t = new Date(at).getTime();
++    if (isNaN(t)) return esc(at);
++    var d = new Date(t);
++    var hh = String(d.getUTCHours()).padStart(2, "0");
++    var mm = String(d.getUTCMinutes()).padStart(2, "0");
++    return esc(feedAgoWords(at)) + " · " + hh + ":" + mm + " UTC";
++  }
+   function renderIdent(e) {
+     var did = esc(e.device_id || "");
+     var code = e.short_code ? esc(e.short_code) : "";
+@@ -2385,44 +2640,263 @@
+           '<div class="qg-audit-title">⚠️ TRIGGER ' + badge + ' · ' + mag + ' · ' +
+             esc(e.recipients_total || 0) + ' device' + (e.recipients_total === 1 ? '' : 's') +
+             ' (' + counts + ') · by <code>' + esc(e.triggered_by || "dashboard") + '</code></div>' +
+-          err + '<div class="qg-audit-at">' + esc(e.at || "") + '</div></div>';
++          err + '<div class="qg-audit-at">' + whenWords(e.at) + '</div></div>';
+     }
+     if (e.kind === "rescued") {
+       var priorSev = e.prior_severity && window.qgSeverityChip
+         ? window.qgSeverityChip(e.prior_severity)
+-        : (e.prior_severity ? '<span class="qg-badge" style="background:' + sevColor(e.prior_severity) + '">' + esc(e.prior_severity) + '</span>' : "");
++        : (e.prior_severity ? '<span class="qg-badge" style="background:' + sevColor(e.prior_severity) + '">' + sevWord(e.prior_severity) + '</span>' : "");
+       var notes = "";
+       if (e.notes) notes = '<div style="color:#555;font-size:12px;margin-top:4px">📝 ' + esc(e.notes) + '</div>';
+       else if (e.notes_present) notes = '<div style="color:#888;font-size:12px;margin-top:4px" title="Notes exist but are only visible to admin-authenticated viewers.">🔒 <i>operator note recorded (admin-only)</i></div>';
+       return '<div class="qg-audit-row rescued">' +
+           '<div class="qg-audit-title">✅ RESCUED · ' + renderIdent(e) +
+-            ' was <b>' + esc(e.prior_status || "trapped") + '</b>' + priorSev +
+-            ' · closed by <code>' + esc(e.rescued_by || "dashboard") + '</code></div>' +
+-          notes + '<div class="qg-audit-at">' + esc(e.at || "") + '</div></div>';
++            ' — was needing help' + priorSev + ',' +
++            ' closed by <code>' + esc(e.rescued_by || "dashboard") + '</code></div>' +
++          notes + '<div class="qg-audit-at">' + whenWords(e.at) + '</div></div>';
+     }
+     if (e.kind === "rescue_reverted") {
+       var restoredSev = e.restored_severity && window.qgSeverityChip
+         ? window.qgSeverityChip(e.restored_severity)
+-        : (e.restored_severity ? '<span class="qg-badge" style="background:' + sevColor(e.restored_severity) + '">' + esc(e.restored_severity) + '</span>' : "");
++        : (e.restored_severity ? '<span class="qg-badge" style="background:' + sevColor(e.restored_severity) + '">' + sevWord(e.restored_severity) + '</span>' : "");
+       return '<div class="qg-audit-row rescue_reverted">' +
+           '<div class="qg-audit-title">↩️ RESCUE REVERTED · ' + renderIdent(e) +
+-            ' restored to <b>' + esc(e.restored_status || e.status || "trapped") + '</b>' + restoredSev +
+-            ' · by <code>' + esc(e.reverted_by || "dashboard") + '</code></div>' +
+-          '<div class="qg-audit-at">' + esc(e.at || "") + '</div></div>';
++            ' — back to needing help' + restoredSev + ',' +
++            ' undone by <code>' + esc(e.reverted_by || "dashboard") + '</code></div>' +
++          '<div class="qg-audit-at">' + whenWords(e.at) + '</div></div>';
+     }
+     var sev = e.severity && window.qgSeverityChip
+       ? window.qgSeverityChip(e.severity)
+-      : (e.severity ? '<span class="qg-badge" style="background:' + sevColor(e.severity) + '">' + esc(e.severity) + "</span>" : "");
++      : (e.severity ? '<span class="qg-badge" style="background:' + sevColor(e.severity) + '">' + sevWord(e.severity) + "</span>" : "");
+     var mob = e.mobility ? '<span class="qg-badge" style="background:' + (e.mobility === "trapped" ? "#C21818" : "#2E7D32") + '">' + (e.mobility === "trapped" ? "trapped/pinned" : "can move") + "</span>" : "";
++    if (e.needs_extraction) {
++      mob += '<span class="qg-badge" style="background:#C21818">cannot get out</span>';
++    }
+     var loc = "";
+     if (e.latitude != null && e.longitude != null) {
+-      loc = ' · <a href="https://www.google.com/maps/place/' + encodeURIComponent(e.latitude + "," + e.longitude) + '" target="_blank" rel="noopener">📍 map</a>';
++      // GDPR (2026-06): never send a casualty's coordinates to a third party
++      // in a URL. Recentres OUR OWN map instead of linking out to Google.
++      loc = ' · <a href="#map-wrap" class="qg-maplink"' +
++        ' data-qg-map-lat="' + esc(e.latitude) + '"' +
++        ' data-qg-map-lon="' + esc(e.longitude) + '"' +
++        ' data-qg-map-label="' + esc(e.short_code || e.device_id || "") + '"' +
++        ' title="Show this location on the map above">📍 map</a>';
+     }
+     var bat = e.battery_pct != null ? " · 🔋 " + esc(e.battery_pct) + "%" : "";
++    // B6: the wire value (`not_responding`, `trapped`) is never printed at an
++    // operator on its own — the row leads with a plain sentence.
++    var lead = e.kind && String(e.kind).indexOf("recheck") === 0 ? "🔁 RE-CHECK" : "📱 UPDATE";
+     return '<div class="qg-audit-row status">' +
+-        '<div class="qg-audit-title">📱 STATUS · ' + renderIdent(e) + " → <b>" + esc(e.status || "") + '</b>' + sev + mob + loc + bat + '</div>' +
+-        '<div class="qg-audit-at">' + esc(e.at || "") + '</div></div>';
++        '<div class="qg-audit-title">' + lead + ' · ' + renderIdent(e) + ' — ' +
++          eventSentence(e) + sev + mob + loc + bat + '</div>' +
++        '<div class="qg-audit-at">' + whenWords(e.answered_at || e.at) + '</div></div>';
++  }
++
++  // ═══ B6 (2026-06-18): one row per person, in plain sentences ═══════
++  // Shapes mirror qgSeverityChip and the map markers exactly — circle =
++  // immediate, triangle = serious, square = minor — so the same state
++  // looks the same wherever an operator meets it.
++  var SHAPE = {
++    circle:   '<svg width="11" height="11" viewBox="0 0 12 12" aria-hidden="true"><circle cx="6" cy="6" r="5" fill="currentColor" stroke="#000" stroke-width="1"/></svg>',
++    triangle: '<svg width="11" height="11" viewBox="0 0 12 12" aria-hidden="true"><polygon points="6,1 11,10.5 1,10.5" fill="currentColor" stroke="#000" stroke-width="1" stroke-linejoin="round"/></svg>',
++    square:   '<svg width="11" height="11" viewBox="0 0 12 12" aria-hidden="true"><rect x="1.5" y="1.5" width="9" height="9" fill="currentColor" stroke="#000" stroke-width="1"/></svg>',
++    check:    '<svg width="11" height="11" viewBox="0 0 12 12" aria-hidden="true"><circle cx="6" cy="6" r="5" fill="currentColor" stroke="#000" stroke-width="1"/><path d="M3.4 6.2 L5.2 8 L8.7 4.2" stroke="#fff" stroke-width="1.6" fill="none" stroke-linecap="round"/></svg>',
++    dot:      '<svg width="11" height="11" viewBox="0 0 12 12" aria-hidden="true"><circle cx="6" cy="6" r="3.2" fill="currentColor" stroke="#000" stroke-width="1"/></svg>',
++    diamond:  '<svg width="11" height="11" viewBox="0 0 12 12" aria-hidden="true"><polygon points="6,1 11,6 6,11 1,6" fill="currentColor" stroke="#000" stroke-width="1"/></svg>'
++  };
++
++  // Colour is NEVER the only channel: every state has a shape and a word.
++  function stateOf(status, severity) {
++    if (status === "trapped") {
++      if (severity === "red")    return { cls: "immediate", word: "NEEDS HELP NOW", shape: SHAPE.circle, rank: 0 };
++      if (severity === "yellow") return { cls: "serious",   word: "NEEDS HELP",     shape: SHAPE.triangle, rank: 1 };
++      return { cls: "minor", word: "NEEDS HELP — MINOR INJURIES", shape: SHAPE.square, rank: 2 };
++    }
++    if (status === "rescued")        return { cls: "found",  word: "FOUND BY A TEAM", shape: SHAPE.check,   rank: 4 };
++    if (status === "safe")           return { cls: "safe",   word: "SAFE",            shape: SHAPE.dot,     rank: 5 };
++    if (status === "not_responding") return { cls: "silent", word: "NOT RESPONDING",  shape: SHAPE.diamond, rank: 3 };
++    return { cls: "silent", word: "STATUS UNKNOWN", shape: SHAPE.diamond, rank: 6 };
++  }
++
++  function stateChip(st) {
++    return '<span class="qg-state-chip ' + st.cls + '" role="img" aria-label="' +
++      esc(st.word) + '">' + st.shape + esc(st.word) + "</span>";
++  }
++
++  var ANSWER_WORDS = {
++    same: "no change since last time",
++    worse: "getting worse",
++    much_worse: "much worse — urgent",
++    better: "improving, in their own words (not a re-triage)"
++  };
++
++  // Every wire value the feed can meet, turned into something an operator can
++  // read aloud. `not_responding` used to be printed verbatim (B6).
++  function eventSentence(e) {
++    if (e.kind === "rescued") {
++      return "Marked found and safe by " + esc(e.rescued_by || "an operator") + ".";
++    }
++    if (e.kind === "rescue_reverted") {
++      return "The found mark was undone by " + esc(e.reverted_by || "an operator") +
++             " — back to needing help.";
++    }
++    if (e.kind === "recheck_answered") {
++      return "Answered a re-check: " + esc(ANSWER_WORDS[e.answer] || e.answer || "answered") + "." +
++        (e.queued_offline ? " Tapped with no signal and delivered later." : "");
++    }
++    if (e.kind === "recheck_missed") return "We asked how they are and heard nothing back.";
++    if (e.kind === "recheck_sent")   return "We asked how they are.";
++    if (e.status === "safe")           return "Checked in safe.";
++    if (e.status === "not_responding") return "Recorded as not responding.";
++    if (e.status === "trapped") {
++      var s = "Told us they need help";
++      if (e.severity === "red")         s += " — serious injuries.";
++      else if (e.severity === "yellow") s += " — injured, stable for now.";
++      else if (e.severity === "green")  s += " — minor injuries.";
++      else                              s += ".";
++      if (e.needs_extraction)            s += " They cannot get out on their own.";
++      else if (e.egress === "can_exit")  s += " They can get out on their own.";
++      else if (e.mobility === "trapped") s += " They are pinned and cannot move.";
++      else if (e.mobility === "mobile")  s += " They can move.";
++      return s;
++    }
++    return "Sent an update.";
++  }
++
++  function feedAgoWords(at) {
++    var t = at ? new Date(at).getTime() : NaN;
++    if (!t || isNaN(t)) return "";
++    var ms = Date.now() - t;
++    if (ms < 0) ms = 0;
++    return (window.qgDurWords ? window.qgDurWords(ms) : Math.round(ms / 60000) + " minutes") + " ago";
++  }
++
++  function personRow(p) {
++    var st = stateOf(p.status, p.severity);
++    var ident = p.display_name
++      ? '<span class="qg-person-name">' + esc(p.display_name) + "</span> · <code>" + esc(p.short_code || "") + "</code>"
++      : '<span class="qg-person-name">' + esc(p.short_code || p.device_id || "") + "</span>";
++    var flags = "";
++    if (p.needs_extraction) flags += ' <span class="qg-person-flag">CANNOT GET OUT</span>';
++    if (p.deteriorating)    flags += ' <span class="qg-person-flag">DETERIORATING</span>';
++    var loc = "";
++    if (p.latitude != null && p.longitude != null) {
++      // GDPR: recentres OUR map, never a third-party URL.
++      loc = ' · <a href="#map-wrap" class="qg-maplink"' +
++        ' data-qg-map-lat="' + esc(p.latitude) + '"' +
++        ' data-qg-map-lon="' + esc(p.longitude) + '"' +
++        ' data-qg-map-label="' + esc(p.short_code || p.device_id || "") + '"' +
++        ' title="Show this location on the map above">📍 map</a>';
++    }
++    var updates = p.updates === 1 ? "1 update" : p.updates + " updates";
++    var meta = "Latest " + esc(feedAgoWords(p.at)) + " · " + updates + " in this window" +
++      (p.battery_pct != null ? " · 🔋 " + esc(p.battery_pct) + "%" : "") + loc;
++    return '<div class="qg-person-row ' + st.cls + '">' +
++      '<div class="qg-person-top">' + stateChip(st) + ident + flags +
++        '<span class="qg-person-actions">' +
++          '<button type="button" class="qg-person-hist" data-qg-history="' + esc(p.device_id) + '">📜 Full history</button>' +
++        "</span>" +
++      "</div>" +
++      '<div class="qg-person-sentence">' + eventSentence(p.latest) + "</div>" +
++      '<div class="qg-person-meta">' + meta + "</div>" +
++    "</div>";
++  }
++
++  // Events arrive newest-first, so the FIRST event seen for a device is its
++  // current state and everything after it is that person's history.
++  function groupByPerson(events) {
++    var order = [], byId = {};
++    events.forEach(function (e) {
++      if (!e.device_id) return;
++      var p = byId[e.device_id];
++      if (!p) {
++        p = byId[e.device_id] = {
++          device_id: e.device_id,
++          short_code: e.short_code,
++          display_name: e.display_name,
++          status: e.kind === "rescued" ? "rescued" : e.status,
++          severity: e.severity,
++          needs_extraction: !!e.needs_extraction,
++          latitude: e.latitude,
++          longitude: e.longitude,
++          battery_pct: e.battery_pct,
++          at: e.answered_at || e.at,
++          latest: e,
++          deteriorating: !!e.deteriorating,
++          updates: 0
++        };
++        order.push(p);
++      }
++      // A name on any row beats none: older rows carry the name that was
++      // current when they were written.
++      if (!p.display_name && e.display_name) p.display_name = e.display_name;
++      if (e.deteriorating) p.deteriorating = true;
++      if (p.battery_pct == null && e.battery_pct != null) p.battery_pct = e.battery_pct;
++      if (p.latitude == null && e.latitude != null) {
++        p.latitude = e.latitude; p.longitude = e.longitude;
++      }
++      p.updates += 1;
++    });
++    order.sort(function (a, b) {
++      var ra = stateOf(a.status, a.severity).rank, rb = stateOf(b.status, b.severity).rank;
++      if (ra !== rb) return ra - rb;
++      return String(b.at || "").localeCompare(String(a.at || ""));
++    });
++    return order;
++  }
++
++  function renderPersonFeed(events) {
++    var people = groupByPerson(events);
++    var triggers = events.filter(function (e) { return e.kind === "trigger"; });
++    var html = "";
++    if (triggers.length) {
++      html += '<div class="qg-feed-section">Alerts sent in this window</div>' +
++        triggers.map(formatEvent).join("");
++    }
++    html += '<div class="qg-feed-section">People — ' +
++      (people.length === 1 ? "1 person" : people.length + " people") +
++      ", most urgent first</div>";
++    html += people.length
++      ? people.map(personRow).join("")
++      : '<div class="qg-audit-empty">No one has reported in during this window.</div>';
++    return html;
++  }
++
++  // One history modal, opened from either view. Delegated because the feed
++  // re-renders on every poll but this container does not.
++  body.addEventListener("click", function (ev) {
++    var btn = ev.target && ev.target.closest ? ev.target.closest("[data-qg-history]") : null;
++    if (!btn) return;
++    if (typeof window.qgOpenHistory === "function") {
++      window.qgOpenHistory(btn.getAttribute("data-qg-history"));
++    }
++  });
++
++  var feedMode = "person";
++  try {
++    var storedMode = window.localStorage.getItem("qgFeedMode");
++    if (storedMode === "event" || storedMode === "person") feedMode = storedMode;
++  } catch (_) {}
++  var modeBtns = {
++    person: document.getElementById("qg-feed-person"),
++    event: document.getElementById("qg-feed-event")
++  };
++  function paintModeButtons() {
++    Object.keys(modeBtns).forEach(function (k) {
++      if (modeBtns[k]) modeBtns[k].setAttribute("aria-pressed", String(k === feedMode));
++    });
+   }
++  Object.keys(modeBtns).forEach(function (k) {
++    if (!modeBtns[k]) return;
++    modeBtns[k].addEventListener("click", function () {
++      feedMode = k;
++      try { window.localStorage.setItem("qgFeedMode", k); } catch (_) {}
++      paintModeButtons();
++      body.__qgLastHtml = null;          // force a repaint in the new mode
++      refresh();
++    });
++  });
++  paintModeButtons();
+ 
+   async function refresh() {
+     try {
+@@ -2462,7 +2936,9 @@
+       // to the top every few seconds (bug 1.5, 2026-08-12).
+       var html = events.length === 0
+         ? '<div class="qg-audit-empty">No activity yet.</div>'
+-        : events.map(formatEvent).join("");
++        : (feedMode === "person"
++            ? renderPersonFeed(events)
++            : events.map(formatEvent).join(""));
+       if (html !== body.__qgLastHtml) {
+         var sx = window.scrollX, sy = window.scrollY;
+         body.__qgLastHtml = html;
+@@ -3827,6 +4303,48 @@ window.QuakeAngelRescue = (function () {
+   }).addTo(map);
+   window.__qgMap = map;
+ 
++  // ── GDPR (2026-06-18): coordinates never leave to a third party ──────
++  // Audit rows and the per-person history used to render a "📍 map" link to
++  // google.com/maps/place/<lat>,<lon>. Every operator click disclosed the
++  // exact position of a casualty to Google in a URL. Replaced with an
++  // internal recentre of THIS map — same one-click affordance, no outbound
++  // request, no coordinates in any external URL. If an external routing
++  // link is ever wanted it must be a separate, explicitly-labelled action
++  // AND written to the audit trail, because it is a disclosure.
++  window.qgShowOnMap = function (lat, lon, label) {
++    var m = window.__qgMap;
++    var la = Number(lat), lo = Number(lon);
++    if (!m || !isFinite(la) || !isFinite(lo)) return;
++    try { m.invalidateSize(false); } catch (_) {}
++    m.setView([la, lo], 18);
++    if (window.__qgPinpoint) {
++      try { m.removeLayer(window.__qgPinpoint); } catch (_) {}
++    }
++    window.__qgPinpoint = L.circleMarker([la, lo], {
++      radius: 16, color: "#111", weight: 3, opacity: 0.9,
++      fillColor: "#FFD400", fillOpacity: 0.35,
++    }).addTo(m);
++    if (label) {
++      window.__qgPinpoint.bindTooltip(String(label), {
++        permanent: true, direction: "top", className: "qg-pinpoint-tip",
++      }).openTooltip();
++    }
++    if (mapWrap && mapWrap.scrollIntoView) {
++      mapWrap.scrollIntoView({ behavior: "smooth", block: "center" });
++    }
++  };
++
++  document.addEventListener("click", function (ev) {
++    var el = ev.target && ev.target.closest && ev.target.closest("[data-qg-map-lat]");
++    if (!el) return;
++    ev.preventDefault();
++    window.qgShowOnMap(
++      el.getAttribute("data-qg-map-lat"),
++      el.getAttribute("data-qg-map-lon"),
++      el.getAttribute("data-qg-map-label") || "",
++    );
++  });
++
+   // ── Fix 1.3: map only rendered tiles in a top strip ──────────────────
+   // Leaflet measures its container once at construction; if layout hasn't
+   // settled (fonts, flexbox, auth-gated panels appearing) it draws tiles
+@@ -3984,9 +4502,13 @@ window.QuakeAngelRescue = (function () {
+     // Every pin carries the person's short code (item 2) — the same
+     // string as the triage card and the team report table.
+     var code = qgCode(u);
+-    var tagText = v.kind === "immediate" ? ("SOS " + code)
+-      : v.kind === "rescued" ? ("\u2713 " + code)
+-      : code;
++    // C3: pin labels carry the name too. Truncated hard — a pin label is
++    // 56px of map furniture, not a text field.
++    var nm = u.displayName ? String(u.displayName).slice(0, 12) : "";
++    var ident = nm ? code + " " + nm : code;
++    var tagText = v.kind === "immediate" ? ("SOS " + ident)
++      : v.kind === "rescued" ? ("\u2713 " + ident)
++      : ident;
+     var tagCls = v.kind === "immediate" ? "" : v.kind === "rescued" ? " rescued" : " plain";
+     var tagH = tagText ? 13 : 0;
+     var tag = tagText ? '<span class="qg-mrk-tag' + tagCls + '">' + tagText + "</span>" : "";
+@@ -4020,6 +4542,18 @@ window.QuakeAngelRescue = (function () {
+       device_id: d.device_id, // QuakeAngelRescue widget expects this exact key
+       shortCode: d.short_code,       // collision-safe, server-derived (item 2)
+       displayName: d.display_name,
++      // C1 re-check ladder fields.
++      silenceState: d.silence_state,
++      // Extraction is a STRUCTURAL axis, not a medical one: someone can be
++      // walking wounded and still unable to leave a building. Kept as a flag
++      // on the card rather than a new severity band, and sorted to the top of
++      // its own band, because folding it into severity would either overstate
++      // the injury or hide the extraction need (2026-06-18).
++      egress: d.egress,
++      needsExtraction: d.needs_extraction,
++      deteriorating: d.deteriorating,
++      reportsImproving: d.reports_improving,
++      recheck: d.recheck,
+       trappedSince: d.trapped_since, // start of the current trapped spell (item 3)
+       status: d.status,
+       severity: d.severity,
+@@ -4272,10 +4806,16 @@ window.QuakeAngelRescue = (function () {
+     var trappedLine = (u.status === "trapped" && u.trappedSince)
+       ? "<br><b>Trapped for " + window.qgDurWords(Date.now() - new Date(u.trappedSince).getTime()) + "</b>"
+       : "";
+-    return '<span style="font-size:16px; font-weight:800; letter-spacing:1px">' + qgCode(u) + "</span>" +
+-      (u.displayName ? " — " + u.displayName : "") +
++    // C3 (batch 6): code as headline with the first name beside it — the
++    // SAME string the triage card and the team report table use, so an
++    // operator reading a pin, a card and a report sees one identity.
++    var nameBit = u.displayName
++      ? ' <span style="font-size:14px; font-weight:700">' + u.displayName + "</span>"
++      : "";
++    return '<span style="font-size:16px; font-weight:800; letter-spacing:1px">' + qgCode(u) + "</span>" + nameBit +
+       '<br><span style="font-size:9px; color:#888">' + u.deviceId + "</span>" +
+       "<br>" + statusLabel(u.status, u.severity) + sevChip + trappedLine +
++      (u.needsExtraction ? "<br><b>🚪 Cannot get out — extraction needed</b>" : "") +
+       (mob ? "<br>" + mob : "") + "<br>Battery: " + (u.batteryPercent != null ? u.batteryPercent : "?") + "%" + rescueSlot;
+   }
+ 
+@@ -4297,6 +4837,8 @@ window.QuakeAngelRescue = (function () {
+       (isUrgent(u.status, u.severity) ? '<span class="badge sos">SOS</span>' : "") +
+       (u.status === "rescued" ? '<span class="badge rescued-badge">RESCUED</span>' : "") +
+       (u.isTest ? '<span class="qg-test-tag">TEST</span>' : "") +
++      (u.deteriorating ? '<span class="badge sos">↑ DETERIORATING</span>' : "") +
++      (u.needsExtraction ? '<span class="badge sos">🚪 CANNOT GET OUT</span>' : "") +
+       "</div>" +
+       '<div class="qg-card-fullid">' + u.deviceId + "</div>";
+     // 'Trapped for …' — the operationally critical figure (item 3).
+@@ -4309,6 +4851,23 @@ window.QuakeAngelRescue = (function () {
+     var battLine = lowBatt
+       ? '<div class="qg-card-batt-low">⚠ Battery ' + u.batteryPercent + "% — low battery, may lose contact soon</div>"
+       : "";
++    var egressLine = u.needsExtraction
++      ? '<div class="qg-card-batt-low">🚪 Cannot get out on their own — extraction needed (a team with cutting gear). Injuries may still be minor.</div>'
++      : "";
++    // C1: silence is information, and its two kinds must not look the same.
++    // Neither reduces priority — "we don't know" must never read as
++    // "we know they're fine".
++    var silenceLine = "";
++    if (u.silenceState === "dark") {
++      silenceLine = '<div class="qg-card-batt-low">◌ Phone dark since ' +
++        (u.lastUpdated ? new Date(u.lastUpdated).toLocaleTimeString() : "—") +
++        " — no contact possible. Status and position below are LAST KNOWN.</div>";
++    } else if (u.silenceState === "silent_alive") {
++      silenceLine = '<div class="qg-card-batt-low">◑ No answer to the last re-checks · phone still alive' +
++        (u.batteryPercent != null ? " · battery " + u.batteryPercent + "%" : "") + "</div>";
++    } else if (u.reportsImproving) {
++      silenceLine = '<div class="meta">Reports improving — not re-triaged automatically</div>';
++    }
+     var updLine = u.lastUpdated
+       ? '<div class="meta">Updated ' + agoWords(u.lastUpdated) + "</div>" +
+         '<div class="qg-card-abs">' + new Date(u.lastUpdated).toLocaleTimeString() + "</div>"
+@@ -4324,7 +4883,7 @@ window.QuakeAngelRescue = (function () {
+         ? "This is hidden from the live list by default. Put it back as a real entry."
+         : "Hide this from the live triage list as a test entry. Reversible.") +
+       '">' + (u.isTest ? "↩︎ Not a test" : "🧪 Mark as test") + "</button>";
+-    return bulkCheck + head + trappedLine +
++    return bulkCheck + head + trappedLine + egressLine + silenceLine +
+       '<div class="meta">' + statusLabel(u.status, u.severity) + (mob ? " · " + mob : "") +
+       (lowBatt ? "" : " · Battery " + (u.batteryPercent != null ? u.batteryPercent : "?") + "%") + "</div>" +
+       battLine + updLine + rescueSlot + histBtn + testBtn;
+@@ -4333,9 +4892,13 @@ window.QuakeAngelRescue = (function () {
+   // ── B3: per-person full history modal ────────────────────────────────
+   function histMapLink(e) {
+     if (e.latitude == null || e.longitude == null) return "";
+-    return ' · <a href="https://www.google.com/maps/place/' +
+-      encodeURIComponent(e.latitude + "," + e.longitude) +
+-      '" target="_blank" rel="noopener">📍 map</a>';
++    // GDPR (2026-06): recentre our own map; never disclose a casualty's
++    // position to a third party via an outbound URL.
++    return ' · <a href="#map-wrap" class="qg-maplink"' +
++      ' data-qg-map-lat="' + esc(e.latitude) + '"' +
++      ' data-qg-map-lon="' + esc(e.longitude) + '"' +
++      ' data-qg-map-label="' + esc(e.short_code || e.device_id || "") + '"' +
++      ' title="Show this location on the map above">📍 map</a>';
+   }
+ 
+   function histEventHtml(e) {
+@@ -4350,9 +4913,38 @@ window.QuakeAngelRescue = (function () {
+         (e.notes ? ' · <i>note: ' + String(e.notes).replace(/</g, "&lt;") + "</i>" : "");
+     } else if (e.kind === "rescue_reverted") {
+       body = "↩ <b>Rescue mark undone</b> — restored to " + statusLabel(e.status, e.severity);
++    } else if (e.kind === "recheck_sent") {
++      body = "❓ <b>Re-check sent</b>" +
++        (e.delivered === false ? ' <span class="qg-hist-reconf">not delivered</span>' : "");
++    } else if (e.kind === "recheck_missed") {
++      // "We asked and heard nothing" is a fact in the record, not a gap in it.
++      body = "🔇 <b>No answer</b> to the previous re-check" +
++        (e.battery_pct != null ? " · 🔋 " + e.battery_pct + "%" : "");
++    } else if (e.kind === "recheck_answered") {
++      var ans = {
++        same: "SAME — no change",
++        worse: "WORSE",
++        much_worse: "MUCH WORSE",
++        better: "BETTER — reports improving",
++      }[e.answer] || String(e.answer || "").toUpperCase();
++      var lag = "";
++      if (e.queued_offline && e.received_at) {
++        // A 45-minute gap is itself operational information about signal at
++        // that location, so it is stated rather than hidden.
++        lag = ' <span class="qg-hist-reconf">answered ' +
++          new Date(e.answered_at).toLocaleTimeString() + ", reached us " +
++          new Date(e.received_at).toLocaleTimeString() + " (queued offline)</span>";
++      }
++      body = "🗣 <b>Answered: " + ans + "</b>" +
++        (e.deteriorating ? ' <span class="qg-badge" style="background:#C21818">↑ deteriorating</span>' : "") +
++        " · now " + statusLabel(e.status, e.severity) +
++        (e.battery_pct != null ? " · 🔋 " + e.battery_pct + "%" : "") +
++        (e.device_clock_suspect ? ' <span class="qg-hist-reconf">device clock suspect</span>' : "") +
++        lag + histMapLink(e);
+     } else {
+       body = "<b>" + statusLabel(e.status, e.severity) + "</b>" +
+         (e.mobility ? " · " + (e.mobility === "trapped" ? "can't move" : "can move") : "") +
++        (e.needs_extraction ? ' <span class="qg-badge" style="background:#C21818">cannot get out</span>' : "") +
+         (e.reconfirmation ? ' <span class="qg-hist-reconf">reconfirmed — same status, re-reported</span>' : "") +
+         (e.battery_pct != null ? " · 🔋 " + e.battery_pct + "%" : "") +
+         histMapLink(e);
+@@ -4412,6 +5004,10 @@ window.QuakeAngelRescue = (function () {
+     });
+   })();
+ 
++  // Exposed so the person-grouped activity feed (B6) opens the SAME modal —
++  // one history surface, not two that drift apart.
++  window.qgOpenHistory = openHistoryModal;
++
+   function wireRescueButtons(root, device) {
+     if (!window.QuakeAngelRescue || !root) return;
+     var slots = root.querySelectorAll ? root.querySelectorAll(".qg-rescue-slot") : [];
+@@ -4567,6 +5163,11 @@ window.QuakeAngelRescue = (function () {
+     // same severity. Low battery breaks ties (about to lose contact =
+     // more urgent to reach). The on-screen sort label states exactly this.
+     var byLongestTrapped = function (a, b) {
++      // Someone who cannot get out sorts to the top of their own band. It does
++      // not move them into a different band: severity is medical, extraction is
++      // structural, and the two must stay separate axes.
++      var ea = a.needsExtraction ? 0 : 1, eb = b.needsExtraction ? 0 : 1;
++      if (ea !== eb) return ea - eb;
+       var ta = new Date(a.trappedSince || a.lastUpdated || 0).getTime();
+       var tb = new Date(b.trappedSince || b.lastUpdated || 0).getTime();
+       if (ta !== tb) return ta - tb;   // earliest trapped start = longest waiting = first
