@@ -572,14 +572,34 @@ export default function AlertScreen() {
     }
 
     try {
-      const res = await postStatus({
-        status: kind === "safe" ? "safe" : "trapped",
-        severity: kind === "trapped" ? severity : null,
-        mobility: kind === "trapped" ? mobility : null,
-        egress: kind === "trapped" ? egress : null,
-        location: { latitude, longitude, accuracy, error: locationError },
-        battery: { level: batteryLevel, state: batteryState },
-      });
+      // #206 (Batch 7): a REHEARSAL or test run must never post a real
+      // status to the backend. Doing so puts a live "trapped" row on
+      // dispatch, which the re-check sweeper then wakes up on every
+      // schedule tick — the user gets real "Are you still OK?" pushes
+      // every few minutes because they were curious what the button did.
+      //
+      // Under isTestRun we simulate a successful post: same UI
+      // transitions, no network call, no post-submission side effects
+      // (rescue-info lock-screen card, cancel-rescue clear). The
+      // rehearsal exists to prove the buttons work; the moment we get
+      // to "here's what the button does after you tap it" the practice
+      // run is complete.
+      let res: { ok: boolean; status: number };
+      if (isTestRun) {
+        console.log(
+          `[QuakeGuard] TEST RUN — skipping real ${kind} post to backend`,
+        );
+        res = { ok: true, status: 200 };
+      } else {
+        res = await postStatus({
+          status: kind === "safe" ? "safe" : "trapped",
+          severity: kind === "trapped" ? severity : null,
+          mobility: kind === "trapped" ? mobility : null,
+          egress: kind === "trapped" ? egress : null,
+          location: { latitude, longitude, accuracy, error: locationError },
+          battery: { level: batteryLevel, state: batteryState },
+        });
+      }
       console.log(
         `[QuakeGuard] ${kind}${severity ? "/" + severity : ""}${mobility ? "/" + mobility : ""} → response status:`,
         res.status,
@@ -592,7 +612,12 @@ export default function AlertScreen() {
       // unconscious victim's locked phone, read the short code + name off
       // the lock screen, and match it to a pin on the dashboard — the
       // whole point of this feature.
-      if (kind === "trapped") {
+      //
+      // #206 (Batch 7): the rescue-info card is a REAL lock-screen
+      // notification. During a test run we skip posting it entirely, so
+      // a rehearsal never leaves a fake "help is coming" card on the
+      // user's own lock screen.
+      if (kind === "trapped" && !isTestRun) {
         // Fire-and-forget — do NOT block the "sent" UI transition on the
         // notification API, which occasionally takes a beat on cold-start.
         (async () => {

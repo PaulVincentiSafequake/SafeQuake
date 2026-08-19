@@ -322,16 +322,34 @@ def test_unknown_device_is_refused():
 
 
 # ── payload shape ────────────────────────────────────────────────────────
-def test_recheck_payload_is_critical_with_a_short_sound_and_its_own_category():
+def test_recheck_payload_default_is_time_sensitive_not_critical():
+    """#207 (Batch 7): re-checks used to fire at `critical` every time,
+    which retrained users to mute the whole app. They now default to
+    `time-sensitive` (still breaches Focus/DND, but respects the silent
+    switch) and only escalate to Critical when the caller says so —
+    once per person per incident, after three unanswered checks."""
     from apns import RECHECK_CATEGORY_ID, _build_recheck_payload
     p = _build_recheck_payload("t", "b", check_id="c1", device_id="d1")
     aps = p["aps"]
-    assert aps["interruption-level"] == "critical"
-    assert aps["sound"]["critical"] == 1
-    assert aps["sound"]["name"] == "recheck.wav"   # ~1s, NOT the 30s siren
+    assert aps["interruption-level"] == "time-sensitive"
+    assert aps["sound"] == "recheck.wav"   # ~1s chime, NOT the 30s siren
     assert aps["category"] == RECHECK_CATEGORY_ID != "TREMOR_INFO"
     assert p["kind"] == "recheck" and p["action_url"] == "/recheck"
     assert p["check_id"] == "c1"
+
+
+def test_recheck_payload_escalates_when_asked():
+    """#207: the sweeper decides when to escalate. Payload builder
+    honours it via `escalate=True`."""
+    from apns import _build_recheck_payload
+    p = _build_recheck_payload(
+        "t", "b", check_id="c1", device_id="d1",
+        consecutive_missed=3, escalate=True,
+    )
+    aps = p["aps"]
+    assert aps["interruption-level"] == "critical"
+    assert aps["sound"]["critical"] == 1
+    assert aps["sound"]["name"] == "recheck.wav"
 
 
 def test_critical_alert_payload_still_carries_no_category():

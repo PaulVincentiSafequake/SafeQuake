@@ -374,11 +374,16 @@ class TestTimeWindowsAndCodes:
     def test_b1_low_battery_plain_language(self, seeded):
         # detail=full: the 'trapped for' figure lives in the per-device
         # table, which is opt-in since issue #130.
+        #
+        # #216 (Batch 7): the narrative dropped the "below 20%" wording
+        # so B2 could obey its no-"%" rule without splitting the helper.
+        # The invariant is that the message is plain English AND that we
+        # tell the reader we might lose contact — both preserved.
         r = requests.get(B1_URL, headers=HEADERS,
                          params={**_window(), "detail": "full"}, timeout=30)
         text = _pdf_text(r.content)
-        assert "phone battery below 20%." in text
-        assert "We may stop receiving updates from them." in text
+        assert "phone battery running very low." in text
+        assert "We may stop hearing from them." in text
         assert "trapped for" in text, "B1 per-device table missing 'trapped for' figure"
 
 
@@ -470,6 +475,26 @@ class TestPdfHardening:
         # Privacy invariant: no names/codes on B2.
         assert "Harden Test Person" not in text
 
+    def test_b2_fits_on_one_page(self, seeded):
+        """#126 (Batch 7): the public report MUST fit on a single A4 page
+        under a realistic seeded window. Two pages is a regression — a
+        newsroom running it off will otherwise print two sheets when one
+        was expected, or worse, print the second page and lose the
+        first when it jams.
+
+        The invariant is the page count, not the exact spacing: any
+        future addition to B2 must earn its space, not silently push
+        the notes onto a second page.
+        """
+        from pypdf import PdfReader
+        r = requests.get(B2_URL, headers=HEADERS, params=_window(), timeout=30)
+        assert r.status_code == 200
+        reader = PdfReader(_io.BytesIO(r.content))
+        assert len(reader.pages) == 1, (
+            f"B2 regressed to {len(reader.pages)} pages — see #126. Tighten "
+            "spacing or shorten wording before adding to this report."
+        )
+
 
 class TestNarrativeTableConsistency:
     """Bug 2026-08-13: table said 'People rescued: 0' while the narrative
@@ -484,11 +509,16 @@ class TestNarrativeTableConsistency:
 
     @staticmethod
     def _narrative_rescued(text: str):
+        """#216 (Batch 7): wording moved to past tense in the window
+        narrative. Matches both the empty-case sentence and the populated
+        case with either singular ("was") or plural ("were") agreement."""
         import re
-        if "No one has been confirmed found by a rescue team yet." in text:
+        if "No one was found by a rescue team during this period." in text:
             return 0
-        m = re.search(r"(\d+)\s+(?:person has|people have)\s+been confirmed found by a rescue team",
-                      text.replace("\n", " "))
+        m = re.search(
+            r"(\d+)\s+(?:person was|people were)\s+found by a rescue team during this period",
+            text.replace("\n", " "),
+        )
         return int(m.group(1)) if m else None
 
     def test_b2_rescued_narrative_equals_table(self, seeded):
@@ -514,9 +544,13 @@ class TestNarrativeTableConsistency:
             )
 
     def test_self_reported_safe_is_its_own_line(self, seeded):
+        """#216: past-tense wording — 'told us themselves they were safe'.
+        The invariant is that this figure appears as its OWN sentence,
+        never merged into the rescue-team count."""
         b1, b2 = self._texts()
         for name, text in (("B1", b1), ("B2", b2)):
-            assert "told" in text and "us themselves that they are now safe." in text, (
+            flat = text.replace("\n", " ")
+            assert "told us themselves they were safe" in flat, (
                 f"{name} missing the separately-worded self-reported-safe figure"
             )
 

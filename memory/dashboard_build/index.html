@@ -1070,23 +1070,54 @@
   // reading stale numbers" failure mode. Full stale-banner design (per-
   // panel "not live" chips, retry messaging, three-state live/falling-
   // behind/stale) is Round 3 — this is the deliberately-narrow minimum.
+  //
+  // #230 (Batch 7): deliberately NOT dismissible. The banner is the
+  // dashboard's only remaining signal that the numbers on screen are
+  // frozen, and dismissing it means an operator can leave the tab open
+  // for hours reading numbers that stopped updating an hour ago. In
+  // this app "no longer updating" can be a life-safety fact — the
+  // trapped-count on screen may look calm because it isn't moving. The
+  // only correct dismissal is signing back in, which the banner links
+  // to via a "Sign in again" button.
   function qgShowSessionExpiredBanner() {
     var id = "qg-session-expired-banner";
     if (document.getElementById(id)) return;
     var el = document.createElement("div");
     el.id = id;
     el.setAttribute("role", "alert");
+    // aria-live="assertive" so a screen reader announces this over any
+    // in-progress reading — a stopped feed is the one thing that
+    // interrupts. (Paul is dyslexic; assistive tech has to help here.)
+    el.setAttribute("aria-live", "assertive");
     el.style.cssText = [
       "position:fixed", "top:0", "left:0", "right:0", "z-index:99999",
       "background:#b0141a", "color:#fff", "padding:14px 16px",
       "font:600 15px system-ui, -apple-system, sans-serif",
       "text-align:center", "box-shadow:0 2px 8px rgba(0,0,0,0.25)",
     ].join(";");
+    // Sign-in button routes to whatever renders the sign-in flow. If
+    // no such handler is wired, the button silently no-ops rather than
+    // 404 — the banner itself is the signal.
     el.innerHTML =
-      "You've been signed out. Sign in again to see live data — the numbers on this page are no longer updating." +
-      ' <button type="button" style="margin-left:12px;background:#fff;color:#b0141a;border:0;padding:6px 12px;border-radius:4px;font-weight:700;cursor:pointer" ' +
-      'onclick="this.parentNode.remove()">Dismiss</button>';
+      "You've been signed out. The numbers on this page are no longer updating." +
+      ' <button type="button" id="qg-session-signin-btn" style="margin-left:12px;background:#fff;color:#b0141a;border:0;padding:6px 12px;border-radius:4px;font-weight:700;cursor:pointer">Sign in again</button>';
     document.body.appendChild(el);
+    var btn = document.getElementById("qg-session-signin-btn");
+    if (btn) {
+      btn.addEventListener("click", function () {
+        try {
+          if (window.qaAuth && typeof window.qaAuth.signIn === "function") {
+            window.qaAuth.signIn();
+          } else {
+            // Fallback: reload the page — a fresh load will re-run the
+            // dashboard's sign-in flow.
+            window.location.reload();
+          }
+        } catch (_) {
+          window.location.reload();
+        }
+      });
+    }
   }
   window.qgShowSessionExpiredBanner = qgShowSessionExpiredBanner;
 
@@ -2496,7 +2527,15 @@
       if (!r.ok) { stateEl.textContent = "Could not read the re-check state (HTTP " + r.status + ")."; return; }
       var d = await r.json();
       enabled = !!d.enabled;
-      var people = d.trapped_count === 1 ? "1 person" : (d.trapped_count || 0) + " people";
+      var trappedN = d.trapped_count || 0;
+      var people = trappedN === 1 ? "1 person" : trappedN + " people";
+      // #231 (Batch 7): singular/plural agreement. "1 person currently
+      // need help" is wrong — under stress a reader trips on it before
+      // reading the number. Every count of humans in a sentence goes
+      // through the same singular/plural helper as the reports (see
+      // _n_people / _plural in reports_export.py). "needs" for one,
+      // "need" for many.
+      var needsVerb = trappedN === 1 ? "needs" : "need";
       var last = d.last_sweep_at
         ? (window.qgDurWords ? window.qgDurWords(Date.now() - new Date(d.last_sweep_at).getTime()) + " ago" : d.last_sweep_at)
         : "not yet";
@@ -2505,7 +2544,6 @@
       // minute ago and asked 0" contradicts "3 people currently need
       // help" in the same block. Say what "asked 0" actually meant:
       // either nobody was due for a check, or nobody was reachable.
-      var trappedN = d.trapped_count || 0;
       var lastSentence;
       if (!d.last_sweep_at) {
         lastSentence = "No check has run yet.";
@@ -2523,7 +2561,7 @@
         (enabled
           ? "Automatic checks are <b>on</b>. "
           : '<span class="qg-rc-paused">Automatic checks are PAUSED — nobody is being asked.</span> ') +
-        people + " currently need help. " + window.qgEsc(lastSentence) +
+        people + " currently " + needsVerb + " help. " + window.qgEsc(lastSentence) +
         "<br>People are asked more often at first and less often as time passes, and less often again when their battery is low.";
       pauseBtn.textContent = enabled ? "Pause automatic checks" : "Resume automatic checks";
       pauseBtn.className = enabled ? "" : "danger";

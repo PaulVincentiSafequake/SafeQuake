@@ -274,14 +274,28 @@ def _build_recheck_payload(
     device_id: str,
     ladder_step: Optional[int] = None,
     battery_saving: bool = False,
+    consecutive_missed: int = 0,
+    escalate: bool = False,
 ) -> dict:
     """APNs payload for a periodic re-check of someone who reported trapped.
 
-    Critical interruption level with a SHORT sound (recheck.wav, ~1 s), not
-    the 30-second siren. Critical is what gets through Do Not Disturb, Focus,
-    the ringer switch and a locked, face-down phone — which is precisely the
-    situation of someone under rubble — without turning every check into an
-    emergency.
+    #207 (Batch 7): re-checks are now sent at `time-sensitive` interruption
+    level by default. `time-sensitive` still breaches Focus / Do Not
+    Disturb — which is what a trapped person needs — WITHOUT the full
+    Critical Alert treatment that ignores the physical silent switch and
+    plays at full volume regardless of user preferences.
+
+    Escalation to `critical` happens EXACTLY ONCE per person per incident,
+    driven by the CALLER via the `escalate` flag (never by this function
+    guessing from the count). The sweeper sets `escalate=True` only when:
+      1. `consecutive_missed >= 3`, AND
+      2. the device row does NOT already carry a `critical_escalated`
+         sticky flag from an earlier escalation in this same trapped run.
+    Once escalated, the sticky flag is written back and subsequent
+    sweeps send at `time-sensitive` again — no matter how many further
+    checks go unanswered. The intent: breach the silent switch ONCE, at
+    the moment silence turns from ambiguous into worrying, and never
+    train the user to mute the whole app.
 
     Entitlement justification (agreed with Paul 2026-08-17, quote verbatim in
     any App Review response): this is sent ONLY to a person who has themselves
@@ -299,11 +313,20 @@ def _build_recheck_payload(
     time-critical answer, and it must not be the easiest button to hit by
     accident.
     """
+    if escalate:
+        sound = {"critical": 1, "name": "recheck.wav", "volume": 0.8}
+        interruption = "critical"
+    else:
+        # Same short chime file, played at normal volume through
+        # `time-sensitive` — bypasses Focus/DND but not the silent switch.
+        sound = "recheck.wav"
+        interruption = "time-sensitive"
+
     payload: dict = {
         "aps": {
             "alert": {"title": title, "body": body},
-            "sound": {"critical": 1, "name": "recheck.wav", "volume": 0.8},
-            "interruption-level": "critical",
+            "sound": sound,
+            "interruption-level": interruption,
             "relevance-score": 1,
             "category": RECHECK_CATEGORY_ID,
         },
@@ -314,6 +337,10 @@ def _build_recheck_payload(
         "check_id": check_id,
         "device_id": device_id,
         "battery_saving": battery_saving,
+        # Diagnostic breadcrumb — appears on the tremor-diagnostics panel
+        # so the operator can see WHY a specific check escalated.
+        "consecutive_missed": int(consecutive_missed or 0),
+        "escalated_to_critical": bool(escalate),
     }
     if ladder_step is not None:
         payload["ladder_step"] = ladder_step
@@ -700,6 +727,10 @@ async def send_recheck_prompts(
 
     async def _guarded(d: dict) -> tuple[dict, ApnsResult]:
         nonlocal last_payload
+        # #207 (Batch 7): the sweeper decides whether to escalate (once
+        # per person per incident) and passes an explicit `escalate`
+        # boolean. This function does NOT re-derive it from the count —
+        # that would re-escalate on every sweep past three misses.
         payload = _build_recheck_payload(
             title=title,
             body=body,
@@ -707,6 +738,8 @@ async def send_recheck_prompts(
             device_id=str(d.get("user_id") or ""),
             ladder_step=ladder_step,
             battery_saving=battery_saving,
+            consecutive_missed=int(d.get("consecutive_missed") or 0),
+            escalate=bool(d.get("escalate")),
         )
         last_payload = payload
         async with sem:

@@ -240,8 +240,41 @@ export default function RootLayout() {
     if (Platform.OS === "web") return;
 
     const handleTap = (data: Record<string, any>) => {
-      const kind = String(data.kind || "").trim();
+      // #208 defence-in-depth. `kind` is the primary router key, but for the
+      // re-check path — where the tap comes from someone who reported they
+      // are trapped — we treat ANY of the following as a positive signal
+      // and NEVER fall through to the informational stats screen:
+      //   - kind === "recheck"
+      //   - type === "recheck" (alias, in case an older payload used it)
+      //   - action_url === "/recheck"
+      //   - a non-empty check_id (unambiguous: only re-checks carry it)
+      //
+      // Rationale (Paul, 2026-08-19): a trapped person tapping a "still OK?"
+      // notification and landing on a stats page means they cannot report
+      // status. That failure mode must be one bad field away from a
+      // life-safety miss — so we require ALL four to be wrong before the
+      // handler is even allowed to consider another screen.
+      const kind = String(data.kind || data.type || "").trim();
+      const actionUrl = typeof data.action_url === "string" ? data.action_url : "";
+      const hasCheckId = data.check_id != null && String(data.check_id).length > 0;
+      const looksLikeRecheck =
+        kind === "recheck" || actionUrl === "/recheck" || hasCheckId;
       const unid = data.unid ? String(data.unid) : null;
+
+      // Re-check prompt (C1). Tapping the BODY opens the four-button screen;
+      // the lock-screen action buttons are handled before this ever runs.
+      //
+      // Placed BEFORE the critical-alert branch because a trapped user's
+      // "still OK?" tap must never be misclassified. `check_id` is the
+      // hard-guarantee marker: only /api/rechecks payloads carry it, and if
+      // it is present nothing else on the phone should be able to steer this
+      // tap away from /recheck.
+      if (looksLikeRecheck) {
+        const params = new URLSearchParams();
+        if (data.check_id != null) params.set("check_id", String(data.check_id));
+        router.push(("/recheck" + (params.toString() ? "?" + params.toString() : "")) as any);
+        return;
+      }
 
       // Real critical alert — route to /alert with event details as params.
       // The `siren=1` param signals the alert screen that it should play
@@ -256,15 +289,6 @@ export default function RootLayout() {
         if (data.region != null)      params.set("region", String(data.region));
         if (data.unid != null)        params.set("unid", String(data.unid));
         router.push(("/alert?" + params.toString()) as any);
-        return;
-      }
-
-      // Re-check prompt (C1). Tapping the BODY opens the four-button screen;
-      // the lock-screen action buttons are handled before this ever runs.
-      if (kind === "recheck") {
-        const params = new URLSearchParams();
-        if (data.check_id != null) params.set("check_id", String(data.check_id));
-        router.push(("/recheck" + (params.toString() ? "?" + params.toString() : "")) as any);
         return;
       }
 
@@ -373,10 +397,25 @@ export default function RootLayout() {
       }
     });
 
-    // Cold-start tap (app was killed when notification arrived)
+    // Cold-start tap (app was killed when notification arrived).
+    //
+    // Two cases matter here for a trapped user:
+    //   1. They tapped the BODY of a re-check notification — must land on
+    //      /recheck, never on /quake/[unid] (defect #208).
+    //   2. They tapped a lock-screen action button (SAME / WORSE / MUCH
+    //      WORSE) but the app was killed, so iOS may still deliver the
+    //      response on next launch — submit the answer immediately.
     Notifications.getLastNotificationResponseAsync().then((response) => {
       if (!response) return;
       const data = (response.notification.request.content.data ?? {}) as any;
+      if (response.actionIdentifier === ACTION_CLOSE) return;
+      const recheckAnswer = RECHECK_ACTION_ANSWERS[response.actionIdentifier];
+      if (recheckAnswer) {
+        getDeviceId()
+          .then((id) => submitRecheckAnswer(id, recheckAnswer, data.check_id))
+          .catch(() => {});
+        return;
+      }
       handleTap(data);
     });
 

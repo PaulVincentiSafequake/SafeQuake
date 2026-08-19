@@ -662,50 +662,117 @@ def _progress_figures(raw_rows: list[dict], latest_events: list[dict], counts: d
     }
 
 
-def _plain_language_progress(raw_rows: list[dict], latest_events: list[dict],
-                             counts: dict) -> list[str]:
-    """Short lines, one idea per line, no percentages, no jargon.
+def _window_narrative(raw_rows: list[dict], latest_events: list[dict],
+                      counts: dict) -> list[str]:
+    """PAST TENSE. Reads WINDOW data only.
 
-    HARD LOCKS (Paul, 2026-08-12/13):
-    - "found by a rescue team" and "told us themselves they are safe" are
-      two separate, separately-worded figures. Never merged into a single
-      "found" number.
-    - No percentages anywhere: the former B1 "Overall … (N%)" line merely
-      restated the split lines above it and was dropped 2026-08-13 at
-      Paul's request.
-    - Singular/plural handled ("1 person … has", never "1 of the 1 … have").
+    #216 (Batch 7): the narrative under "What happened during this
+    window" must speak strictly about the past — what took place during
+    the period covered by the report. It must NOT claim current state.
+    A sentence saying "1 person is still recorded as trapped" under a
+    "during this window" heading is the exact pattern that produced the
+    reports/tables contradiction bug — it uses present-tense verbs while
+    the reader has been told the section is about a past period.
+
+    HARD RULE (test-enforced): no sentence returned from here may use the
+    present-tense state words "is", "are", "still", "yet", "currently",
+    "right now", or "cannot". Anything that needs those words is a
+    current-state fact and belongs in `_current_state_narrative` instead.
+
+    HARD LOCKS (Paul, 2026-08-12/13, still in force):
+    - "found by a rescue team" and "told us themselves they were safe"
+      remain two separately-worded figures. Never merged.
+    - No percentages anywhere.
+    - Singular / plural handled through `_n_people` and `_plural`.
     """
-    f = _progress_figures(raw_rows, latest_events, counts)
-    total = f["total_trapped_reports"]
+    # `trapped_ids` = every device that told us "trapped" AT ANY POINT
+    # in the window (from raw_rows, the un-collapsed event list). That's
+    # the past-tense population — someone who reported trapped and later
+    # reported safe is still counted here, because during this period
+    # they DID tell us they were trapped.
+    trapped_ids = {r["device_id"] for r in raw_rows
+                   if r.get("status") == "trapped" and r.get("device_id")}
+    total = len(trapped_ids)
     if total == 0:
         return [
-            "No one has told us they are trapped in this time window.",
+            "No one told us they were trapped during this period.",
             "This only counts people using the app.",
-            "Others may be affected who we cannot see.",
+            "Others may have been affected who we cannot see.",
         ]
-    lines = [f"{_n_people(total)} told us they were trapped during this window."]
+    lines = [f"{_n_people(total)} told us they were trapped during this period."]
 
-    resc = f["rescued"]
+    # Rescued during the window — from _bucket_by_status(events), which
+    # counts one row per device whose LATEST event in the window was
+    # "rescued". Past tense: "was / were found by a rescue team".
+    resc = int(counts.get("rescued") or 0)
     if resc == 0:
-        lines.append("No one has been confirmed found by a rescue team yet.")
+        lines.append("No one was found by a rescue team during this period.")
     else:
-        lines.append(f"{_n_people(resc)} {_plural(resc, 'has', 'have')} been confirmed "
-                     "found by a rescue team.")
+        lines.append(
+            f"{_n_people(resc)} {_plural(resc, 'was', 'were')} "
+            "found by a rescue team during this period."
+        )
 
-    ss = f["self_safe"]
+    # People who reported trapped in this window AND later self-reported
+    # safe in this window (latest-event = safe). Past tense throughout.
+    ss = sum(1 for e in latest_events
+             if e.get("device_id") in trapped_ids and e.get("status") == "safe")
     if ss:
-        lines.append(f"{_n_people(ss)} who had been trapped {_plural(ss, 'has', 'have')} told "
-                     "us themselves that they are now safe.")
-
-    still = f["still_trapped"]
-    if still == 0:
-        lines.append("No one is still recorded as trapped.")
-    else:
-        lines.append(f"{_n_people(still)} {_plural(still, 'is', 'are')} still recorded as trapped.")
+        lines.append(
+            f"{_n_people(ss)} who reported being trapped later told us "
+            "themselves they were safe."
+        )
 
     lines.append("This only counts people using the app.")
-    lines.append("Others may be affected who we cannot see.")
+    lines.append("Others may have been affected who we cannot see.")
     return lines
+
+
+def _current_state_narrative(current_counts, latest_events: list[dict]) -> list[str]:
+    """PRESENT TENSE. Reads current state from compute_counts + latest_events.
+
+    #216 (Batch 7): every sentence here describes the situation right
+    now. Placed under the "Where things stand right now" heading, below
+    the aggregate table. Uses `compute_counts` — the same single source
+    of truth the table above uses — so the narrative and the table can
+    never disagree.
+
+    HARD RULE (test-enforced): sentences from here MUST NOT use past-tense
+    words like "was", "were", or "had been" as tense-carrying verbs. If
+    a fact is about what happened during a past period, it belongs in
+    `_window_narrative` instead.
+    """
+    lines: list[str] = []
+    needs = int(getattr(current_counts, "needs_help", 0) or 0)
+    if needs == 0:
+        lines.append("No one is waiting for help right now.")
+    else:
+        lines.append(
+            f"{_n_people(needs)} {_plural(needs, 'is', 'are')} "
+            "waiting for help right now."
+        )
+
+    not_resp = int(getattr(current_counts, "not_responding", 0) or 0)
+    if not_resp > 0:
+        lines.append(
+            f"We have not heard from {_n_people(not_resp)} in a while."
+        )
+
+    # Extraction and low-battery notes are CURRENT-state facts about
+    # people who ARE trapped now (`latest_events` filtered to
+    # status == "trapped"), so they belong here — not under
+    # "What happened during this window".
+    lines.extend(_extraction_lines(latest_events))
+    lines.extend(_low_battery_lines(latest_events))
+    return lines
+
+
+# Back-compat alias so old call sites (and any tests still referencing
+# the old name) do not immediately break. New code MUST call one of the
+# two functions above explicitly.
+def _plain_language_progress(raw_rows: list[dict], latest_events: list[dict],
+                             counts: dict) -> list[str]:
+    return _window_narrative(raw_rows, latest_events, counts)
 
 
 def _fmt_dt_plain(dt: datetime) -> str:
@@ -820,7 +887,14 @@ async def _trapped_since_map(device_ids) -> dict:
 
 def _low_battery_lines(latest_events: list[dict]) -> list[str]:
     """Item 4 (2026-08-13): low battery is a countdown to losing contact.
-    Plain words, states the total it is out of, never a bare percentage."""
+
+    #216 refinement (Batch 7): stated in plain words, WITHOUT the "20%"
+    threshold. The exact number is a technical detail that helps nobody
+    reading a public report — and B2 has a hard rule against any "%"
+    appearing on the page (press would quote it as "68% rescued" without
+    a denominator). The internal threshold is unchanged (20%); only the
+    wording is.
+    """
     still = [e for e in latest_events if e.get("status") == "trapped"]
     low = [e for e in still
            if isinstance(e.get("battery_pct"), (int, float)) and e["battery_pct"] < 20]
@@ -828,8 +902,8 @@ def _low_battery_lines(latest_events: list[dict]) -> list[str]:
         return []
     n, t = len(low), len(still)
     subject, verb = _subject_of_still_trapped(n, t)
-    first = f"{subject} {verb} a phone battery below 20%."
-    return [first, "We may stop receiving updates from them."]
+    first = f"{subject} {verb} a phone battery running very low."
+    return [first, "We may stop hearing from them."]
 
 def _extraction_lines(latest_events: list[dict]) -> list[str]:
     """Cannot-get-out is a separate axis from injury (2026-06-18).
@@ -1471,19 +1545,15 @@ async def casualty_report_operational_pdf(
     require_role(principal, "admin", "operator")
 
     events, since_dt, until_dt, raw_rows = await _gather_devices_in_report_window(since, until)
-    # A2/D1 (Batch 7): the aggregate table reads CURRENT state from the
-    # same function as the live dashboard. The narrative continues to
-    # use window-bounded event counts (that's a genuinely different
-    # question: "how many told us they were trapped DURING this window"
-    # vs "how many are trapped RIGHT NOW"). Previously both read the
-    # same _bucket_by_status(events), which counted the latest event
-    # per device WITHIN the window — so a device that became trapped
-    # BEFORE the window opened produced no in-window trapped event and
-    # the aggregate showed 0 while the narrative correctly said 1.
     from people_counts import compute_counts
     current_counts = await compute_counts(db, include_test=False)
     counts = _bucket_by_status(events)   # window-bounded, used by narrative
     authority = await _get_authority_name()   # for the footer copy — never hard-coded
+    # #218 (Batch 7): B1's closing line was still asserting cooperation
+    # even after D2 was applied to B2. Every rendered use of {authority}
+    # now branches on _cooperation_ok. Sites: 4 total (B1 close + B2
+    # issuer + B2 neutral + B2 footer), all gated as of this batch.
+    _cooperation_ok = await _get_authority_cooperation_claim()
     await _backfill_display_names(events)
     generated_by = principal.get("email", "?")
     if pseudonymise and "@" in generated_by:
@@ -1572,7 +1642,19 @@ async def casualty_report_operational_pdf(
         ("FONTNAME",   (0,-1), (-1,-1), "Helvetica-Bold"),
     ]))
     story.append(summary_tbl)
-    story.append(Spacer(0, 10))
+    story.append(Spacer(0, 8))
+
+    # #216 (Batch 7): the present-tense narrative sits DIRECTLY UNDER the
+    # aggregate table it explains. Same source (compute_counts + latest
+    # events), same tense (present). This is where "1 person is still
+    # waiting for help right now" is allowed to appear — never below the
+    # window heading further down.
+    _plain_style_b1 = PS("PL", parent=styles["Normal"], fontSize=9,
+                         leading=13, spaceAfter=1)
+    _now_lines = _current_state_narrative(current_counts, events)
+    for _line in _now_lines:
+        story.append(Paragraph(_html.escape(_line), _plain_style_b1))
+    story.append(Spacer(0, 8))
 
     # D1 (Batch 7): the transition sentence. Explicit about what the
     # two sections count differently so a reader never concludes the
@@ -1586,8 +1668,9 @@ async def casualty_report_operational_pdf(
     story.append(Spacer(0, 4))
 
     # ── What happened during this window ────────────────────────────
-    # Chart + plain-language progress (no percentages — see
-    # _plain_language_progress hard locks).
+    # Chart + PAST-TENSE narrative only. Any present-tense claim
+    # ("still", "yet", "currently", "is trapped") is a #216 regression
+    # and belongs above, next to the aggregate table.
     story.append(Paragraph("What happened during this window", h2_style))
     plain_style = PS("PL", parent=styles["Normal"], fontSize=9, leading=13, spaceAfter=1)
     buckets, _hourly = _bucket_timeline(raw_rows, since_dt, until_dt)
@@ -1599,11 +1682,7 @@ async def casualty_report_operational_pdf(
             textColor=colors.HexColor("#444444"))))
         story.append(Spacer(0, 6))
     from reportlab.platypus import KeepTogether as _KT
-    _narrative_lines = _plain_language_progress(raw_rows, events, counts)
-    # Low battery = countdown to losing contact (item 4). Plain words,
-    # states the total, never a bare percentage.
-    _narrative_lines.extend(_extraction_lines(events))
-    _narrative_lines.extend(_low_battery_lines(events))
+    _narrative_lines = _window_narrative(raw_rows, events, counts)
     story.append(_KT([
         Paragraph(_html.escape(line), plain_style)
         for line in _narrative_lines
@@ -1822,11 +1901,16 @@ async def casualty_report_public_pdf(
     Paragraph, Spacer, Table, TableStyle = r["Paragraph"], r["Spacer"], r["Table"], r["TableStyle"]
     styles, PS = r["styles"], r["ParagraphStyle"]
 
-    title_style = PS("T", parent=styles["Heading1"], fontSize=16, spaceAfter=8, textColor=colors.HexColor("#111"))
-    meta_style  = PS("M", parent=styles["Normal"], fontSize=9, textColor=colors.HexColor("#444"), spaceAfter=12)
-    h2_style    = PS("H2", parent=styles["Heading2"], fontSize=12, spaceAfter=6, textColor=colors.HexColor("#111"))
-    body_style  = PS("B", parent=styles["Normal"], fontSize=10, leading=14, spaceAfter=6)
-    footer_style = PS("F", parent=styles["Normal"], fontSize=8, textColor=colors.HexColor("#666"), spaceBefore=14)
+    # #126 (Batch 7): every style below was measured so the whole report
+    # sits on a single A4 page even under a realistic seeded window.
+    # Test lock: `test_b2_fits_on_one_page`. Any addition to B2 must
+    # earn its space back out of these knobs, not silently push a second
+    # sheet through a newsroom printer.
+    title_style = PS("T", parent=styles["Heading1"], fontSize=15, spaceAfter=5, textColor=colors.HexColor("#111"))
+    meta_style  = PS("M", parent=styles["Normal"], fontSize=9, textColor=colors.HexColor("#444"), spaceAfter=6)
+    h2_style    = PS("H2", parent=styles["Heading2"], fontSize=12, spaceAfter=4, textColor=colors.HexColor("#111"))
+    body_style  = PS("B", parent=styles["Normal"], fontSize=10, leading=13, spaceAfter=3)
+    footer_style = PS("F", parent=styles["Normal"], fontSize=8, textColor=colors.HexColor("#666"), spaceBefore=8)
 
     story = [
         Paragraph("Public status report", title_style),
@@ -1904,24 +1988,37 @@ async def casualty_report_public_pdf(
         ("FONTSIZE",   (0,0), (-1,-1), 10),
         ("BACKGROUND", (0,-1), (-1,-1), colors.HexColor("#f0f2f6")),
         ("FONTNAME",   (0,-1), (-1,-1), "Helvetica-Bold"),
-        ("BOTTOMPADDING", (0,0), (-1,-1), 5),
-        ("TOPPADDING",    (0,0), (-1,-1), 5),
+        # #126 (Batch 7): row padding trimmed from 5 to 3. The table is
+        # still easy to read (10pt Helvetica, alternating rows above and
+        # below a single hairline) and gains ~14mm back for the rest of
+        # the report to sit on one page.
+        ("BOTTOMPADDING", (0,0), (-1,-1), 3),
+        ("TOPPADDING",    (0,0), (-1,-1), 3),
         ("LINEABOVE",  (0,1), (-1,1), 0.5, colors.HexColor("#666")),
         ("LINEABOVE",  (0,-1), (-1,-1), 0.5, colors.HexColor("#666")),
         ("ALIGN",      (1,0), (1,-1), "RIGHT"),
     ]))
     story.append(summary_tbl)
 
+    # #216 (Batch 7): present-tense narrative sits DIRECTLY UNDER the
+    # aggregate table so numbers and words share a single frame — right
+    # now, from `compute_counts`. Public wording is the same as B1; the
+    # two reports must never disagree on what "right now" looks like.
+    story.append(Spacer(0, 4))
+    _now_lines = _current_state_narrative(current_counts, events)
+    for _line in _now_lines:
+        story.append(Paragraph(_html.escape(_line), body_style))
+
     # D1 (Batch 7): explicit transition sentence between "right now" and
     # "during this window". A journalist or family member reading the
     # report must understand that the two sections count different
     # things before they scan the numbers below.
-    story.append(Spacer(0, 8))
+    story.append(Spacer(0, 3))
     story.append(Paragraph(
         "These count different things. The table above is the situation right now. "
         "The section below covers everything that happened during the period.",
-        PS("B2SepNote", parent=body_style, fontSize=9.5, leading=13,
-           textColor=colors.HexColor("#444444"), spaceAfter=4),
+        PS("B2SepNote", parent=body_style, fontSize=9.5, leading=12,
+           textColor=colors.HexColor("#444444"), spaceAfter=2),
     ))
 
     # ── What happened during this window ────────────────────────────
@@ -1930,27 +2027,34 @@ async def casualty_report_public_pdf(
     # the denominator is only app users who checked in. Locked with
     # Paul 2026-08-12; see PRD "Legal / privacy locks".
     #
+    # #216 (Batch 7): this section is PAST TENSE only. Present-tense
+    # facts already sit next to the aggregate table above.
+    #
     # The heading, chart AND its plain-language explanation are ONE
     # KeepTogether block (3b, 2026-08-13): a reader must never have to
     # turn the page to find out what the chart means.
-    story.append(Spacer(0, 8))
+    # #126 (Batch 7): the chart height came down from 50mm to 38mm and
+    # the surrounding spacers were trimmed. The chart is still perfectly
+    # legible at 38mm — the y-axis is 0..N (whole people), never a fine
+    # decimal — and this is the single biggest saving on the page.
+    story.append(Spacer(0, 4))
     buckets, _hourly = _bucket_timeline(raw_rows, since_dt, until_dt)
     from reportlab.platypus import KeepTogether as _KT
     timeline_block = [Paragraph("What happened during this window", h2_style)]
     if any(b["trapped"] or b["safe"] or b["rescued"] for b in buckets):
-        timeline_block.append(_timeline_chart(buckets, 170 * mm, 50 * mm))
-        timeline_block.append(Spacer(0, 4))
+        timeline_block.append(_timeline_chart(buckets, 170 * mm, 38 * mm))
+        timeline_block.append(Spacer(0, 2))
         timeline_block.append(Paragraph(CHART_CAPTION, PS(
-            "ChartCapPub", parent=styles["Normal"], fontSize=8, leading=11,
+            "ChartCapPub", parent=styles["Normal"], fontSize=7.5, leading=10,
             textColor=colors.HexColor("#444444"))))
-        timeline_block.append(Spacer(0, 6))
+        timeline_block.append(Spacer(0, 3))
     timeline_block.extend(
         Paragraph(_html.escape(line), body_style)
-        for line in _plain_language_progress(raw_rows, events, counts)
+        for line in _window_narrative(raw_rows, events, counts)
     )
     story.append(_KT(timeline_block))
 
-    story.append(Spacer(0, 14))
+    story.append(Spacer(0, 6))
     # D2 (Batch 7): neutral footer wording by default. The "conducted by
     # [authority]" claim is gated behind the same cooperation setting as
     # the issuer line.

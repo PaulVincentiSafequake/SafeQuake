@@ -257,8 +257,29 @@ async def _dispatch_rechecks(
             })
 
         if token:
+            # #207 (Batch 7): pass `consecutive_missed` alongside the
+            # target so the payload builder can decide whether this
+            # specific person's check should escalate to Critical Alert
+            # (only after 3 unanswered in this same trapped incident;
+            # a fresh incident resets the counter). ONE escalation per
+            # person per incident: `critical_escalated` is a sticky
+            # flag on the device row that suppresses further
+            # escalations for the remainder of this trapped run. The
+            # payload builder gates on the `escalate` boolean below —
+            # `consecutive_missed` alone would re-escalate on every
+            # sweep once the count crossed 3.
+            missed = int(rc.get("consecutive_missed") or 0)
+            if pending:
+                # A pending check that has not been answered counts too.
+                missed += 1
+            already_escalated = bool(rc.get("critical_escalated"))
+            escalate = (missed >= 3) and (not already_escalated)
             targets.append({"user_id": did, "device_token": token,
-                            "check_id": check_id})
+                            "check_id": check_id,
+                            "consecutive_missed": missed,
+                            "escalate": escalate})
+            meta[check_id]["consecutive_missed"] = missed
+            meta[check_id]["escalate"] = escalate
         else:
             meta[check_id]["no_token"] = True
 
@@ -316,6 +337,13 @@ async def _dispatch_rechecks(
         missed = int(rc.get("consecutive_missed") or 0)
         if rc.get("pending_check_id"):
             missed += 1
+        # #207 (Batch 7): remember whether this incident has ALREADY
+        # been escalated to Critical Alert on this device — one
+        # escalation per person per trapped run, never twice. A new
+        # incident (safe / rescued cleared and trapped again later)
+        # resets this via `record_answer` and the status-flip handlers.
+        already_escalated = bool(rc.get("critical_escalated"))
+        will_escalate = bool(m.get("escalate"))
         await db.device_status.update_one(
             {"device_id": did},
             {"$set": {
@@ -327,6 +355,15 @@ async def _dispatch_rechecks(
                     "battery_saving": m["saving"],
                     "consecutive_missed": missed,
                     "checks_sent": int(rc.get("checks_sent") or 0) + 1,
+                    # Sticky once true. Cleared only when the person
+                    # tells us they're safe / is marked rescued —
+                    # both handled by `record_answer` and the
+                    # status-flip handlers on POST /status.
+                    "critical_escalated": already_escalated or will_escalate,
+                    "critical_escalated_at": (
+                        now.isoformat() if will_escalate
+                        else rc.get("critical_escalated_at")
+                    ),
                 },
             }},
         )
