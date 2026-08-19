@@ -737,6 +737,40 @@
     margin-left: 6px;
     vertical-align: middle;
   }
+  /* #213 (Batch 7): the "See on map" link is the main next action for
+     a row, so it must look like a control, not like decoration. Filled
+     background, cursor: pointer, and a visible pressed state.        */
+  #qg-audit .qg-maplink,
+  .qg-maplink {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 10px;
+    margin-left: 4px;
+    border-radius: 4px;
+    background: #2f6feb;
+    color: #fff !important;
+    text-decoration: none;
+    font-weight: 700;
+    font-size: 12px;
+    line-height: 1.4;
+    cursor: pointer;
+    border: 1px solid #2559c0;
+    transition: background 0.12s ease, transform 0.05s ease;
+    white-space: nowrap;
+  }
+  #qg-audit .qg-maplink:hover,
+  .qg-maplink:hover { background: #2559c0; }
+  #qg-audit .qg-maplink:active,
+  .qg-maplink:active {
+    background: #1b4a9a;
+    transform: translateY(1px);
+  }
+  #qg-audit .qg-maplink:focus-visible,
+  .qg-maplink:focus-visible {
+    outline: 2px solid #ffb703;
+    outline-offset: 2px;
+  }
   #qg-audit .qg-audit-empty {
     color: #888;
     font-size: 13px;
@@ -1070,23 +1104,54 @@
   // reading stale numbers" failure mode. Full stale-banner design (per-
   // panel "not live" chips, retry messaging, three-state live/falling-
   // behind/stale) is Round 3 — this is the deliberately-narrow minimum.
+  //
+  // #230 (Batch 7): deliberately NOT dismissible. The banner is the
+  // dashboard's only remaining signal that the numbers on screen are
+  // frozen, and dismissing it means an operator can leave the tab open
+  // for hours reading numbers that stopped updating an hour ago. In
+  // this app "no longer updating" can be a life-safety fact — the
+  // trapped-count on screen may look calm because it isn't moving. The
+  // only correct dismissal is signing back in, which the banner links
+  // to via a "Sign in again" button.
   function qgShowSessionExpiredBanner() {
     var id = "qg-session-expired-banner";
     if (document.getElementById(id)) return;
     var el = document.createElement("div");
     el.id = id;
     el.setAttribute("role", "alert");
+    // aria-live="assertive" so a screen reader announces this over any
+    // in-progress reading — a stopped feed is the one thing that
+    // interrupts. (Paul is dyslexic; assistive tech has to help here.)
+    el.setAttribute("aria-live", "assertive");
     el.style.cssText = [
       "position:fixed", "top:0", "left:0", "right:0", "z-index:99999",
       "background:#b0141a", "color:#fff", "padding:14px 16px",
       "font:600 15px system-ui, -apple-system, sans-serif",
       "text-align:center", "box-shadow:0 2px 8px rgba(0,0,0,0.25)",
     ].join(";");
+    // Sign-in button routes to whatever renders the sign-in flow. If
+    // no such handler is wired, the button silently no-ops rather than
+    // 404 — the banner itself is the signal.
     el.innerHTML =
-      "You've been signed out. Sign in again to see live data — the numbers on this page are no longer updating." +
-      ' <button type="button" style="margin-left:12px;background:#fff;color:#b0141a;border:0;padding:6px 12px;border-radius:4px;font-weight:700;cursor:pointer" ' +
-      'onclick="this.parentNode.remove()">Dismiss</button>';
+      "You've been signed out. The numbers on this page are no longer updating." +
+      ' <button type="button" id="qg-session-signin-btn" style="margin-left:12px;background:#fff;color:#b0141a;border:0;padding:6px 12px;border-radius:4px;font-weight:700;cursor:pointer">Sign in again</button>';
     document.body.appendChild(el);
+    var btn = document.getElementById("qg-session-signin-btn");
+    if (btn) {
+      btn.addEventListener("click", function () {
+        try {
+          if (window.qaAuth && typeof window.qaAuth.signIn === "function") {
+            window.qaAuth.signIn();
+          } else {
+            // Fallback: reload the page — a fresh load will re-run the
+            // dashboard's sign-in flow.
+            window.location.reload();
+          }
+        } catch (_) {
+          window.location.reload();
+        }
+      });
+    }
   }
   window.qgShowSessionExpiredBanner = qgShowSessionExpiredBanner;
 
@@ -1844,7 +1909,7 @@
     </div>
     <div>
       <h1>Quake Angel &mdash; Emergency Response Dashboard (PILOT / DEMO)</h1>
-      <p>Live device data. Refreshes every 4 seconds.</p>
+      <p>Live data on people who have checked in. Refreshes every 4 seconds.</p>
     </div>
   </div>
   <div class="header-actions">
@@ -1855,6 +1920,25 @@
     </button>
   </div>
 </header>
+
+<!-- ═══════════════════════════════════════════════════════════════════
+     Batch 7 #225: persistent tremor-notifications state strip.
+     Design invariant (new, Batch 7): a feature that is switched off
+     MUST say so somewhere a human will see it. This strip renders one
+     sentence, always visible on every view, not dismissible. Detail
+     lives in the collapsible panel further down; the strip alone is
+     enough to answer "is anything being sent at all?".
+
+     Admin+operator only — the strip stays hidden for signed-out
+     visitors (they don't operate this system). Fetched from the same
+     read-only endpoint the panel consumes.
+     ═══════════════════════════════════════════════════════════════════ -->
+<div id="qg-tremor-strip" role="status" aria-live="polite"
+     style="display:none; padding:10px 16px; font:600 13.5px system-ui, sans-serif;
+            border-bottom:1px solid #b0141a; background:#fef4f2; color:#5a0f13; text-align:center">
+  <span id="qg-tremor-strip-text"></span>
+  <span id="qg-tremor-strip-cta" style="margin-left:12px; font-weight:500; color:#5a0f13"></span>
+</div>
 
 <div class="layout">
   <div id="map-wrap">
@@ -1889,7 +1973,7 @@
     </div>
     <div class="qg-list-tools">
       <input id="qg-triage-search" type="search"
-             placeholder="Search code, name or device ID…"
+             placeholder="Search by name or rescue code…"
              aria-label="Search the triage list">
       <!-- #146: test entries are hidden by default so they can't be mistaken
            for real casualties, but they are never silently destroyed — this
@@ -2013,30 +2097,54 @@
 </style>
 
 <div id="qa-um-root" class="qa-um-panel" style="display:none">
-  <h2 id="qa-um-toggle">Operators &amp; Access</h2>
+  <h2 id="qa-um-toggle">Who can use this dashboard</h2>
+  <!-- #232 (Batch 7): plain-language subtitle. The old one said "manage
+       90-day account expiry" which is admin-speak. Says why you'd
+       use this section in one sentence. -->
   <div class="qa-um-subtitle">
-    Add operators, change roles, and manage 90-day account expiry. Admin-only.
+    Choose who can sign in, and what they're allowed to do. For example: giving
+    a colleague access so they can help during an emergency, or removing
+    someone who has left.
   </div>
   <div class="qa-um-body">
     <div id="qa-um-msg-slot"></div>
 
+    <!-- #232 (Batch 7): the two roles are explained ON the form so
+         the person adding someone reads what each role can actually do
+         before choosing. Framing lock: an OPERATOR is at a desk, not on
+         the ground. Nothing in this product is for a rescuer standing
+         at a collapsed building. -->
+    <div class="qa-um-role-explainer" style="background:var(--surface); border:1px solid var(--border, #d0d0d8); border-radius:8px; padding:12px 14px; margin:0 0 12px 0; font-size:12px; line-height:1.5; color:var(--text)">
+      <div style="margin-bottom:6px"><strong>Operator</strong> — the coordinator at a desk, watching this map and directing help.
+        They can look at the map, look someone up by their rescue code when it
+        comes over the radio, mark someone as found once a team has reached them,
+        ask people "are you still OK?", and download reports for the team.
+        They cannot add or remove anyone, and they cannot set off an alert.
+      </div>
+      <div><strong>Admin</strong> — the person who runs the system.
+        Everything an operator can do, and also: add people to this list or
+        remove them, set off the earthquake alert, and change the logo and
+        authority name that appear on reports.
+      </div>
+    </div>
+
     <form class="qa-um-add-form" id="qa-um-add-form" onsubmit="return false">
-      <input type="email" id="qa-um-add-email" placeholder="new.operator@example.com" required />
+      <input type="email" id="qa-um-add-email" placeholder="their email address (e.g. name@example.com)" required />
       <label><input type="radio" name="qa-um-add-role" value="operator" checked> Operator</label>
       <label><input type="radio" name="qa-um-add-role" value="admin"> Admin</label>
       <button type="submit" class="qa-um-action-btn qa-um-primary" id="qa-um-add-submit">
-        Add operator
+        Add person
       </button>
     </form>
 
     <table class="qa-um-table" id="qa-um-table">
       <thead>
         <tr>
-          <th>Email</th>
-          <th>Role</th>
+          <th>Person</th>
+          <th>What they can do</th>
           <th>Status</th>
-          <th>Expires</th>
-          <th>Last login</th>
+          <th>Access ends</th>
+          <th>Last signed in</th>
           <th style="min-width:200px">Actions</th>
         </tr>
       </thead>
@@ -2477,7 +2585,15 @@
       if (!r.ok) { stateEl.textContent = "Could not read the re-check state (HTTP " + r.status + ")."; return; }
       var d = await r.json();
       enabled = !!d.enabled;
-      var people = d.trapped_count === 1 ? "1 person" : (d.trapped_count || 0) + " people";
+      var trappedN = d.trapped_count || 0;
+      var people = trappedN === 1 ? "1 person" : trappedN + " people";
+      // #231 (Batch 7): singular/plural agreement. "1 person currently
+      // need help" is wrong — under stress a reader trips on it before
+      // reading the number. Every count of humans in a sentence goes
+      // through the same singular/plural helper as the reports (see
+      // _n_people / _plural in reports_export.py). "needs" for one,
+      // "need" for many.
+      var needsVerb = trappedN === 1 ? "needs" : "need";
       var last = d.last_sweep_at
         ? (window.qgDurWords ? window.qgDurWords(Date.now() - new Date(d.last_sweep_at).getTime()) + " ago" : d.last_sweep_at)
         : "not yet";
@@ -2486,7 +2602,6 @@
       // minute ago and asked 0" contradicts "3 people currently need
       // help" in the same block. Say what "asked 0" actually meant:
       // either nobody was due for a check, or nobody was reachable.
-      var trappedN = d.trapped_count || 0;
       var lastSentence;
       if (!d.last_sweep_at) {
         lastSentence = "No check has run yet.";
@@ -2504,7 +2619,7 @@
         (enabled
           ? "Automatic checks are <b>on</b>. "
           : '<span class="qg-rc-paused">Automatic checks are PAUSED — nobody is being asked.</span> ') +
-        people + " currently need help. " + window.qgEsc(lastSentence) +
+        people + " currently " + needsVerb + " help. " + window.qgEsc(lastSentence) +
         "<br>People are asked more often at first and less often as time passes, and less often again when their battery is low.";
       pauseBtn.textContent = enabled ? "Pause automatic checks" : "Resume automatic checks";
       pauseBtn.className = enabled ? "" : "danger";
@@ -2527,7 +2642,25 @@
       if (!r.ok) { say("Could not prepare the check (HTTP " + r.status + ").", "error"); return; }
       var d = await r.json();
       if (!d.would_ask) {
-        say("There is no one to ask right now — nobody is currently marked as needing help with a phone that can answer.", "error");
+        // #231b (Batch 7): branch by the actual reason, not one catch-all
+        // sentence. Nobody-needs-help is very different from someone-
+        // needs-help-but-we-can't-reach-them; conflating the two hides
+        // information the operator has to act on.
+        var totalTrapped = Number(d.trapped_total || 0);
+        var unreachable = Number(d.unreachable || 0);
+        if (totalTrapped === 0) {
+          say("Nobody needs help right now — there is nobody to ask.");
+        } else if (unreachable > 0) {
+          var subj = unreachable === 1
+            ? "1 person needs help, but their phone has gone dark"
+            : unreachable + " people need help, but their phones have gone dark";
+          say(subj + " — we cannot reach them to ask.", "error");
+        } else {
+          // Rare corner case: trapped_total > 0 but neither would_ask
+          // nor unreachable — most likely a severity filter matched
+          // nothing. Say so honestly rather than blaming the phones.
+          say("No one matches this filter right now.");
+        }
         return;
       }
       var lines = (d.cost && d.cost.lines ? d.cost.lines : []).map(function (l) {
@@ -2658,9 +2791,9 @@
         <!-- #130: summary is the DEFAULT — the per-device table can run
              to many pages in a large incident and is opt-in only. -->
         <select class="qg-b1-detail" id="qg-b1-detail"
-                title="Summary only keeps the report short in a large incident; full detail adds one table row per device.">
-          <option value="summary" selected>Summary only — no per-device table</option>
-          <option value="full">Full detail — with per-device table</option>
+                title="Summary keeps the report short in a large incident; full detail adds one row per person.">
+          <option value="summary" selected>Summary only — totals</option>
+          <option value="full">Full detail — one row per person</option>
         </select>
       </label>
     </div>
@@ -2737,7 +2870,7 @@
       var err = e.error ? '<div style="color:#c21818;font-size:12px;margin-top:4px"><b>Error:</b> ' + esc(e.error) + "</div>" : "";
       return '<div class="qg-audit-row trigger">' +
           '<div class="qg-audit-title">⚠️ TRIGGER ' + badge + ' · ' + mag + ' · ' +
-            esc(e.recipients_total || 0) + ' device' + (e.recipients_total === 1 ? '' : 's') +
+            esc(e.recipients_total || 0) + ' ' + (e.recipients_total === 1 ? 'person' : 'people') +
             ' (' + counts + ') · by <code>' + esc(e.triggered_by || "dashboard") + '</code></div>' +
           err + '<div class="qg-audit-at">' + whenWords(e.at) + '</div></div>';
     }
@@ -2779,7 +2912,7 @@
         ' data-qg-map-lat="' + esc(e.latitude) + '"' +
         ' data-qg-map-lon="' + esc(e.longitude) + '"' +
         ' data-qg-map-label="' + esc(e.short_code || e.device_id || "") + '"' +
-        ' title="Show this location on the map above">📍 map</a>';
+        ' title="Show this location on the map above">📍 See on map</a>';
     }
     var bat = e.battery_pct != null ? " · 🔋 " + esc(e.battery_pct) + "%" : "";
     // B6: the wire value (`not_responding`, `trapped`) is never printed at an
@@ -2885,7 +3018,7 @@
         ' data-qg-map-lat="' + esc(p.latitude) + '"' +
         ' data-qg-map-lon="' + esc(p.longitude) + '"' +
         ' data-qg-map-label="' + esc(p.short_code || p.device_id || "") + '"' +
-        ' title="Show this location on the map above">📍 map</a>';
+        ' title="Show this location on the map above">📍 See on map</a>';
     }
     var updates = p.updates === 1 ? "1 update" : p.updates + " updates";
     var meta = "Latest " + esc(feedAgoWords(p.at)) + " · " + updates + " in this window" +
@@ -3832,7 +3965,7 @@ window.QuakeAngelRescue = (function () {
           } else if (e.status === 403) {
             showModalError("Your account isn't allowed to revert a rescue.");
           } else if (e.status === 409) {
-            showModalError("Device is not currently rescued — it may have already been reverted.");
+            showModalError("This person is not currently marked as rescued — the record may have already been reverted.");
           } else {
             showModalError("Failed: " + e.message + " — click Revert to try again.");
           }
@@ -3992,6 +4125,23 @@ window.QuakeAngelRescue = (function () {
 </div>
 
 <!-- ═════════════════════════════════════════════════════════════════════
+     Batch 7 #225: "Tremor notifications — what's been sent" panel.
+     Reference tier (per dashboard-restructure-spec): sits below the
+     working area, above the admin testing tools, admin+operator only.
+     Panel body is populated by JS from /api/admin/tremor-diagnostics.
+     Plain language only — no enums, no jargon.
+     ═════════════════════════════════════════════════════════════════════ -->
+<details id="qg-tremor-panel" style="display:none; margin:12px 12px 4px; padding:6px 16px 14px;
+     background:var(--surface); border:1px solid var(--border, #d0d3d9); border-radius:8px">
+  <summary style="cursor:pointer; font-size:14px; font-weight:700; color:var(--text); padding:10px 0; user-select:none">
+    Tremor notifications — what's been sent
+  </summary>
+  <div id="qg-tremor-panel-body" style="font-size:13px; color:var(--text); line-height:1.5">
+    Loading…
+  </div>
+</details>
+
+<!-- ═════════════════════════════════════════════════════════════════════
      Admin testing tools — deliberately at the BOTTOM of the working area,
      but ABOVE the "Powered by Quake Angel" footer (Batch 7 C2, 2026-08-19).
      Preview Mode (incl. PANIC KILL + radius override) used to be injected
@@ -4011,8 +4161,31 @@ window.QuakeAngelRescue = (function () {
     🧪 Admin testing tools — Preview Mode &amp; radius override
   </summary>
   <div style="font-size:12px; color:var(--text-muted); margin:2px 0 10px">
-    Nothing in this section is needed during a real incident. Test devices, preview
+    Nothing in this section is needed during a real incident. Test people, preview
     broadcasts, the panic kill and the radius override all live here, away from live operations.
+  </div>
+  <!-- #229 (Batch 7): 33 hand-designed test people. Seeded rows are
+       obviously fake — every display_name starts with TEST, every code
+       starts with Z, and the whole set can be removed in one click. -->
+  <div id="qg-test-people-33" style="padding:10px 0; border-bottom:1px dashed var(--border, #ccc); margin-bottom:10px">
+    <div style="font-size:13px; font-weight:700; color:var(--text); margin-bottom:6px">
+      33 test people
+    </div>
+    <div style="font-size:12px; color:var(--text-muted); margin-bottom:8px">
+      Adds 33 clearly-fake people to the map for practice.
+      Names start with TEST, rescue codes start with Z, and nothing is sent to any real phone.
+    </div>
+    <div style="display:flex; gap:8px; flex-wrap:wrap">
+      <button type="button" id="qg-tp-add"
+              style="background:#2f6feb; color:#fff; border:0; padding:8px 14px; border-radius:6px; font-weight:700; cursor:pointer">
+        Add 33 test people
+      </button>
+      <button type="button" id="qg-tp-clear"
+              style="background:#c21818; color:#fff; border:0; padding:8px 14px; border-radius:6px; font-weight:700; cursor:pointer">
+        Remove all test people
+      </button>
+      <span id="qg-tp-msg" style="font-size:12px; color:var(--text-muted); align-self:center"></span>
+    </div>
   </div>
   <div id="qg-admintools-slot"></div>
 </details>
@@ -4036,6 +4209,42 @@ window.QuakeAngelRescue = (function () {
   }
   new MutationObserver(syncVisibility).observe(panel, { attributes: true, attributeFilter: ["class"] });
   syncVisibility();
+
+  // #229 (Batch 7): wire the two "33 test people" buttons. Confirms
+  // before adding (so a fast click doesn't drop 33 rows on top of a
+  // live incident) and confirms with a count before removing.
+  var addBtn = document.getElementById("qg-tp-add");
+  var clrBtn = document.getElementById("qg-tp-clear");
+  var msgEl = document.getElementById("qg-tp-msg");
+  function tpSay(t, isErr) {
+    if (!msgEl) return;
+    msgEl.style.color = isErr ? "#c21818" : "var(--text-muted)";
+    msgEl.textContent = t || "";
+  }
+  if (addBtn) addBtn.addEventListener("click", async function () {
+    if (!window.confirm("Add 33 clearly-fake test people to the dashboard? Their names all start with TEST and their rescue codes all start with Z.")) return;
+    addBtn.disabled = true; tpSay("Adding…");
+    try {
+      var r = await window.qaApi("/api/admin/test-people/seed", { method: "POST", body: "{}" });
+      var d = await r.json();
+      if (!r.ok) throw new Error(d && d.detail || ("HTTP " + r.status));
+      tpSay("Added " + (d.seeded || 0) + " test people. Their rows will look clearly fake on the map.");
+    } catch (e) {
+      tpSay((e && e.message) || "Could not add test people.", true);
+    } finally { addBtn.disabled = false; }
+  });
+  if (clrBtn) clrBtn.addEventListener("click", async function () {
+    if (!window.confirm("Remove ALL seeded test people from the dashboard? Only rows starting with TEST are removed — real records are not touched.")) return;
+    clrBtn.disabled = true; tpSay("Removing…");
+    try {
+      var r = await window.qaApi("/api/admin/test-people/clear", { method: "POST", body: "{}" });
+      var d = await r.json();
+      if (!r.ok) throw new Error(d && d.detail || ("HTTP " + r.status));
+      tpSay("Removed " + (d.removed || 0) + " test people.");
+    } catch (e) {
+      tpSay((e && e.message) || "Could not remove test people.", true);
+    } finally { clrBtn.disabled = false; }
+  });
 
   // Guard: Return inside any preview-panel input must never trigger an
   // action. Buttons stay keyboard-accessible (Space / Enter when the
@@ -5637,6 +5846,130 @@ window.QuakeAngelRescue = (function () {
       if (!ok) return;
       sendStopReminders();
     });
+  }
+
+  // ── Batch 7 #225: tremor-notifications state renderer ─────────────
+  // Populates both the persistent top-strip and the collapsible panel.
+  // Admin+operator only. Falls back to hidden when signed out or when
+  // the endpoint returns 401/403 — the strip must never lie by showing
+  // a fresh state to a user who can't refresh it.
+  var _tremorStrip     = document.getElementById("qg-tremor-strip");
+  var _tremorStripText = document.getElementById("qg-tremor-strip-text");
+  var _tremorStripCta  = document.getElementById("qg-tremor-strip-cta");
+  var _tremorPanel     = document.getElementById("qg-tremor-panel");
+  var _tremorPanelBody = document.getElementById("qg-tremor-panel-body");
+
+  function _tremorSignedIn() {
+    var u = window.qaAuth && window.qaAuth.user && window.qaAuth.user();
+    var role = (u && typeof u.role === "string") ? u.role.toLowerCase() : null;
+    return role === "admin" || role === "operator";
+  }
+
+  function _tremorFmtRow(r) {
+    var esc = window.qgEsc;
+    var mag = (r.magnitude == null) ? "M?" : ("M" + Number(r.magnitude).toFixed(1));
+    var when = r.at ? new Date(r.at).toLocaleString() : "—";
+    return '<tr>' +
+      '<td style="padding:4px 8px; white-space:nowrap">' + esc(when) + '</td>' +
+      '<td style="padding:4px 8px">' + esc(r.kind || "") + '</td>' +
+      '<td style="padding:4px 8px">' + esc(mag) + " · " + esc(r.region || "—") + '</td>' +
+      '<td style="padding:4px 8px; text-align:right">' + esc(String(r.delivered || 0)) + ' of ' + esc(String(r.targeted || 1)) + '</td>' +
+      '<td style="padding:4px 8px; font-family:ui-monospace,monospace; color:#666">' + esc(r.device_id_tail || "") + '</td>' +
+      '</tr>';
+  }
+
+  function _renderTremorPanel(d) {
+    var esc = window.qgEsc;
+    var head = '<p style="margin:2px 0 12px"><b>' + esc(d.headline || "") + '</b></p>';
+    if (d.how_to_turn_on) {
+      head += '<p style="margin:0 0 12px; color:#5a0f13">' + esc(d.how_to_turn_on) + '</p>';
+    }
+    // Ingestion side, plain-worded.
+    var ingest =
+      '<p style="margin:0 0 10px; color:#555">' +
+      esc(String(d.events_ingested_24h || 0)) + ' events picked up in the last 24 hours, ' +
+      esc(String(d.events_ingested_7d || 0)) + ' in the last 7 days. ' +
+      (d.poller_last_error
+        ? '<span style="color:#b0141a">Last check-in with the earthquake feed failed: ' + esc(d.poller_last_error) + '</span>'
+        : 'The earthquake feed is being checked normally.') +
+      '</p>';
+    var body;
+    if (!d.recent_sends || d.recent_sends.length === 0) {
+      body = '<p style="margin:0; color:#555"><i>Nothing has been sent yet.</i></p>';
+    } else {
+      body = '<table style="border-collapse:collapse; width:100%; font-size:12px; margin-top:4px">' +
+        '<thead><tr style="background:#f0f2f6; text-align:left">' +
+          '<th style="padding:6px 8px">When</th>' +
+          '<th style="padding:6px 8px">Kind</th>' +
+          '<th style="padding:6px 8px">Event</th>' +
+          '<th style="padding:6px 8px; text-align:right">Delivered</th>' +
+          '<th style="padding:6px 8px">Phone</th>' +
+        '</tr></thead><tbody>' +
+        d.recent_sends.map(_tremorFmtRow).join("") +
+        '</tbody></table>';
+    }
+    var provenance = d.config_last_updated_at
+      ? '<p style="margin:12px 0 0; color:#888; font-size:11px">' +
+        'Settings last changed on ' +
+        esc(new Date(d.config_last_updated_at).toLocaleString()) +
+        '. Fetched at ' + esc(new Date(d.at || Date.now()).toLocaleTimeString()) + '.</p>'
+      : "";
+    _tremorPanelBody.innerHTML = head + ingest + body + provenance;
+  }
+
+  async function _refreshTremorState() {
+    if (!_tremorSignedIn()) {
+      _tremorStrip.style.display = "none";
+      _tremorPanel.style.display = "none";
+      return;
+    }
+    _tremorPanel.style.display = "";
+    try {
+      var r = await window.qaApi("/api/admin/tremor-diagnostics", { cache: "no-store" });
+      if (!r.ok) {
+        // 401/403 → the qaApi wrapper flips the auth banner; stay quiet
+        // rather than showing a wrong state.
+        _tremorStrip.style.display = "none";
+        _tremorPanelBody.innerHTML = '<p style="color:#5a0f13">' +
+          window.qgFriendlyError(new Error("HTTP " + r.status), {
+            fallback: "We couldn't read the tremor-notifications state right now.",
+          }) + '</p>';
+        return;
+      }
+      var d = await r.json();
+      // Persistent strip: ALWAYS visible when signed in as admin/operator.
+      // Amber tint when "off", subtle when sending.
+      _tremorStrip.style.display = "block";
+      _tremorStripText.textContent = d.headline || "";
+      if (d.is_sending) {
+        _tremorStrip.style.background = "#f0f7f2";
+        _tremorStrip.style.color = "#0f4a1f";
+        _tremorStrip.style.borderBottom = "1px solid #1F8A3A";
+        _tremorStripCta.textContent = "";
+      } else {
+        _tremorStrip.style.background = "#fef4f2";
+        _tremorStrip.style.color = "#5a0f13";
+        _tremorStrip.style.borderBottom = "1px solid #b0141a";
+        _tremorStripCta.textContent = d.how_to_turn_on || "";
+      }
+      _renderTremorPanel(d);
+    } catch (e) {
+      _tremorStrip.style.display = "none";
+      _tremorPanelBody.innerHTML = '<p style="color:#5a0f13">' +
+        window.qgFriendlyError(e, {
+          fallback: "We couldn't read the tremor-notifications state right now.",
+        }) + '</p>';
+    }
+  }
+
+  if (_tremorStrip && _tremorPanel) {
+    _refreshTremorState();
+    if (window.qaAuth && window.qaAuth.onChange) {
+      window.qaAuth.onChange(_refreshTremorState);
+    }
+    // Poll every 60s so an off→on flip on the backend surfaces without a
+    // reload. Cheap: two small collections + one config doc per call.
+    setInterval(_refreshTremorState, 60000);
   }
 })();
 </script>
