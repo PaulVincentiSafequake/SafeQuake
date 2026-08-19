@@ -59,7 +59,7 @@ function timeAgoShort(iso: string): string {
 export default function MapCanvas(props: MapCanvasProps) {
   const {
     events, center, radiusMeters, radiusIsSolid, onEventPress,
-    focus = null, highlightExternalId = null, onUserMoved,
+    focus = null, highlightExternalId = null, onRegionChange,
   } = props;
   // Opened from an event ("see this on the map"): start tight on that
   // event instead of the whole basin, so it doesn't have to be hunted for.
@@ -81,14 +81,21 @@ export default function MapCanvas(props: MapCanvasProps) {
       rotateEnabled={false}
       pitchEnabled={false}
       toolbarEnabled={false}
-      // #212 (Batch 7): notify the parent when the user has moved the map
-      // away from the initial Malta-centred view, so the "Circle: ~300km
-      // around Malta" caption can be hidden once the circle is no longer
-      // guaranteed on screen. isGesture=true filters out the initial
-      // programmatic settle so we only report REAL user pans/zooms.
-      onRegionChangeComplete={(_region, details) => {
-        if (details && details.isGesture && onUserMoved) {
-          try { onUserMoved(); } catch { /* non-fatal */ }
+      // #212 (Batch 7 R4, corrected 2026-08-19 night):
+      // The previous cut only listened for `isGesture=true` region
+      // changes so the initial programmatic settle wouldn't hide the
+      // caption. But the MOST COMMON way the map ends up far from
+      // Malta is `See on map` on an event — which is a PROGRAMMATIC
+      // move. Filtering programmatic moves out was exactly wrong: the
+      // one path that takes you away was the one the listener ignored.
+      //
+      // New rule: report EVERY region change, and let the parent
+      // decide whether the circle is still on screen. Center of the
+      // visible region is the honest signal — how the map got there
+      // doesn't matter.
+      onRegionChangeComplete={(region) => {
+        if (onRegionChange) {
+          try { onRegionChange(region.latitude, region.longitude); } catch { /* non-fatal */ }
         }
       }}
     >

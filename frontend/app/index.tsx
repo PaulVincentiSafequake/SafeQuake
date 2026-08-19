@@ -27,6 +27,7 @@ import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context"
 
 import { AppleWatchNote } from "@/src/components/AppleWatchNote";
 import EntitlementBanner from "@/src/components/EntitlementBanner";
+import { shouldRedirectToAlert, toAlertQuery } from "@/src/utils/activeAlert";
 import { colors, radius, spacing } from "@/src/theme";
 import {
   getDisplayName,
@@ -100,6 +101,10 @@ export default function HomeScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const [triggering, setTriggering] = useState(false);
+  // #253 / #209 (Batch 7 R4): measured height of the sticky bottom bar.
+  // Fallback of 140 covers the pre-layout first paint without leaving
+  // safety text under the button.
+  const [stickyBarHeight, setStickyBarHeight] = useState(140);
   // ?preview=1 forces the iOS-only update-reminder banner to render on web
   // during development — has no effect on real devices.
   const { preview } = useLocalSearchParams<{ preview?: string }>();
@@ -201,6 +206,38 @@ export default function HomeScreen() {
       setWatchState({ kind: "nag", reason: "never" });
     }
   }, [currentVersion, forcePreview]);
+
+  // #208 R4 (Batch 7, 2026-08-19 — Paul's night verification):
+  //   "Opening the app while an alert is live and unanswered must go
+  //    straight to the check-in screen. An unanswered alert is the
+  //    most important thing in the app's world at that moment; it
+  //    must not be possible to open the app and not see it."
+  //
+  // Runs on mount AND whenever the app returns to foreground so someone
+  // who backgrounded the app during a real alert lands on /alert as
+  // soon as they come back, not on the drop-cover-hold marketing card.
+  //
+  // Cleared by the check-in submit path (safe/trapped). Silence never
+  // clears it — rule 9.2, silence is information, not an answer.
+  useEffect(() => {
+    let cancelled = false;
+    const checkAndRedirect = () => {
+      shouldRedirectToAlert()
+        .then((a) => {
+          if (cancelled || !a) return;
+          router.replace(("/alert" + toAlertQuery(a)) as any);
+        })
+        .catch(() => { /* non-fatal: worst case, home screen renders */ });
+    };
+    checkAndRedirect();
+    const sub = AppState.addEventListener("change", (next: AppStateStatus) => {
+      if (next === "active") checkAndRedirect();
+    });
+    return () => {
+      cancelled = true;
+      sub.remove();
+    };
+  }, [router]);
 
   // Run on mount and every time app returns to foreground. The AppState
   // listener is what makes the banner truly sticky across sessions —
@@ -498,9 +535,18 @@ export default function HomeScreen() {
     <View style={styles.root}>
       <StatusBar style="light" />
 
+      {/* #253 / #209 root-cause fix (Batch 7 R4): reserve exactly the
+          sticky bar's real measured height as the ScrollView's bottom
+          padding, so scrolling content is never covered by the trigger
+          button. Previously a magic `120 + insets.bottom` was reserved,
+          which under-reserved on taller devices (the button + shadow +
+          insets can exceed that) and left the "AFTER — check for
+          injuries" step of the earthquake safety card partly obscured.
+          Measuring with onLayout removes the magic number entirely —
+          the reserve grows with the bar, not with a guess. */}
       <ScrollView
         contentContainerStyle={{
-          paddingBottom: 120 + insets.bottom,
+          paddingBottom: stickyBarHeight + spacing.md,
         }}
         showsVerticalScrollIndicator={false}
       >
@@ -519,7 +565,20 @@ export default function HomeScreen() {
           <SafeAreaView edges={["top"]} style={styles.heroContent}>
             <View style={styles.statusRow} testID="system-status-banner">
               <View style={styles.statusDot} />
-              <Text style={styles.statusText}>SYSTEM ACTIVE · MONITORING</Text>
+              {/* #86 (Batch 7 R4, 2026-08-19 night — Paul):
+                    "Standing rule: never imply professional rescuers are
+                     monitoring until that is contractually true."
+                  The previous line "SYSTEM ACTIVE · MONITORING" implied
+                  the exact reassurance the system cannot provide. Rule
+                  9.9. Replaced with two short lines that describe what
+                  the app genuinely does — an alert coming in AND a
+                  report going out — approved verbatim. */}
+              <View style={{ flex: 1 }}>
+                <Text style={styles.statusText}>Connected and ready.</Text>
+                <Text style={styles.statusSubText}>
+                  We'll alert you, and you can tell rescuers how you are and where you are.
+                </Text>
+              </View>
             </View>
             <Text style={styles.brand}>QUAKE ANGEL</Text>
             <Text style={styles.tagline}>
@@ -703,9 +762,15 @@ export default function HomeScreen() {
 
         {/* Tips */}
         <View style={styles.section}>
-          <Text style={styles.sectionTitle}>SAFETY PROTOCOL</Text>
+          {/* #C12 (Batch 7 R4): heading is sentence case, plain English,
+              says what it is FOR rather than what it IS. The four cards
+              below still say DROP / COVER / HOLD ON in capitals —
+              deliberate exception to sentence case (Paul), the
+              internationally recognised standard phrase used by
+              earthquake authorities worldwide (rule 9.11). */}
+          <Text style={styles.sectionTitle}>What to do when it shakes</Text>
           <Text style={styles.sectionSub}>
-            Memorize these four steps. Every second counts.
+            Learn these four steps. Every second counts.
           </Text>
 
           <View style={styles.tipsList}>
@@ -738,7 +803,7 @@ export default function HomeScreen() {
             <Ionicons name="information-circle" size={20} color={colors.brandSecondary} />
             <Text style={styles.infoText}>
               This is a test tool. Tapping below simulates an earthquake alert so
-              you can practice reporting yourself safe.
+              you can practise reporting yourself safe.
             </Text>
           </View>
         </View>
@@ -783,6 +848,7 @@ export default function HomeScreen() {
 
       {/* Sticky trigger */}
       <View
+        onLayout={(e) => setStickyBarHeight(e.nativeEvent.layout.height)}
         style={[
           styles.stickyBar,
           { paddingBottom: Math.max(insets.bottom, spacing.lg) },
@@ -1029,10 +1095,18 @@ const styles = StyleSheet.create({
     backgroundColor: colors.success,
   },
   statusText: {
+    color: colors.onSurface,
+    fontSize: 13,
+    letterSpacing: 0.5,
+    fontWeight: "700",
+  },
+  statusSubText: {
     color: colors.onSurfaceSecondary,
-    fontSize: 11,
-    letterSpacing: 2,
-    fontWeight: "600",
+    fontSize: 12,
+    letterSpacing: 0.2,
+    fontWeight: "500",
+    marginTop: 2,
+    lineHeight: 16,
   },
   brand: {
     color: colors.onSurface,

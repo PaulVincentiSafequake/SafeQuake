@@ -273,8 +273,8 @@ class TestAppSideInvariants:
     def test_app_version_bumped(self):
         import json
         cfg = json.load(open("/app/frontend/app.json"))
-        # #208 (Batch 7): bumped to 1.0.29 with hardened re-check routing.
-        assert cfg["expo"]["version"] == "1.0.30"
+        # #251 (Batch 7 R4): bumped to 1.0.31 with #208/#205/#253/#245 fixes.
+        assert cfg["expo"]["version"] == "1.0.31"
         info = cfg["expo"]["ios"]["infoPlist"]
         # export-compliance answer baked in so App Store Connect stops asking
         assert info["ITSAppUsesNonExemptEncryption"] is False
@@ -392,7 +392,11 @@ class TestIssue169SirenPlaysOnTest:
 
     def test_real_critical_alert_tap_still_sets_siren(self):
         layout = open("/app/frontend/app/_layout.tsx").read()
-        crit = layout.split('if (kind === "critical_alert") {')[1].split("return;")[0]
+        # #208 R4 (Batch 7): the critical-alert branch broadened to
+        # accept ANY earthquake-alert-shaped payload (kind, action_url,
+        # or magnitude). The invariant this test locks — siren=1 on a
+        # real critical alert — must still hold after that broadening.
+        crit = layout.split('if (looksLikeAlert) {')[1].split("return;")[0]
         assert 'params.set("siren", "1")' in crit
 
     def test_test_run_plays_siren_but_arms_no_reminders(self):
@@ -552,11 +556,12 @@ class TestBuildIdentification:
 
     def test_diag_carries_a_hardcoded_fix_marker(self):
         diag = open("/app/frontend/app/diag.tsx").read()
-        # The marker text changes every build; what must never change is that
-        # it is HARD-CODED, not derived from the version number — that is how
-        # a build shipping without the fix gets caught before a test cycle is
-        # wasted on it (Paul, 2026-08-18).
-        assert "1.0.30 — #208 recheck routing hardened" in diag
+        # The marker DESCRIPTION stays hard-coded so a build shipping
+        # without the fix gets caught (Paul, 2026-08-18). The leading
+        # version number is now single-source (#251, Batch 7 R4) — read
+        # from `info.app_version` — so all three version rows on the
+        # Diagnostics card are guaranteed to agree.
+        assert "#208 R4 primary alert" in diag
         assert 'label="fixes in this build"' in diag
 
 

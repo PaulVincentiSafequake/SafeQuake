@@ -33,12 +33,11 @@ export type MapCanvasProps = {
   /** external_id of the event to draw emphasised (ring + larger dot). */
   highlightExternalId?: string | null;
   /**
-   * Called ONCE the user has panned/zoomed the map away from the
-   * initial region (isGesture=true from react-native-maps). #212
-   * (Batch 7): the "Circle: ~300 km around Malta" caption reads
-   * this to hide itself when the circle is no longer guaranteed
-   * to be on screen — currently visible while the map was over
-   * Turkey with no circle in sight, which was the bug.
+   * Called after any map region change — user gesture OR programmatic.
+   * #212 (R4): supplies the current visible center so the parent can
+   * decide whether the circle-around-Malta caption is still relevant.
+   * All region changes report; the parent decides — the previous
+   * gesture-only filter missed the "See on map" case.
    */
-  onUserMoved?: () => void;
+  onRegionChange?: (latitude: number, longitude: number) => void;
 };

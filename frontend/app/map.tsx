@@ -129,13 +129,15 @@ export default function SeismicMapScreen() {
   const [errText, setErrText] = useState<string | null>(null);
   const [windowHours, setWindowHours] = useState<WindowChoice>(168);
   const [preset, setPreset] = useState<Preset>("noticeable");
-  // #212 (Batch 7): the "Circle: ~N km around Malta" caption only
-  // makes sense while the circle is actually on screen. As soon as the
-  // user has panned or zoomed the map away from the initial view we
-  // can no longer guarantee that, so the caption hides itself. It comes
-  // back on a fresh mount / when the preset radius changes to Everything
-  // (the 600 km poll radius always frames what data is on-screen).
-  const [userMovedMap, setUserMovedMap] = useState(false);
+  // #212 (Batch 7 R4, corrected 2026-08-19 night): the "Circle: ~N km
+  // around Malta" caption is honest ONLY while the circle is actually
+  // on screen. We track the visible map center in state and hide the
+  // caption when it is more than the circle radius away from Malta —
+  // regardless of how the map got there (user gesture, "See on map",
+  // programmatic pan). Previous cut only listened for user gestures
+  // and so kept the caption while the "See on map" button had panned
+  // the map to Sicily with no circle in sight.
+  const [mapCenter, setMapCenter] = useState<{ lat: number; lng: number } | null>(null);
 
   const fetchEvents = useCallback(async (hours: WindowChoice) => {
     setErrText(null);
@@ -272,12 +274,35 @@ export default function SeismicMapScreen() {
       <Text style={styles.attributionText} numberOfLines={2}>
         {attribution}
       </Text>
-      {presetRadiusM !== null && !userMovedMap && (
-        <Text style={styles.attributionSub}>
-          Circle: ~{Math.round(presetRadiusM/1000)} km around Malta
-          {presetIsSolid ? " (poll radius)" : " (approximate — real felt area is intensity-shaped)"}
-        </Text>
-      )}
+      {(() => {
+        // #212 (R4): show the caption only when the map's current
+        // center is within the circle's own radius of Malta — i.e.
+        // when the circle is genuinely on screen. Small great-circle
+        // distance approx via haversine, in km.
+        if (presetRadiusM === null) return null;
+        if (!mapCenter) return null;   // pre-region-report: hide by default
+        const R = 6371;
+        const toRad = (d: number) => (d * Math.PI) / 180;
+        const dLat = toRad(mapCenter.lat - MALTA.latitude);
+        const dLng = toRad(mapCenter.lng - MALTA.longitude);
+        const a = Math.sin(dLat / 2) ** 2
+                + Math.cos(toRad(MALTA.latitude))
+                  * Math.cos(toRad(mapCenter.lat))
+                  * Math.sin(dLng / 2) ** 2;
+        const km = 2 * R * Math.asin(Math.min(1, Math.sqrt(a)));
+        const radiusKm = presetRadiusM / 1000;
+        // A little slack so the caption doesn't flicker at the boundary.
+        const visible = km <= radiusKm * 1.1;
+        if (!visible) return null;
+        return (
+          <Text style={styles.attributionSub}>
+            Circle: ~{Math.round(radiusKm)} km around Malta
+            {presetIsSolid
+              ? " (poll radius)"
+              : " (approximate — real felt area is intensity-shaped)"}
+          </Text>
+        );
+      })()}
     </View>
   );
 
@@ -365,7 +390,7 @@ export default function SeismicMapScreen() {
           radiusMeters={presetRadiusM}
           radiusIsSolid={presetIsSolid}
           onEventPress={goToEvent}
-          onUserMoved={() => setUserMovedMap(true)}
+          onRegionChange={(lat, lng) => setMapCenter({ lat, lng })}
         />
         {loading && (
           <View style={styles.mapLoader}>

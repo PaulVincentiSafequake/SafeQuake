@@ -80,6 +80,14 @@ from deps import (
     short_code as _short_code,
 )
 
+# #245 (Batch 7 R4, 2026-08-19 night): the phrase the operator must
+# type to broadcast a real earthquake alert. Fixed string so an audit
+# reader can grep for it; capitalised so it reads as a formal command,
+# not a suggestion; and it names the consequence in the words
+# themselves. The phrase is checked case-insensitively so a stressed
+# operator typing in a hurry does not fail on shift-key differences.
+TRIGGER_ALERT_CONFIRMATION = "SEND EARTHQUAKE ALERT TO ALL PHONES"
+
 # ---------- Deploy fingerprint ----------
 # Computed once at process start. Cheap way to tell whether the running
 # instance actually reloaded this file — useful when the dashboard swears
@@ -991,6 +999,22 @@ class TriggerAlertBody(BaseModel):
     magnitude: Optional[float] = None
     distance_km: Optional[float] = None
     intensity: Optional[str] = None
+    # #245 (Batch 7 R4, 2026-08-19 night — Paul):
+    #   "A real alert cannot be sent without an explicit confirmation
+    #    naming the consequence, plus a fresh password, and the audit
+    #    log afterwards shows all of it."
+    #
+    # Google auth in this product carries no local password, so
+    # "fresh password" maps to the same TYPE-TO-CONFIRM pattern that
+    # the dashboard already uses for delete-user and change-role:
+    # the operator types a phrase naming the consequence.
+    #
+    # Case-insensitive comparison against TRIGGER_ALERT_CONFIRMATION.
+    # A blank or wrong phrase produces a plain-language 400 — never a
+    # bare "unauthorised". This field is REQUIRED for the endpoint to
+    # send anything; it is checked before ANY push is queued and its
+    # presence + value are written to the audit log.
+    confirmation_phrase: Optional[str] = None
 
 
 class NotificationPresetBody(BaseModel):
@@ -2018,6 +2042,39 @@ async def redact_notes(
 
 
 
+@api_router.get("/admin/trigger-alert/preview")
+async def trigger_alert_preview(
+    request: Request,
+    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
+):
+    """#245 (Batch 7 R4): counts the operator sees BEFORE they confirm.
+
+    The dashboard's type-to-confirm dialog reads this to say — plainly,
+    in the confirm text — how many phones will siren if the operator
+    types the phrase. Same auth as /trigger-alert itself so a signed-out
+    operator does not see the counts.
+    """
+    principal = await resolve_principal(request, x_admin_token, ADMIN_TRIGGER_PASSWORD, db)
+    require_role(principal, "admin", "operator")
+    devices = await db.push_devices.find(
+        {}, {"_id": 0, "user_id": 1, "platform": 1, "device_token": 1},
+    ).to_list(20000)
+    ios = sum(
+        1 for d in devices
+        if (d.get("platform") or "").lower() == "ios" and d.get("device_token")
+    )
+    android = sum(
+        1 for d in devices if (d.get("platform") or "").lower() != "ios"
+    )
+    total = ios + android
+    return {
+        "total": total,
+        "ios": ios,
+        "android": android,
+        "confirmation_phrase": TRIGGER_ALERT_CONFIRMATION,
+    }
+
+
 @api_router.post("/trigger-alert")
 async def trigger_alert(
     body: TriggerAlertBody,
@@ -2031,10 +2088,36 @@ async def trigger_alert(
     Auth: JWT (Bearer) OR legacy X-Admin-Token. Role: admin OR operator.
     The authenticated user's email is written into push_events.triggered_by
     for the audit trail — replacing the pre-#9 hardcoded "dashboard" value.
+
+    #245 (Batch 7 R4): a real alert now requires a matching confirmation
+    phrase in `body.confirmation_phrase`. The phrase names the
+    consequence (matches TRIGGER_ALERT_CONFIRMATION below), the check
+    happens BEFORE any push is queued, and the phrase that was typed is
+    written into push_events.confirmation_phrase so the audit log
+    shows exactly what the operator was asked and what they answered.
+    Sending without the phrase — or with the wrong one — returns 400
+    with a plain-language message no operator has to translate.
     """
     principal = await resolve_principal(request, x_admin_token, ADMIN_TRIGGER_PASSWORD, db)
     require_role(principal, "admin", "operator")
     triggered_by_user = audit_attribution(principal)
+
+    # #245 (Batch 7): phrase check. Case-insensitive; whitespace-tolerant.
+    # We do NOT reveal the expected phrase in the error — that is up to
+    # the dashboard modal, which shows it in the confirm dialog.
+    typed = (body.confirmation_phrase or "").strip().upper()
+    expected = TRIGGER_ALERT_CONFIRMATION.strip().upper()
+    if typed != expected:
+        # Plain-language HTTP error — never "unauthorised" or a code.
+        # See #237/#239: raw errors don't reach operators in this product.
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Confirmation phrase missing or wrong. "
+                "Type the phrase shown in the confirm dialog exactly, "
+                "then send again."
+            ),
+        )
 
     query = {}
     if body.triggeredBy:
@@ -2160,6 +2243,13 @@ async def trigger_alert(
             "chunks": events,               # legacy field (Android)
             "apns_events": apns_events,     # per-recipient iOS results
             "apns_payload": apns_payload,   # exact JSON body POSTed to Apple
+            # #245 (Batch 7 R4): what the operator was asked to type, and
+            # what they actually typed. Recorded exactly so an inquiry
+            # can prove the operator saw the consequence in words before
+            # the phones sirened. Case is normalised for the check but
+            # the raw input is preserved verbatim for the audit.
+            "confirmation_expected": TRIGGER_ALERT_CONFIRMATION,
+            "confirmation_typed": (body.confirmation_phrase or ""),
         })
     except Exception as e:
         logging.warning(f"Failed to persist push_events: {e}")

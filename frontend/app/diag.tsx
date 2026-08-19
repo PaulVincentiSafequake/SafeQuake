@@ -239,12 +239,23 @@ export default function DiagScreen() {
           <Row label="platform" value={info?.platform?.toUpperCase() ?? "—"} />
           <Row label="app version" value={info?.app_version ?? "—"} />
           <Row label="build number" value={info?.build_number ?? "—"} />
-          {/* Build marker (#169 aftermath). Deliberately a HARD-CODED row
-              rather than a version comparison: this row only exists in the
-              bundle that contains the fix, so its presence can't be wrong
-              and its ABSENCE is itself the answer. Version lookups can
-              disagree with the binary; a code marker can't. */}
-          <Row label="fixes in this build" value="1.0.30 — #208 recheck routing hardened, #216 tense-by-source, #126 B2 one-page, #210 plain-language settings, #206 rehearsal isolated, #207 recheck time-sensitive (Critical after 3 misses, once per person)" />
+          {/* #251 (Batch 7 R4): the leading version number here now
+              reads from the SAME `info.app_version` as the two rows
+              above — so all three rows are guaranteed to agree. The
+              DESCRIPTION of the fixes stays a hard-coded string (Paul
+              2026-08-18: "what must never change is that it is
+              HARD-CODED, not derived from the version — that is how a
+              build shipping without the fix gets caught"), but the
+              version number is a single source. Last round the two
+              got out of sync: shipped as 1.0.29 while this row still
+              read 1.0.30, and Paul nearly skipped the build. */}
+          <Row
+            label="fixes in this build"
+            value={
+              (info?.app_version ?? "?") +
+              " — #208 R4 primary alert routes to check-in + unanswered-alert redirect on cold-open, #205 single-source event readings, #253 safety-instruction never clips, #245 type-to-confirm on trigger-alert, #212 caption honest at any zoom, #251 version rows share one source"
+            }
+          />
         </Section>
 
         <Section title="Siren">

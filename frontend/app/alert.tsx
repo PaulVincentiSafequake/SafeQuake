@@ -47,6 +47,7 @@ import {
   postRescueInfoNotification,
   scheduleCheckInReminders,
 } from "@/src/utils/reminders";
+import { clearActiveAlert } from "@/src/utils/activeAlert";
 
 const SIREN_SOURCE = require("../assets/audio/siren.mp3");
 
@@ -72,9 +73,11 @@ export default function AlertScreen() {
     test?: string;
     rehearse?: string;
   }>();
-  const eventMagnitude = params.magnitude ?? null;
-  const eventDistanceKm = params.distance_km ?? null;
-  const eventIntensity = params.intensity ?? null;
+  // #205 (Batch 7 R4): the three constants that used to live here
+  // (eventMagnitude / eventDistanceKm / eventIntensity, each reading
+  // ONLY from URL params) have been removed. Every render now reads
+  // from `eventReadings` below — the single function every surface on
+  // this screen shares. See the block-comment there for the rule.
   // Siren defaults OFF when the param is missing — deliberate fail-safe.
   // Set by the notification-tap handler for kind=critical_alert AND by the
   // Trigger Test Alert button on Home, so a practice run exercises exactly
@@ -319,6 +322,48 @@ export default function AlertScreen() {
     });
   }, []);
 
+  // #205 (Batch 7 R4, 2026-08-19 night — verbatim to Paul's rule):
+  //   "Name the single function that supplies magnitude, distance and
+  //    intensity, and confirm all four surfaces read from it: the
+  //    notification payload, the alert-screen panel, the aftershock
+  //    banner, and the seismic detail page."
+  //
+  // This IS that function. It resolves the current reading for every
+  // surface on the alert screen:
+  //   - The notification payload lands its values in `params` (URL
+  //     search params, populated by _layout.tsx handleTap).
+  //   - An aftershock arriving mid-answer publishes its values via
+  //     the alert bus into `aftershock` state.
+  //   - The rehearsal path publishes the SAME synthetic reading
+  //     through the SAME bus — so it flows through here as well.
+  //
+  // Rule: an aftershock (if present) is fresher than the URL params.
+  // Both the aftershock banner and the metrics panel read from here.
+  // Missing fields render as "—" — never as stale hard-coded 6.4/12/VII.
+  //
+  // What this fixes (Paul's screenshot, build 130): the amber banner
+  // read "M5.1" while the panel below it read MAGNITUDE — because
+  // banner and panel had different sources. Both now share this one.
+  const eventReadings = {
+    magnitude:
+      aftershock?.magnitude ??
+      (params.magnitude ? String(params.magnitude) : null),
+    distance_km:
+      aftershock?.distance_km ??
+      (params.distance_km ? String(params.distance_km) : null),
+    intensity:
+      aftershock?.intensity ??
+      (params.intensity ? String(params.intensity) : null),
+    depth_km:
+      aftershock?.depth_km ??
+      (params.depth_km ? String(params.depth_km) : null),
+    region:
+      aftershock?.region ??
+      (params.region ? String(params.region) : null),
+    unid:
+      aftershock?.unid ??
+      (params.unid ? String(params.unid) : null),
+  };
   const aftershockMagnitude = aftershock?.magnitude ?? null;
 
   // Aftershock REHEARSAL (Paul, 2026-06-18). He asked to see the aftershock
@@ -607,6 +652,16 @@ export default function AlertScreen() {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       setStatus("sent");
 
+      // #208 R4 (Batch 7): the alert has now been answered. Clear the
+      // "unanswered alert" marker so the home screen stops redirecting
+      // to /alert. Answering is the ONLY thing that clears it —
+      // swiping the notification, restarting the phone, the siren
+      // timing out — none of those clear it. Rule 9.2, silence is
+      // information, not an answer.
+      if (!isTestRun) {
+        clearActiveAlert().catch(() => {});
+      }
+
       // Post-submission side effects: manage the persistent rescue-info
       // lock-screen card. This is what lets a responder pick up an
       // unconscious victim's locked phone, read the short code + name off
@@ -805,9 +860,50 @@ export default function AlertScreen() {
           <Text style={[styles.heading, compact && styles.headingCompact]}>
             EARTHQUAKE{"\n"}DETECTED
           </Text>
-          <Text style={[styles.subheading, compact && styles.subheadingCompact]}>
-            Drop. Cover. Hold on.{"\n"}Move to open space when shaking stops.
-          </Text>
+          {/* #253 (Batch 7 R4): the two-sentence safety instruction was
+              rendered with a hard `\n` inside a single <Text>, and when
+              the aftershock banner pushed the layout down "stops" got
+              clipped — turning "move to open space WHEN SHAKING STOPS"
+              into "move to open space WHEN SHAKING". That is the
+              opposite of correct earthquake guidance on the one screen
+              where clipping a word can hurt somebody.
+
+              Root-cause fix (Paul's rule: fix the layout, not the
+              wording). TWO invariants now hold on this block:
+
+              1. Each sentence renders as its OWN <Text> and both are
+                 wrapped in a `flexShrink: 0` container — the container
+                 must give up other space (icon pulse, spacing) before
+                 the safety text is compressed.
+              2. `adjustsFontSizeToFit={true}` with `numberOfLines={2}`
+                 on each sentence — if the phone is truly tiny or the
+                 system text size is enormous, the FONT scales down;
+                 the sentence NEVER truncates.
+
+              Layout rule for the whole app: safety-critical text uses
+              `adjustsFontSizeToFit`, never a bare `numberOfLines` that
+              can cut a word off. See #253 sweep list below in this
+              file's comment. */}
+          <View style={styles.safetyInstruction}>
+            <Text
+              style={[styles.subheading, compact && styles.subheadingCompact]}
+              numberOfLines={1}
+              adjustsFontSizeToFit
+              minimumFontScale={0.7}
+              accessibilityRole="text"
+            >
+              Drop. Cover. Hold on.
+            </Text>
+            <Text
+              style={[styles.subheading, compact && styles.subheadingCompact, styles.safetyInstructionSecond]}
+              numberOfLines={2}
+              adjustsFontSizeToFit
+              minimumFontScale={0.7}
+              accessibilityRole="text"
+            >
+              Move to open space when shaking stops.
+            </Text>
+          </View>
         </View>
 
         {/* Data strip — own row, never overlapped by the buttons below. */}
@@ -817,7 +913,7 @@ export default function AlertScreen() {
               MAGNITUDE
             </Text>
             <Text style={styles.metricValue} numberOfLines={1} adjustsFontSizeToFit>
-              {eventMagnitude ?? "—"}
+              {eventReadings.magnitude ?? "—"}
             </Text>
           </View>
           <View style={styles.metricDivider} />
@@ -826,8 +922,8 @@ export default function AlertScreen() {
               DISTANCE
             </Text>
             <Text style={styles.metricValue} numberOfLines={1} adjustsFontSizeToFit>
-              {eventDistanceKm != null ? (
-                <>{eventDistanceKm}<Text style={styles.metricUnit}>km</Text></>
+              {eventReadings.distance_km != null ? (
+                <>{eventReadings.distance_km}<Text style={styles.metricUnit}>km</Text></>
               ) : "—"}
             </Text>
           </View>
@@ -837,7 +933,7 @@ export default function AlertScreen() {
               INTENSITY
             </Text>
             <Text style={styles.metricValue} numberOfLines={1} adjustsFontSizeToFit>
-              {eventIntensity ?? "—"}
+              {eventReadings.intensity ?? "—"}
             </Text>
           </View>
         </View>
@@ -1332,6 +1428,18 @@ const styles = StyleSheet.create({
     marginTop: spacing.sm,
     fontSize: 16,
     lineHeight: 22,
+  },
+  // #253 (Batch 7): safety-instruction block. `flexShrink: 0` means the
+  // aftershock banner or any other element pushing on this layout MUST
+  // take space from the pulse animation / spacing above, never from
+  // these two sentences.
+  safetyInstruction: {
+    flexShrink: 0,
+    alignSelf: "stretch",
+    paddingHorizontal: spacing.md,
+  },
+  safetyInstructionSecond: {
+    marginTop: 2,
   },
   metricsRow: {
     flexShrink: 0,

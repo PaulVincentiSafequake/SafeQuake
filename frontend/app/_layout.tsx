@@ -13,6 +13,7 @@ import { useIconFonts } from "@/src/hooks/use-icon-fonts";
 import { registerForPushNotifications } from "@/src/utils/push";
 import { getDeviceId } from "@/src/utils/checkin";
 import { flushRecheckQueue, submitRecheckAnswer } from "@/src/utils/recheck";
+import { markAlertActive } from "@/src/utils/activeAlert";
 import { isAlertScreenMounted, publishAlert } from "@/src/utils/alertBus";
 import {
   cancelCheckInReminders,
@@ -279,7 +280,34 @@ export default function RootLayout() {
       // Real critical alert — route to /alert with event details as params.
       // The `siren=1` param signals the alert screen that it should play
       // the siren on mount. Missing `siren=1` = no siren (fail-safe).
-      if (kind === "critical_alert") {
+      //
+      // #208 (R4 defence-in-depth, 2026-08-19): a critical earthquake
+      // alert MUST reach the check-in screen. Symmetric with the recheck
+      // guard above: we route to /alert if ANY of these are true —
+      //   - kind === "critical_alert"
+      //   - action_url === "/alert"
+      //   - a magnitude field is present (only earthquake alerts carry it
+      //     at the top level of the payload — see _build_critical_payload
+      //     in backend/apns.py)
+      // Falling through to the seismic detail screen when someone has
+      // been sirened awake is exactly the failure Paul screenshotted on
+      // build 130.
+      const hasMagnitude = data.magnitude != null && data.magnitude !== "";
+      const looksLikeAlert =
+        kind === "critical_alert" || actionUrl === "/alert" || hasMagnitude;
+      if (looksLikeAlert) {
+        // Persist the alert as "unanswered" so opening the app later —
+        // via the home screen, not the notification — still lands the
+        // person on the check-in screen. Cleared when they submit safe
+        // or trapped. Non-blocking.
+        markAlertActive({
+          kind: "critical_alert",
+          magnitude: data.magnitude != null ? Number(data.magnitude) : null,
+          distance_km: data.distance_km != null ? Number(data.distance_km) : null,
+          intensity: data.intensity != null ? String(data.intensity) : null,
+          region: data.region != null ? String(data.region) : null,
+          unid: data.unid != null ? String(data.unid) : null,
+        }).catch(() => {});
         const params = new URLSearchParams();
         params.set("siren", "1");
         if (data.magnitude != null)   params.set("magnitude", String(data.magnitude));
@@ -296,6 +324,13 @@ export default function RootLayout() {
       // for the check-in flow, but explicitly NO siren. The user is
       // being reminded to check in, not being alerted afresh.
       if (kind === "quakeguard-reminder") {
+        // A reminder tap is also an "unanswered alert" signal — the
+        // person still needs to say safe or trapped.
+        markAlertActive({
+          kind: "quakeguard-reminder",
+          magnitude: null, distance_km: null, intensity: null,
+          region: null, unid: null,
+        }).catch(() => {});
         router.push("/alert?siren=0&reminder=1" as any);
         return;
       }
@@ -367,6 +402,18 @@ export default function RootLayout() {
         return;
       }
       if (kind === "critical_alert") {
+        // #208 R4 (Batch 7): mark this alert as unanswered so opening
+        // the app later — via the home screen, without the
+        // notification — still lands on /alert. Cleared by the check-in
+        // submit path. Non-blocking.
+        markAlertActive({
+          kind: "critical_alert",
+          magnitude: data.magnitude != null ? Number(data.magnitude) : null,
+          distance_km: data.distance_km != null ? Number(data.distance_km) : null,
+          intensity: data.intensity != null ? String(data.intensity) : null,
+          region: data.region != null ? String(data.region) : null,
+          unid: data.unid != null ? String(data.unid) : null,
+        }).catch(() => {});
         // #169 follow-up — CLOSE THE FOREGROUND GAP, WITHOUT STACKING.
         //
         // If a real alert lands while the app is already open, iOS plays the
