@@ -1325,3 +1325,28 @@ shares it, and fall back to our own broader label ONLY when they differ. Single
 (ungrouped) notices should carry the EMSC region verbatim too — EMSC is
 authoritative and we must not introduce errors into it. Build the two together;
 the distance stays, the region is added, not substituted.
+
+### Dashboard repo — RECORDED at last (2026-06-18)
+Pushed by the agent with a one-day fine-grained PAT and verified by reading the
+file back byte for byte. **Revoke that PAT.**
+- Repo `PaulVincentiSafequake/SafeQuake`, branch `main`
+- Dashboard file `backend_dashboard/public/index.html`
+- Repo contains only `backend_dashboard/`: `package.json`, `server.js`,
+  `usgs_poller.js`, `public/index.html`. `dashboard-v3.js` is already deleted —
+  that carried-over cleanup item is closed. Cache-Control (item 1.1) still open;
+  it belongs in `server.js`, which IS in this repo and now reachable.
+- The app repo (`quake-angel-app`) is separate and does not deploy the dashboard.
+
+Commit `c871710073` — B6 person-grouped feed + C1 phase 2 panel, PLUS two live
+bugs found only because the live file was diffed against the staged copy instead
+of being overwritten by it (the live file was AHEAD on C3, so a wholesale
+overwrite would have reverted names on pins):
+1. The map popup printed the name twice — "ABC12 Anna — Anna". C3 was hand-made
+   in the repo and added the styled name without removing the older
+   `" — " + u.displayName` line.
+2. The popup never showed "Cannot get out — extraction needed", so the egress
+   answer was invisible on the map.
+
+**Lesson for next time: never push the staged copy over the live file without
+diffing first.** The staged copy in `memory/dashboard_build/` is only as current
+as the last hand-edit made directly in the repo.

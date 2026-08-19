@@ -1,7 +1,29 @@
-# Dashboard push — ready to go, 2026-06-18
+# Dashboard push — DONE, 2026-06-18
 
-Paul pushes this one himself (no repo URL or PAT recorded in this session, and a
-PAT pasted into a chat is a credential in a transcript).
+**PUSHED** to `PaulVincentiSafequake/SafeQuake`, branch `main`, path
+`backend_dashboard/public/index.html` — commit `c871710073`. Verified by reading
+the file back from the repo: it matches the staged copy byte for byte. Paul's
+PAT should now be revoked.
+
+## Repo details — RECORD THESE, they were not written down before
+- Repo: `PaulVincentiSafequake/SafeQuake` (public, default branch `main`)
+- Dashboard file: `backend_dashboard/public/index.html`
+- The repo contains only `backend_dashboard/` — `package.json`, `server.js`,
+  `usgs_poller.js`, `public/index.html`. `dashboard-v3.js` is already gone, so
+  that carried-over cleanup item is closed.
+- The app repo (`quake-angel-app`) is a DIFFERENT repo and does not deploy this.
+
+## Two live bugs this push also fixed
+1. **The name was printed twice in the map popup** — "ABC12 Anna — Anna". The
+   C3 change was hand-made in the repo and added the styled name without
+   removing the older `" — " + u.displayName` line. The agent-side copy had it
+   right, so this had been live and unnoticed.
+2. The popup did not show **"Cannot get out — extraction needed"**, so the
+   egress answer was invisible on the map.
+
+Found by diffing the live file against the staged one before pushing, rather
+than pushing the staged file over the top of it — the live file was AHEAD on C3,
+and a wholesale overwrite would have reverted names on pins.
 
 ## The file
 `/app/memory/dashboard_build/index.html` — 5,467 lines, committed locally in
