@@ -581,6 +581,38 @@
   #qg-trigger-btn:active { transform: translateY(0); opacity: .9; }
   #qg-trigger-btn[disabled] { opacity: .55; cursor: not-allowed; }
 
+  /* Batch 7 R5 (#240 / #222): signed-out styling. Every control that
+     requires auth to be meaningful is disabled and greyed out the
+     instant the JWT is dropped, so nobody can start a rescue action,
+     mark somebody rescued, trigger an alert, change preview settings,
+     or select rows in a session they no longer own. Sign-in-only
+     surfaces (the red banner at the top, the sign-out chip) are kept
+     interactive via the `.qg-auth-exempt` opt-out class. */
+  body.qg-signed-out #qg-trigger-btn,
+  body.qg-signed-out #qg-stop-reminders-btn,
+  body.qg-signed-out #qg-stand-down-btn,
+  body.qg-signed-out .map-filter-btn,
+  body.qg-signed-out .qg-bulk-check input,
+  body.qg-signed-out #qg-bulk-bar button,
+  body.qg-signed-out .qa-pv-btn-primary,
+  body.qg-signed-out .qa-pv-btn-clear,
+  body.qg-signed-out .qa-pv-btn-save,
+  body.qg-signed-out .qa-pv-btn-kill,
+  body.qg-signed-out .qa-pv-btn-remove,
+  body.qg-signed-out .qa-pv-btn-add,
+  body.qg-signed-out #qg-test-people-seed-btn,
+  body.qg-signed-out #qg-test-people-clear-btn {
+    pointer-events: none !important;
+    opacity: 0.35 !important;
+    filter: grayscale(0.6);
+    cursor: not-allowed !important;
+  }
+  body.qg-signed-out .qg-auth-exempt {
+    pointer-events: auto !important;
+    opacity: 1 !important;
+    filter: none !important;
+  }
+
   #qg-banner {
     position: fixed;
     top: 0; left: 0; right: 0;
@@ -1095,8 +1127,48 @@
     if (/access control|CORS|Fetch API cannot load/i.test(raw)) {
       return "We couldn't reach the backend. Check your connection and try again.";
     }
+    // Batch 7 R5 (#237): translate raw HTTP status strings that used
+    // to leak straight into toasts and inline messages. Pattern 5
+    // (developer values reaching users): "HTTP 401" and "Not
+    // authenticated" belong in the network panel, not on screen.
+    var m = raw.match(/HTTP\s*(\d{3})/);
+    if (m) return window.qgHumanHttpMessage(parseInt(m[1], 10), opts.fallback);
+    if (/Not authenticated|Unauthorized/i.test(raw)) {
+      return window.qgHumanHttpMessage(401, opts.fallback);
+    }
     try { console.warn("qgFriendlyError raw:", raw); } catch (_) {}
     return opts.fallback || "Something went wrong. Please refresh the page.";
+  };
+
+  // Batch 7 R5 (#237): plain-English wording for HTTP status codes.
+  // Used by qgFriendlyError and available directly to any panel that
+  // wants to render its own inline message. Rule: nothing here mentions
+  // "HTTP", "status", or a numeric code — the operator is not a
+  // developer, and life-safety software must never talk like a stack
+  // trace.
+  window.qgHumanHttpMessage = function (status, fallback) {
+    if (status === 401) {
+      return "Your session ended. Sign in again with the red banner at the top of the page.";
+    }
+    if (status === 403) {
+      return "You don't have permission to do that. Ask an admin to review your access.";
+    }
+    if (status === 404) {
+      return "We couldn't find that record. It may have been removed or renamed.";
+    }
+    if (status === 409) {
+      return "Someone else changed this while you were looking. Refresh and try again.";
+    }
+    if (status === 429) {
+      return "Too many attempts in a short time. Wait a moment and try again.";
+    }
+    if (status >= 500) {
+      return "The server is having trouble. We'll try again in a moment — no action needed from you.";
+    }
+    if (status >= 400) {
+      return "Something in the request wasn't right. Please refresh and try again.";
+    }
+    return fallback || "Something went wrong. Please refresh the page.";
   };
 
   // Prominent banner shown once when the session drops mid-use. Batch 7
@@ -1160,11 +1232,48 @@
   // fetches once the session drops. For Round 1 minimum, this just
   // flips + fires the banner; Round 3 wires it into every poller.
   window.qgAuthed = !!getStoredJwt();
+  // Batch 7 R5 (#240 / #222): a single sign-out reactor. Runs the
+  // instant the JWT is dropped — not on the next 4-second poll tick —
+  // so stale triage data and enabled controls do not leak between
+  // sessions on a shared workstation. Individual panels can register
+  // a wipe callback via `window.qgOnSignOut`; the reactor runs them
+  // all, then applies a class to `<body>` that CSS uses to grey out
+  // and disable every interactive control that requires auth.
+  window.__qgSignOutHooks = window.__qgSignOutHooks || [];
+  window.qgOnSignOut = function (fn) {
+    if (typeof fn === "function") window.__qgSignOutHooks.push(fn);
+  };
+  function runSignOutWipe() {
+    // 1. Mark body — CSS greys out authed-only controls.
+    try { document.body.classList.add("qg-signed-out"); } catch (_) {}
+    // 2. Guarantee the sign-in bar comes back. Batch 7 R5 (#238):
+    //    the bar was reported as "disappeared, needed a browser
+    //    restart to come back". renderChip already runs from
+    //    setStored, but a defensive re-render here makes sign-out
+    //    self-healing regardless of what path dropped the JWT.
+    try {
+      if (window.qaAuth && typeof window.qaAuth.signIn === "function") {
+        window.qaAuth.signIn();
+      }
+    } catch (_) {}
+    // 3. Run every registered wipe hook (map, sidebar, filters, bulk
+    //    selection, preview-mode form, trigger banner, etc.). Wrapped
+    //    individually so a bad hook doesn't stop the rest.
+    (window.__qgSignOutHooks || []).forEach(function (fn) {
+      try { fn(); } catch (e) { try { console.error("signout hook failed", e); } catch (_) {} }
+    });
+  }
+  window.qgRunSignOutWipe = runSignOutWipe;
   listeners.add(function () {
     var was = window.qgAuthed;
     window.qgAuthed = !!getStoredJwt();
     if (was && !window.qgAuthed) {
       try { qgShowSessionExpiredBanner(); } catch (_) {}
+      try { runSignOutWipe(); } catch (_) {}
+    } else if (!was && window.qgAuthed) {
+      // Signed back in — drop the greyed-out class. Panels rebuild
+      // themselves on the next refresh tick.
+      try { document.body.classList.remove("qg-signed-out"); } catch (_) {}
     }
   });
 
@@ -1210,7 +1319,21 @@
       options.headers || {},
     );
     const jwt = getStoredJwt();
-    if (jwt) headers["Authorization"] = "Bearer " + jwt;
+    // Batch 7 R5 (#242): if we have no JWT, don't fire the network
+    // request at all. Twelve polls hitting the server every few
+    // seconds after sign-out was a real path to a runaway tab —
+    // 401 responses still cost a request-response round trip plus a
+    // DOMException entry in the network panel, and after a few
+    // thousand of them the tab starts to hitch. Return a synthetic
+    // 401 so callers that check `res.ok` behave exactly as before.
+    if (!jwt) {
+      return new Response("{}", {
+        status: 401,
+        statusText: "Signed out — no token",
+        headers: {"Content-Type": "application/json"},
+      });
+    }
+    headers["Authorization"] = "Bearer " + jwt;
     const r = await fetch(CONFIG.API_BASE + path, Object.assign({}, options, {headers}));
     if (r.status === 401 || r.status === 403) {
       // Batch 7 A1 (minimum carve-out): treat 403 the same as 401 for
@@ -2356,8 +2479,8 @@
         r = await window.qaApi('/api/admin/users/' + encodeURIComponent(email), {method:'DELETE'});
       }
       if (!r.ok) {
-        const detail = await r.json().catch(function () { return {detail:'HTTP ' + r.status}; });
-        showMsg('error', 'Failed: ' + (detail.detail || ('HTTP ' + r.status)));
+        const detail = await r.json().catch(function () { return {}; });
+        showMsg('error', detail.detail || window.qgHumanHttpMessage(r.status));
       } else {
         showMsg('success', 'Done.');
         await refresh();
@@ -2379,8 +2502,8 @@
         body: JSON.stringify({email: email, role: role}),
       });
       if (!r.ok) {
-        const detail = await r.json().catch(function () { return {detail:'HTTP ' + r.status}; });
-        showMsg('error', 'Add failed: ' + (detail.detail || ('HTTP ' + r.status)));
+        const detail = await r.json().catch(function () { return {}; });
+        showMsg('error', detail.detail || window.qgHumanHttpMessage(r.status));
       } else {
         showMsg('success', 'Added ' + email + '.');
         addEmail.value = '';
@@ -2592,7 +2715,7 @@
     if (!signedIn()) return;
     try {
       var r = await window.qaApi("/api/admin/recheck/status", { cache: "no-store" });
-      if (!r.ok) { stateEl.textContent = "Could not read the re-check state (HTTP " + r.status + ")."; return; }
+      if (!r.ok) { stateEl.textContent = window.qgHumanHttpMessage(r.status); return; }
       var d = await r.json();
       enabled = !!d.enabled;
       var trappedN = d.trapped_count || 0;
@@ -2649,7 +2772,7 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ confirm: false })
       });
-      if (!r.ok) { say("Could not prepare the check (HTTP " + r.status + ").", "error"); return; }
+      if (!r.ok) { say(window.qgHumanHttpMessage(r.status), "error"); return; }
       var d = await r.json();
       if (!d.would_ask) {
         // #231b (Batch 7): branch by the actual reason, not one catch-all
@@ -2701,7 +2824,7 @@
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ confirm: true })
           });
-          if (!r2.ok) { say("Could not send the check (HTTP " + r2.status + ").", "error"); return; }
+          if (!r2.ok) { say(window.qgHumanHttpMessage(r2.status), "error"); return; }
           var d2 = await r2.json();
           slot.innerHTML = "";
           say("Asked " + d2.asked + " " + (d2.asked === 1 ? "person" : "people") +
@@ -2725,7 +2848,7 @@
         say("Only an admin can pause or resume automatic checks.", "error");
         return;
       }
-      if (!r.ok) { say("Could not change that (HTTP " + r.status + ").", "error"); return; }
+      if (!r.ok) { say(window.qgHumanHttpMessage(r.status), "error"); return; }
       say(enabled
         ? "Automatic checks are paused. Nobody will be asked until you resume them."
         : "Automatic checks are back on.", "ok");
@@ -4749,6 +4872,31 @@ window.QuakeAngelRescue = (function () {
   var currentFilter = "all"; // "all" | "red" | "yellow" | "green"
   var selectedForRescue = new Set(); // device IDs checked for group rescue
 
+  // Batch 7 R5 (#240 / #222): register a wipe hook so map + list state
+  // are cleared the moment the JWT is dropped, not on the next 4s poll.
+  if (typeof window.qgOnSignOut === "function") {
+    window.qgOnSignOut(function () {
+      try {
+        markers.forEach(function (m) { try { map.removeLayer(m); } catch (_) {} });
+        markers.clear();
+      } catch (_) {}
+      lastUsers = [];
+      selectedForRescue.clear();
+      currentFilter = "all";
+      try { updateBulkBar && updateBulkBar(); } catch (_) {}
+      try {
+        var container = document.getElementById("userlist");
+        if (container) {
+          container.innerHTML =
+            '<div style="padding:10px 12px; font-size:12.5px; line-height:1.5; color:var(--text-dim, #888); border:1px dashed var(--border, #d0d0d0); border-radius:8px">' +
+            'Signed out. Overall numbers may appear here after the next refresh; sign in with the banner at the top to see live triage.' +
+            '</div>';
+        }
+      } catch (_) {}
+      try { updateCountPills({safe: 0, trapped: 0, danger: 0, rescued: 0, waiting: 0}); } catch (_) {}
+    });
+  }
+
   function statusLabel(status, severity) {
     if (status === "trapped") {
       if (severity === "red") return "TRAPPED — IMMEDIATE";
@@ -5036,7 +5184,7 @@ window.QuakeAngelRescue = (function () {
         "/api/admin/devices/" + encodeURIComponent(deviceId) + "/mark-test",
         { method: "POST", body: JSON.stringify({ is_test: isTest }) }
       );
-      if (!res.ok) { banner("err", "Could not update (HTTP " + res.status + ")"); return; }
+      if (!res.ok) { banner("err", window.qgHumanHttpMessage(res.status)); return; }
       banner("ok", isTest ? "Marked as a test entry." : "Restored as a real entry.", 5000);
       lastSidebarSig = null;
       refresh();
@@ -6022,12 +6170,23 @@ window.QuakeAngelRescue = (function () {
       head += '<p style="margin:0 0 12px; color:#5a0f13">' + esc(d.how_to_turn_on) + '</p>';
     }
     // Ingestion side, plain-worded.
+    // Batch 7 R5 (#239): poller_last_error is a raw Python exception
+    // string (e.g. "ClientConnectorError: Cannot connect to host ...");
+    // routing it straight to the operator was Pattern 5 (developer
+    // values reaching users). qgFriendlyError already translates
+    // NetworkError / CORS / HTTP-status strings into plain English,
+    // and its fallback is a safe generic sentence.
+    var pollerErrorText = d.poller_last_error
+      ? window.qgFriendlyError(new Error(String(d.poller_last_error)), {
+          fallback: "The last check of the earthquake feed didn't succeed. It will try again automatically.",
+        })
+      : null;
     var ingest =
       '<p style="margin:0 0 10px; color:#555">' +
       esc(String(d.events_ingested_24h || 0)) + ' events picked up in the last 24 hours, ' +
       esc(String(d.events_ingested_7d || 0)) + ' in the last 7 days. ' +
-      (d.poller_last_error
-        ? '<span style="color:#b0141a">Last check-in with the earthquake feed failed: ' + esc(d.poller_last_error) + '</span>'
+      (pollerErrorText
+        ? '<span style="color:#b0141a">' + esc(pollerErrorText) + '</span>'
         : 'The earthquake feed is being checked normally.') +
       '</p>';
     var body;

@@ -18,7 +18,7 @@
  *   worked-around with a client-drawn SVG overlay because the
  *   iOS-first delivery target treats iOS behaviour as authoritative.
  */
-import { View, StyleSheet } from "react-native";
+import { View, StyleSheet, Text as RNText } from "react-native";
 import MapView, { Marker, Circle, PROVIDER_DEFAULT } from "react-native-maps";
 import type { MapCanvasProps, MapCanvasEvent } from "./MapCanvas.types";
 import { parseUtc } from "@/src/utils/time";
@@ -60,6 +60,7 @@ export default function MapCanvas(props: MapCanvasProps) {
   const {
     events, center, radiusMeters, radiusIsSolid, onEventPress,
     focus = null, highlightExternalId = null, onRegionChange,
+    places = [],
   } = props;
   // Opened from an event ("see this on the map"): start tight on that
   // event instead of the whole basin, so it doesn't have to be hunted for.
@@ -138,6 +139,32 @@ export default function MapCanvas(props: MapCanvasProps) {
           </Marker>
         );
       })}
+
+      {/* #249 (Batch 7 D): saved-place markers render UNDER the event
+          pins in DOM order by convention (react-native-maps has no
+          real z-index for markers on Android, but a small home dot
+          with a name label reads clearly against event circles). */}
+      {places.map((p) => (
+        <Marker
+          key={`place-${p.place_id}`}
+          coordinate={{ latitude: p.latitude, longitude: p.longitude }}
+          tracksViewChanges={false}
+          anchor={{x: 0.5, y: 0.5}}
+          accessibilityLabel={`Saved place: ${p.name}`}
+        >
+          <View style={styles.placeMarker}>
+            <View style={styles.placeDot} />
+            <View style={styles.placeLabel}>
+              <RNText
+                style={styles.placeLabelText}
+                numberOfLines={1}
+              >
+                {p.name}
+              </RNText>
+            </View>
+          </View>
+        </Marker>
+      ))}
     </MapView>
   );
 }
@@ -154,5 +181,27 @@ const styles = StyleSheet.create({
   markerDot: {
     borderWidth: 1.5, borderColor: "#0B1220",
     shadowColor: "#000", shadowOpacity: 0.4, shadowRadius: 2, shadowOffset: {width:0, height:1},
+  },
+  // #249 (Batch 7 D): saved-place marker — deliberately not colourful
+  // so it never competes visually with an event pin. A small teal dot
+  // under a compact label the user chose ("Mum's house").
+  placeMarker: {
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  placeDot: {
+    width: 12, height: 12, borderRadius: 6,
+    backgroundColor: "#5DB1FF",
+    borderWidth: 2, borderColor: "#0B1220",
+  },
+  placeLabel: {
+    marginTop: 2,
+    backgroundColor: "rgba(11,18,32,0.85)",
+    borderRadius: 4,
+    paddingHorizontal: 5, paddingVertical: 1,
+    maxWidth: 100,
+  },
+  placeLabelText: {
+    color: "#E7EDF5", fontSize: 10, fontWeight: "700",
   },
 });

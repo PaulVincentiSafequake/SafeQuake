@@ -23,6 +23,7 @@ Full spec: /app/memory/test-people-spec.md.
 """
 from __future__ import annotations
 
+import math
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -35,6 +36,34 @@ from auth import resolve_principal, require_role
 SEED_TAG = "seeded-33"
 CODE_PREFIX = "Z"
 NAME_PREFIX = "TEST"
+
+
+# #241 (Batch 7 R5): map pins that share exact coordinates stack into a
+# single visible dot, which is why the manual test read as "33 test
+# people stacked on one point". The spec deliberately clusters people
+# at the same address (e.g. four at `same_bldg` is the collapsed-
+# building grouping case), but the map still needs to show them as
+# separate dots when zoomed in. Small deterministic jitter — a metre
+# is roughly 1/111_111 of a degree of latitude — spreads N people at
+# the same base coord onto a small ring so all N dots are visible.
+# Deterministic (idx-based) so tests can assert exact positions and
+# users see the same layout each time they seed.
+_JITTER_RING_M = 18.0  # ~18 m — bigger than typical marker radius
+_LAT_METRE = 1.0 / 111_111.0
+
+
+def _jitter(lat: float, lon: float, index_within_group: int, group_size: int) -> tuple[float, float]:
+    """Spread `group_size` people evenly around a small ring at the
+    base coord. Returns the person's (lat, lon)."""
+    if group_size <= 1:
+        return (lat, lon)
+    angle = (2.0 * math.pi * index_within_group) / group_size
+    d_lat = _JITTER_RING_M * math.cos(angle) * _LAT_METRE
+    # Longitude degree shrinks as cos(lat) — keeps the ring circular
+    # in metres at Malta's latitude, not stretched east-west.
+    d_lon = (_JITTER_RING_M * math.sin(angle) * _LAT_METRE
+             / max(0.1, math.cos(math.radians(lat))))
+    return (lat + d_lat, lon + d_lon)
 
 
 def _at(minutes_ago: int, now: datetime) -> str:
@@ -85,8 +114,11 @@ def _people_spec(now: datetime) -> list[dict]:
             "mobility": mobility,
             "needs_extraction": bool(needs_extraction),
             "battery_pct": battery,
-            "latitude": loc[0],
-            "longitude": loc[1],
+            # #241 (Batch 7 R5): store the BASE coord and the position
+            # within the group here; the real jittered lat/lon is
+            # filled in after the whole spec is enumerated, so we know
+            # each base-coord's group size before assigning angles.
+            "_base_loc": loc,
             "accuracy_m": accuracy_m,
             "platform": "ios" if idx % 2 else "android",
             "updated_at": _at(minutes_ago, now),
@@ -167,6 +199,21 @@ def _people_spec(now: datetime) -> list[dict]:
         (msida, 160, 33), (valletta, 180, 79), (sliema, 200, 94),
     ]):
         add("safe", None, "mobile", bat, loc, minutes_ago=mins)
+
+    # #241 (Batch 7 R5): apply deterministic per-group jitter so people
+    # sharing an address show as separate map dots. Group by the base
+    # coord, then spread each group evenly around a small ring.
+    groups: dict[tuple, list[int]] = {}
+    for i, p in enumerate(people):
+        groups.setdefault(p["_base_loc"], []).append(i)
+    for base, indices in groups.items():
+        for k, i in enumerate(indices):
+            lat, lon = _jitter(base[0], base[1], k, len(indices))
+            people[i]["latitude"] = lat
+            people[i]["longitude"] = lon
+    # Drop the transient key so it never reaches the DB.
+    for p in people:
+        p.pop("_base_loc", None)
 
     return people
 

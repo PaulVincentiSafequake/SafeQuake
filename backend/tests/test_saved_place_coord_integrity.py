@@ -166,8 +166,19 @@ class TestBackendStoresExactCoords:
 # ── Version guard (Batch 7 rule: every change bumps the version) ───
 
 class TestVersionBumpedForThisFix:
-    def test_app_json_at_1_0_33(self):
+    def test_app_json_at_or_above_1_0_33(self):
         aj = Path("/app/frontend/app.json").read_text()
-        assert '"version": "1.0.33"' in aj, "version must be bumped for #247"
-        assert '"buildNumber": "33"' in aj, "iOS build number must match"
-        assert '"versionCode": 33' in aj, "Android versionCode must match"
+        m = re.search(r'"version":\s*"(\d+)\.(\d+)\.(\d+)"', aj)
+        assert m, "version string must be present in app.json"
+        major, minor, patch = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        # Every fix in Batch 7 bumps the patch. This one landed at
+        # 1.0.33 and further patches may follow; asserting >= keeps
+        # the test durable without pinning future patches.
+        assert (major, minor, patch) >= (1, 0, 33), (
+            f"version must be at or above 1.0.33 (found {major}.{minor}.{patch})"
+        )
+        # iOS build number + Android versionCode must match the patch.
+        bn_m = re.search(r'"buildNumber":\s*"(\d+)"', aj)
+        vc_m = re.search(r'"versionCode":\s*(\d+)', aj)
+        assert bn_m and int(bn_m.group(1)) == patch, "iOS buildNumber must match patch"
+        assert vc_m and int(vc_m.group(1)) == patch, "Android versionCode must match patch"

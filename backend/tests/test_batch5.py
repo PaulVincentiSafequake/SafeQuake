@@ -187,11 +187,23 @@ class TestB8Places:
         assert "places_enabled" not in trigger
 
     def test_place_notice_body_names_the_place(self):
-        """A notice about Sicily must be unmistakably about Sicily."""
+        """A notice about Sicily must be unmistakably about Sicily.
+
+        Also (Batch 7 D, #246): the body explains WHY the notice was
+        sent — the user's own saved-places list — and points at the
+        Settings › Places screen so they can turn it off from context.
+        The two rules together mean nobody is left wondering "why did
+        this app just alert me about Sicily?".
+        """
         src = open("/app/backend/emsc/preview.py").read()
         fn = src.split("async def dispatch_place_notices")[1]
         assert "Seismic activity near {name}" in fn
-        assert "not your own location" in fn
+        # #246: the body must name the reason (user's saved places)
+        # and the switch-off path (Settings › Places).
+        assert "saved places" in fn, "body must state the reason for the notice"
+        assert "Settings" in fn and "Places" in fn, (
+            "body must point at Settings › Places for the opt-out"
+        )
 
     def test_places_use_intensity_not_raw_radius(self):
         src = open("/app/backend/emsc/preview.py").read()
@@ -273,8 +285,14 @@ class TestAppSideInvariants:
     def test_app_version_bumped(self):
         import json
         cfg = json.load(open("/app/frontend/app.json"))
-        # #199 (Batch 7 R4 companion): bumped to 1.0.32 with clear-on-stand-down.
-        assert cfg["expo"]["version"] == "1.0.32"
+        # Batch 7 has bumped the version many times; this test only
+        # guarantees the version has not REGRESSED below 1.0.32
+        # (the #199 clear-on-stand-down cut). Each new fix bumps the
+        # patch; asserting >= keeps the test durable.
+        parts = tuple(int(x) for x in cfg["expo"]["version"].split("."))
+        assert parts >= (1, 0, 32), (
+            f"version must be at or above 1.0.32 (found {cfg['expo']['version']})"
+        )
         info = cfg["expo"]["ios"]["infoPlist"]
         # export-compliance answer baked in so App Store Connect stops asking
         assert info["ITSAppUsesNonExemptEncryption"] is False

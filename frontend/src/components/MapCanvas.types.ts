@@ -14,6 +14,16 @@ export type MapCanvasEvent = {
   region?: string | null;
 };
 
+/** #249 (Batch 7 D): a user's saved place, drawn as a small labelled
+ *  home-icon marker on the map so the person can see how their
+ *  informational-notice geography relates to real seismic activity. */
+export type MapCanvasPlace = {
+  place_id: string;
+  name: string;
+  latitude: number;
+  longitude: number;
+};
+
 export type MapCanvasProps = {
   events: MapCanvasEvent[];
   /** Circle centre (typically Malta). */
@@ -32,6 +42,8 @@ export type MapCanvasProps = {
   focus?: { latitude: number; longitude: number } | null;
   /** external_id of the event to draw emphasised (ring + larger dot). */
   highlightExternalId?: string | null;
+  /** #249: places to draw as home-icon markers under their names. */
+  places?: MapCanvasPlace[];
   /**
    * Called after any map region change — user gesture OR programmatic.
    * #212 (R4): supplies the current visible center so the parent can

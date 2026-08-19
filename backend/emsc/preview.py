@@ -742,6 +742,11 @@ async def dispatch_place_notices(
 
         # Copy must name the place unambiguously — the user has to know at
         # a glance this is about Sicily and NOT about them.
+        # #246 (Batch 7 D): also state the REASON in one short sentence.
+        # A user who has forgotten they added a place gets a random-
+        # looking Sicily notice and thinks the app is broken. Naming
+        # the place, plus "you added this — turn off in Settings",
+        # closes that loop without turning the body into an essay.
         name = place.get("name") or "your saved place"
         bearing = bearing_deg(p_lat, p_lon, e_lat, e_lon)
         title = f"PREVIEW · Seismic activity near {name}"
@@ -750,7 +755,8 @@ async def dispatch_place_notices(
             f"{compass_16(bearing)} of {name}"
             + (f", depth {int(round(emsc_event.get('depth_km')))}km"
                if emsc_event.get("depth_km") is not None else "")
-            + ". This is one of your saved places, not your own location."
+            + f". You get this because you added {name} to your saved places."
+            + " Turn off in Settings › Places if you no longer want notices for it."
         )
 
         idem = f"place-notice-{uuid.uuid4()}"

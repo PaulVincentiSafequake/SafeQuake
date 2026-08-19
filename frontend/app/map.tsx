@@ -64,8 +64,12 @@ const PRESET_RADIUS_M: Record<Preset, number | null> = {
   everything:   600_000,
 };
 
-type WindowChoice = 24 | 168 | 720;
+type WindowChoice = 1 | 24 | 168 | 720;
 const WINDOWS: { hours: WindowChoice; label: string }[] = [
+  // #113 (Batch 7 D): 1-hour window. "What just happened?" is a
+  // different question from "what's been going on this week?", and
+  // the shortest window we offered was 24h which conflated the two.
+  { hours: 1,   label: "1h" },
   { hours: 24,  label: "24h" },
   { hours: 168, label: "7d" },
   { hours: 720, label: "30d" },
@@ -76,6 +80,16 @@ type MapEvent = MapCanvasEvent & {
   depth_km?: number | null;
   providers?: string[];
   revision?: number;
+};
+
+/** #249 (Batch 7 D): a saved place fetched from the backend. Rendered
+ *  as a small home marker on the native map so users can see how their
+ *  informational-notice geography relates to seismic activity. */
+type SavedPlace = {
+  place_id: string;
+  name: string;
+  latitude: number;
+  longitude: number;
 };
 
 // -----------------------------------------------------------------------------
@@ -138,6 +152,9 @@ export default function SeismicMapScreen() {
   // and so kept the caption while the "See on map" button had panned
   // the map to Sicily with no circle in sight.
   const [mapCenter, setMapCenter] = useState<{ lat: number; lng: number } | null>(null);
+  // #249 (Batch 7 D): user's saved places, rendered as small markers so
+  // "the place I care about" is visible in relation to real activity.
+  const [places, setPlaces] = useState<SavedPlace[]>([]);
 
   const fetchEvents = useCallback(async (hours: WindowChoice) => {
     setErrText(null);
@@ -151,6 +168,20 @@ export default function SeismicMapScreen() {
       setErrText(e?.message || "Could not load events");
       setEvents([]);
     }
+  }, []);
+
+  const fetchPlaces = useCallback(async () => {
+    // Non-fatal: places are optional. Show the map with events even if
+    // the places call fails offline or the device has never saved any.
+    try {
+      const did = await getDeviceId();
+      const r = await fetch(`${BACKEND_URL}/api/devices/${encodeURIComponent(did)}/places`);
+      if (r.ok) {
+        const data = await r.json();
+        const enabled = data.enabled !== false;
+        setPlaces(enabled && Array.isArray(data.places) ? data.places : []);
+      }
+    } catch { /* offline — hide places */ }
   }, []);
 
   const fetchPreset = useCallback(async () => {
@@ -169,7 +200,7 @@ export default function SeismicMapScreen() {
   useEffect(() => {
     (async () => {
       setLoading(true);
-      await Promise.all([fetchEvents(windowHours), fetchPreset()]);
+      await Promise.all([fetchEvents(windowHours), fetchPreset(), fetchPlaces()]);
       setLoading(false);
     })();
     // Intentional: initial load only. Subsequent refreshes triggered by
@@ -187,7 +218,7 @@ export default function SeismicMapScreen() {
 
   const onRefresh = async () => {
     setRefreshing(true);
-    await Promise.all([fetchEvents(windowHours), fetchPreset()]);
+    await Promise.all([fetchEvents(windowHours), fetchPreset(), fetchPlaces()]);
     setRefreshing(false);
   };
 
@@ -391,6 +422,7 @@ export default function SeismicMapScreen() {
           radiusIsSolid={presetIsSolid}
           onEventPress={goToEvent}
           onRegionChange={(lat, lng) => setMapCenter({ lat, lng })}
+          places={places}
         />
         {loading && (
           <View style={styles.mapLoader}>

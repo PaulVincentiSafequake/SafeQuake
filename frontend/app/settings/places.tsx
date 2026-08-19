@@ -114,6 +114,7 @@ export default function PlacesScreen() {
       // Now the resolved address is shown in words so a wrong hit is
       // obvious before Save.
       let address: string | null = null;
+      let suggestedName: string | null = null;
       try {
         const parts = await Location.reverseGeocodeAsync({ latitude, longitude });
         if (parts.length) {
@@ -121,6 +122,11 @@ export default function PlacesScreen() {
           address = [p.city ?? p.subregion, p.region, p.country]
             .filter((s) => !!s && s !== "")
             .join(", ") || null;
+          // #248 (Batch 7 D): the OS's real city name is a better
+          // auto-suggested label than the raw search token.
+          if (p.city || p.subregion) {
+            suggestedName = String(p.city || p.subregion).slice(0, 40);
+          }
         }
       } catch {
         // Reverse geocode is a UX aid, not a safety gate. If it fails
@@ -128,7 +134,9 @@ export default function PlacesScreen() {
         // again to re-check.
       }
       setResolved({ latitude, longitude, searchedAs: query, address });
-      if (!name.trim()) setName(query.split(",")[0].trim().slice(0, 40));
+      if (!name.trim()) {
+        setName(suggestedName || query.split(",")[0].trim().slice(0, 40));
+      }
     } catch {
       Alert.alert(
         "Couldn't look that up",
