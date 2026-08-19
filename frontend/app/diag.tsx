@@ -244,7 +244,7 @@ export default function DiagScreen() {
               bundle that contains the fix, so its presence can't be wrong
               and its ABSENCE is itself the answer. Version lookups can
               disagree with the binary; a code marker can't. */}
-          <Row label="fixes in this build" value="1.0.29 — #208 recheck routing hardened (never falls through to stats), cold-start action buttons honoured; carries prior 1.0.28 fixes" />
+          <Row label="fixes in this build" value="1.0.30 — #208 recheck routing hardened, #216 tense-by-source, #126 B2 one-page, #210 plain-language settings, #206 rehearsal isolated, #207 recheck time-sensitive (Critical after 3 misses, once per person)" />
         </Section>
 
         <Section title="Siren">

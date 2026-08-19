@@ -436,7 +436,7 @@ class TestPdfHardening:
         assert r.status_code == 200
         assert "-summary-" in r.headers.get("Content-Disposition", "")
         text = _pdf_text(r.content)
-        assert "Per-device detail omitted" in text
+        assert "This is the short version — totals only." in text
         assert "Harden Test Person" not in text, "summary version must not list devices"
         assert "CONFIDENTIAL" in text, "summary version keeps the confidential treatment"
 
@@ -447,7 +447,7 @@ class TestPdfHardening:
         assert r.status_code == 200
         assert "-summary-" in r.headers.get("Content-Disposition", "")
         text = _pdf_text(r.content)
-        assert "Per-device detail omitted" in text
+        assert "This is the short version — totals only." in text
         assert "Harden Test Person" not in text, "default report must not list devices"
 
     def test_b1_filename_has_no_jargon(self, seeded):

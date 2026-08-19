@@ -274,7 +274,7 @@ class TestAppSideInvariants:
         import json
         cfg = json.load(open("/app/frontend/app.json"))
         # #208 (Batch 7): bumped to 1.0.29 with hardened re-check routing.
-        assert cfg["expo"]["version"] == "1.0.29"
+        assert cfg["expo"]["version"] == "1.0.30"
         info = cfg["expo"]["ios"]["infoPlist"]
         # export-compliance answer baked in so App Store Connect stops asking
         assert info["ITSAppUsesNonExemptEncryption"] is False
@@ -556,7 +556,7 @@ class TestBuildIdentification:
         # it is HARD-CODED, not derived from the version number — that is how
         # a build shipping without the fix gets caught before a test cycle is
         # wasted on it (Paul, 2026-08-18).
-        assert "1.0.29 — #208 recheck routing hardened" in diag
+        assert "1.0.30 — #208 recheck routing hardened" in diag
         assert 'label="fixes in this build"' in diag
 
 

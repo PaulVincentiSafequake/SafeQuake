@@ -737,6 +737,40 @@
     margin-left: 6px;
     vertical-align: middle;
   }
+  /* #213 (Batch 7): the "See on map" link is the main next action for
+     a row, so it must look like a control, not like decoration. Filled
+     background, cursor: pointer, and a visible pressed state.        */
+  #qg-audit .qg-maplink,
+  .qg-maplink {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 10px;
+    margin-left: 4px;
+    border-radius: 4px;
+    background: #2f6feb;
+    color: #fff !important;
+    text-decoration: none;
+    font-weight: 700;
+    font-size: 12px;
+    line-height: 1.4;
+    cursor: pointer;
+    border: 1px solid #2559c0;
+    transition: background 0.12s ease, transform 0.05s ease;
+    white-space: nowrap;
+  }
+  #qg-audit .qg-maplink:hover,
+  .qg-maplink:hover { background: #2559c0; }
+  #qg-audit .qg-maplink:active,
+  .qg-maplink:active {
+    background: #1b4a9a;
+    transform: translateY(1px);
+  }
+  #qg-audit .qg-maplink:focus-visible,
+  .qg-maplink:focus-visible {
+    outline: 2px solid #ffb703;
+    outline-offset: 2px;
+  }
   #qg-audit .qg-audit-empty {
     color: #888;
     font-size: 13px;
@@ -1875,7 +1909,7 @@
     </div>
     <div>
       <h1>Quake Angel &mdash; Emergency Response Dashboard (PILOT / DEMO)</h1>
-      <p>Live device data. Refreshes every 4 seconds.</p>
+      <p>Live data on people who have checked in. Refreshes every 4 seconds.</p>
     </div>
   </div>
   <div class="header-actions">
@@ -1939,7 +1973,7 @@
     </div>
     <div class="qg-list-tools">
       <input id="qg-triage-search" type="search"
-             placeholder="Search code, name or device ID…"
+             placeholder="Search by name or rescue code…"
              aria-label="Search the triage list">
       <!-- #146: test entries are hidden by default so they can't be mistaken
            for real casualties, but they are never silently destroyed — this
@@ -2063,30 +2097,54 @@
 </style>
 
 <div id="qa-um-root" class="qa-um-panel" style="display:none">
-  <h2 id="qa-um-toggle">Operators &amp; Access</h2>
+  <h2 id="qa-um-toggle">Who can use this dashboard</h2>
+  <!-- #232 (Batch 7): plain-language subtitle. The old one said "manage
+       90-day account expiry" which is admin-speak. Says why you'd
+       use this section in one sentence. -->
   <div class="qa-um-subtitle">
-    Add operators, change roles, and manage 90-day account expiry. Admin-only.
+    Choose who can sign in, and what they're allowed to do. For example: giving
+    a colleague access so they can help during an emergency, or removing
+    someone who has left.
   </div>
   <div class="qa-um-body">
     <div id="qa-um-msg-slot"></div>
 
+    <!-- #232 (Batch 7): the two roles are explained ON the form so
+         the person adding someone reads what each role can actually do
+         before choosing. Framing lock: an OPERATOR is at a desk, not on
+         the ground. Nothing in this product is for a rescuer standing
+         at a collapsed building. -->
+    <div class="qa-um-role-explainer" style="background:var(--surface); border:1px solid var(--border, #d0d0d8); border-radius:8px; padding:12px 14px; margin:0 0 12px 0; font-size:12px; line-height:1.5; color:var(--text)">
+      <div style="margin-bottom:6px"><strong>Operator</strong> — the coordinator at a desk, watching this map and directing help.
+        They can look at the map, look someone up by their rescue code when it
+        comes over the radio, mark someone as found once a team has reached them,
+        ask people "are you still OK?", and download reports for the team.
+        They cannot add or remove anyone, and they cannot set off an alert.
+      </div>
+      <div><strong>Admin</strong> — the person who runs the system.
+        Everything an operator can do, and also: add people to this list or
+        remove them, set off the earthquake alert, and change the logo and
+        authority name that appear on reports.
+      </div>
+    </div>
+
     <form class="qa-um-add-form" id="qa-um-add-form" onsubmit="return false">
-      <input type="email" id="qa-um-add-email" placeholder="new.operator@example.com" required />
+      <input type="email" id="qa-um-add-email" placeholder="their email address (e.g. name@example.com)" required />
       <label><input type="radio" name="qa-um-add-role" value="operator" checked> Operator</label>
       <label><input type="radio" name="qa-um-add-role" value="admin"> Admin</label>
       <button type="submit" class="qa-um-action-btn qa-um-primary" id="qa-um-add-submit">
-        Add operator
+        Add person
       </button>
     </form>
 
     <table class="qa-um-table" id="qa-um-table">
       <thead>
         <tr>
-          <th>Email</th>
-          <th>Role</th>
+          <th>Person</th>
+          <th>What they can do</th>
           <th>Status</th>
-          <th>Expires</th>
-          <th>Last login</th>
+          <th>Access ends</th>
+          <th>Last signed in</th>
           <th style="min-width:200px">Actions</th>
         </tr>
       </thead>
@@ -2584,7 +2642,25 @@
       if (!r.ok) { say("Could not prepare the check (HTTP " + r.status + ").", "error"); return; }
       var d = await r.json();
       if (!d.would_ask) {
-        say("There is no one to ask right now — nobody is currently marked as needing help with a phone that can answer.", "error");
+        // #231b (Batch 7): branch by the actual reason, not one catch-all
+        // sentence. Nobody-needs-help is very different from someone-
+        // needs-help-but-we-can't-reach-them; conflating the two hides
+        // information the operator has to act on.
+        var totalTrapped = Number(d.trapped_total || 0);
+        var unreachable = Number(d.unreachable || 0);
+        if (totalTrapped === 0) {
+          say("Nobody needs help right now — there is nobody to ask.");
+        } else if (unreachable > 0) {
+          var subj = unreachable === 1
+            ? "1 person needs help, but their phone has gone dark"
+            : unreachable + " people need help, but their phones have gone dark";
+          say(subj + " — we cannot reach them to ask.", "error");
+        } else {
+          // Rare corner case: trapped_total > 0 but neither would_ask
+          // nor unreachable — most likely a severity filter matched
+          // nothing. Say so honestly rather than blaming the phones.
+          say("No one matches this filter right now.");
+        }
         return;
       }
       var lines = (d.cost && d.cost.lines ? d.cost.lines : []).map(function (l) {
@@ -2715,9 +2791,9 @@
         <!-- #130: summary is the DEFAULT — the per-device table can run
              to many pages in a large incident and is opt-in only. -->
         <select class="qg-b1-detail" id="qg-b1-detail"
-                title="Summary only keeps the report short in a large incident; full detail adds one table row per device.">
-          <option value="summary" selected>Summary only — no per-device table</option>
-          <option value="full">Full detail — with per-device table</option>
+                title="Summary keeps the report short in a large incident; full detail adds one row per person.">
+          <option value="summary" selected>Summary only — totals</option>
+          <option value="full">Full detail — one row per person</option>
         </select>
       </label>
     </div>
@@ -2794,7 +2870,7 @@
       var err = e.error ? '<div style="color:#c21818;font-size:12px;margin-top:4px"><b>Error:</b> ' + esc(e.error) + "</div>" : "";
       return '<div class="qg-audit-row trigger">' +
           '<div class="qg-audit-title">⚠️ TRIGGER ' + badge + ' · ' + mag + ' · ' +
-            esc(e.recipients_total || 0) + ' device' + (e.recipients_total === 1 ? '' : 's') +
+            esc(e.recipients_total || 0) + ' ' + (e.recipients_total === 1 ? 'person' : 'people') +
             ' (' + counts + ') · by <code>' + esc(e.triggered_by || "dashboard") + '</code></div>' +
           err + '<div class="qg-audit-at">' + whenWords(e.at) + '</div></div>';
     }
@@ -2836,7 +2912,7 @@
         ' data-qg-map-lat="' + esc(e.latitude) + '"' +
         ' data-qg-map-lon="' + esc(e.longitude) + '"' +
         ' data-qg-map-label="' + esc(e.short_code || e.device_id || "") + '"' +
-        ' title="Show this location on the map above">📍 map</a>';
+        ' title="Show this location on the map above">📍 See on map</a>';
     }
     var bat = e.battery_pct != null ? " · 🔋 " + esc(e.battery_pct) + "%" : "";
     // B6: the wire value (`not_responding`, `trapped`) is never printed at an
@@ -2942,7 +3018,7 @@
         ' data-qg-map-lat="' + esc(p.latitude) + '"' +
         ' data-qg-map-lon="' + esc(p.longitude) + '"' +
         ' data-qg-map-label="' + esc(p.short_code || p.device_id || "") + '"' +
-        ' title="Show this location on the map above">📍 map</a>';
+        ' title="Show this location on the map above">📍 See on map</a>';
     }
     var updates = p.updates === 1 ? "1 update" : p.updates + " updates";
     var meta = "Latest " + esc(feedAgoWords(p.at)) + " · " + updates + " in this window" +
@@ -3889,7 +3965,7 @@ window.QuakeAngelRescue = (function () {
           } else if (e.status === 403) {
             showModalError("Your account isn't allowed to revert a rescue.");
           } else if (e.status === 409) {
-            showModalError("Device is not currently rescued — it may have already been reverted.");
+            showModalError("This person is not currently marked as rescued — the record may have already been reverted.");
           } else {
             showModalError("Failed: " + e.message + " — click Revert to try again.");
           }
@@ -4085,8 +4161,31 @@ window.QuakeAngelRescue = (function () {
     🧪 Admin testing tools — Preview Mode &amp; radius override
   </summary>
   <div style="font-size:12px; color:var(--text-muted); margin:2px 0 10px">
-    Nothing in this section is needed during a real incident. Test devices, preview
+    Nothing in this section is needed during a real incident. Test people, preview
     broadcasts, the panic kill and the radius override all live here, away from live operations.
+  </div>
+  <!-- #229 (Batch 7): 33 hand-designed test people. Seeded rows are
+       obviously fake — every display_name starts with TEST, every code
+       starts with Z, and the whole set can be removed in one click. -->
+  <div id="qg-test-people-33" style="padding:10px 0; border-bottom:1px dashed var(--border, #ccc); margin-bottom:10px">
+    <div style="font-size:13px; font-weight:700; color:var(--text); margin-bottom:6px">
+      33 test people
+    </div>
+    <div style="font-size:12px; color:var(--text-muted); margin-bottom:8px">
+      Adds 33 clearly-fake people to the map for practice.
+      Names start with TEST, rescue codes start with Z, and nothing is sent to any real phone.
+    </div>
+    <div style="display:flex; gap:8px; flex-wrap:wrap">
+      <button type="button" id="qg-tp-add"
+              style="background:#2f6feb; color:#fff; border:0; padding:8px 14px; border-radius:6px; font-weight:700; cursor:pointer">
+        Add 33 test people
+      </button>
+      <button type="button" id="qg-tp-clear"
+              style="background:#c21818; color:#fff; border:0; padding:8px 14px; border-radius:6px; font-weight:700; cursor:pointer">
+        Remove all test people
+      </button>
+      <span id="qg-tp-msg" style="font-size:12px; color:var(--text-muted); align-self:center"></span>
+    </div>
   </div>
   <div id="qg-admintools-slot"></div>
 </details>
@@ -4110,6 +4209,42 @@ window.QuakeAngelRescue = (function () {
   }
   new MutationObserver(syncVisibility).observe(panel, { attributes: true, attributeFilter: ["class"] });
   syncVisibility();
+
+  // #229 (Batch 7): wire the two "33 test people" buttons. Confirms
+  // before adding (so a fast click doesn't drop 33 rows on top of a
+  // live incident) and confirms with a count before removing.
+  var addBtn = document.getElementById("qg-tp-add");
+  var clrBtn = document.getElementById("qg-tp-clear");
+  var msgEl = document.getElementById("qg-tp-msg");
+  function tpSay(t, isErr) {
+    if (!msgEl) return;
+    msgEl.style.color = isErr ? "#c21818" : "var(--text-muted)";
+    msgEl.textContent = t || "";
+  }
+  if (addBtn) addBtn.addEventListener("click", async function () {
+    if (!window.confirm("Add 33 clearly-fake test people to the dashboard? Their names all start with TEST and their rescue codes all start with Z.")) return;
+    addBtn.disabled = true; tpSay("Adding…");
+    try {
+      var r = await window.qaApi("/api/admin/test-people/seed", { method: "POST", body: "{}" });
+      var d = await r.json();
+      if (!r.ok) throw new Error(d && d.detail || ("HTTP " + r.status));
+      tpSay("Added " + (d.seeded || 0) + " test people. Their rows will look clearly fake on the map.");
+    } catch (e) {
+      tpSay((e && e.message) || "Could not add test people.", true);
+    } finally { addBtn.disabled = false; }
+  });
+  if (clrBtn) clrBtn.addEventListener("click", async function () {
+    if (!window.confirm("Remove ALL seeded test people from the dashboard? Only rows starting with TEST are removed — real records are not touched.")) return;
+    clrBtn.disabled = true; tpSay("Removing…");
+    try {
+      var r = await window.qaApi("/api/admin/test-people/clear", { method: "POST", body: "{}" });
+      var d = await r.json();
+      if (!r.ok) throw new Error(d && d.detail || ("HTTP " + r.status));
+      tpSay("Removed " + (d.removed || 0) + " test people.");
+    } catch (e) {
+      tpSay((e && e.message) || "Could not remove test people.", true);
+    } finally { clrBtn.disabled = false; }
+  });
 
   // Guard: Return inside any preview-panel input must never trigger an
   // action. Buttons stay keyboard-accessible (Space / Enter when the

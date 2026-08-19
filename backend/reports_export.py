@@ -1594,11 +1594,24 @@ async def casualty_report_operational_pdf(
         # figure here because a team-report header is about "how much
         # activity in this window" — the current-state number lives in
         # its own labelled section below.
+        # #228 (Batch 7): "device" replaced with "person"/"people" wherever
+        # a human is meant. The two figures below count PEOPLE (one row
+        # per device, one device per person by design) — say so plainly.
+        # Wording approved by Paul, message 2026-08-19.
         Paragraph(
-            f"Devices active during this window: {counts['total_devices']} &nbsp;·&nbsp; "
-            f"Currently on the system: {current_counts.total} &nbsp;·&nbsp; "
-            f"Generated: {datetime.now(timezone.utc).isoformat()} &nbsp;·&nbsp; "
-            f"By: {generated_by}",
+            (
+                f"1 person checked in during this period."
+                if counts['total_devices'] == 1 else
+                f"{counts['total_devices']} people checked in during this period."
+            )
+            + " &nbsp;·&nbsp; "
+            + (
+                f"1 person is on the system in total."
+                if current_counts.total == 1 else
+                f"{current_counts.total} people are on the system in total."
+            )
+            + f" &nbsp;·&nbsp; Generated: {datetime.now(timezone.utc).isoformat()}"
+            + f" &nbsp;·&nbsp; By: {generated_by}",
             meta_style,
         ),
         # D1 (Batch 7): the aggregate table and the response-over-time
@@ -1787,14 +1800,14 @@ async def casualty_report_operational_pdf(
         story.append(tbl)
     else:
         story.append(Paragraph(
-            "Per-device detail omitted — this is the summary version. "
-            "Download the full version for the per-device table.",
+            "This is the short version — totals only. For a list showing "
+            "each person separately, download the full version.",
             meta_style,
         ))
 
     if counts["total_devices"] == 0:
         story.append(Spacer(0, 20))
-        story.append(Paragraph("No devices reported in the specified window.", meta_style))
+        story.append(Paragraph("No one reported in this period.", meta_style))
 
     story.append(Paragraph(
         "END OF TEAM REPORT — For public communications, use the \u201Csafe to share\u201D public report which "

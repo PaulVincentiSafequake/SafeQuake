@@ -2,7 +2,7 @@
   "expo": {
     "name": "Quake Angel",
     "slug": "frontend",
-    "version": "1.0.29",
+    "version": "1.0.30",
     "orientation": "portrait",
     "icon": "./assets/icons/quake_angel_ios_v3.png",
     "scheme": "frontend",
@@ -11,7 +11,7 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.paulvincenti.quakeguard",
-      "buildNumber": "29",
+      "buildNumber": "30",
       "entitlements": {
         "aps-environment": "production",
         "com.apple.developer.usernotifications.critical-alerts": true
@@ -32,7 +32,7 @@
       },
       "edgeToEdgeEnabled": true,
       "package": "com.paulvincenti.quakeguard",
-      "versionCode": 29,
+      "versionCode": 30,
       "permissions": [
         "ACCESS_COARSE_LOCATION",
         "ACCESS_FINE_LOCATION"

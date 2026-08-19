@@ -132,6 +132,14 @@ api_router.include_router(recheck_router)
 api_router.include_router(auth_users_router)
 api_router.include_router(emsc_admin_router)
 
+# #229 (Batch 7): 33 hand-designed test people. Wired here so the two
+# admin endpoints (`/api/admin/test-people/seed` and `/clear`) appear
+# on the same router as the rest of the admin surface. See
+# `/app/memory/test-people-spec.md` for the rules that matter most:
+# visibly fake names, Z-prefixed codes, never queues real pushes.
+from test_people_seed import register_test_people_routes as _reg_tp
+_reg_tp(api_router, db)
+
 # EMSC/USGS poller — instantiated at import time, started in the
 # `startup` handler. Held as a module global so admin endpoints
 # further down can read `.started_at` etc.

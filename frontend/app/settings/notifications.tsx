@@ -75,7 +75,7 @@ const PRESET_OPTIONS: {
     value: "noticeable",
     title: "Only what I'd likely feel",
     subtitle: "Tremors you'd probably notice",
-    helper: "Recommended. Notifications for tremors likely to be felt at all (predicted intensity III or above).",
+    helper: "Recommended. You'll hear about tremors strong enough that most people indoors would notice.",
   },
   {
     value: "everything",

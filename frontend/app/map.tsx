@@ -129,6 +129,13 @@ export default function SeismicMapScreen() {
   const [errText, setErrText] = useState<string | null>(null);
   const [windowHours, setWindowHours] = useState<WindowChoice>(168);
   const [preset, setPreset] = useState<Preset>("noticeable");
+  // #212 (Batch 7): the "Circle: ~N km around Malta" caption only
+  // makes sense while the circle is actually on screen. As soon as the
+  // user has panned or zoomed the map away from the initial view we
+  // can no longer guarantee that, so the caption hides itself. It comes
+  // back on a fresh mount / when the preset radius changes to Everything
+  // (the 600 km poll radius always frames what data is on-screen).
+  const [userMovedMap, setUserMovedMap] = useState(false);
 
   const fetchEvents = useCallback(async (hours: WindowChoice) => {
     setErrText(null);
@@ -265,7 +272,7 @@ export default function SeismicMapScreen() {
       <Text style={styles.attributionText} numberOfLines={2}>
         {attribution}
       </Text>
-      {presetRadiusM !== null && (
+      {presetRadiusM !== null && !userMovedMap && (
         <Text style={styles.attributionSub}>
           Circle: ~{Math.round(presetRadiusM/1000)} km around Malta
           {presetIsSolid ? " (poll radius)" : " (approximate — real felt area is intensity-shaped)"}
@@ -358,6 +365,7 @@ export default function SeismicMapScreen() {
           radiusMeters={presetRadiusM}
           radiusIsSolid={presetIsSolid}
           onEventPress={goToEvent}
+          onUserMoved={() => setUserMovedMap(true)}
         />
         {loading && (
           <View style={styles.mapLoader}>

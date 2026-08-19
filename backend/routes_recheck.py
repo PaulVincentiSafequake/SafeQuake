@@ -98,12 +98,28 @@ async def admin_recheck(body: ManualRecheckBody, request: Request):
     cost = manual_recheck_cost(will_ask)
 
     if not body.confirm:
+        # #231b (Batch 7): the dashboard needs both figures to branch
+        # its refusal wording — nobody-needs-help is a fundamentally
+        # different message from someone-needs-help-but-their-phone-is-
+        # unreachable. Count trapped from device_status so the two
+        # numbers come from the same single source of truth as the
+        # aggregate table (compute_counts).
+        trapped_total = await db.device_status.count_documents(
+            {"status": "trapped"}
+        )
+        dark_count = sum(
+            1 for s in skipped
+            if isinstance(s.get("reason"), str)
+            and "dark" in s["reason"]
+        )
         return {
             "preview": True,
             "asked": 0,
             "would_ask": cost["will_ask"],
             "cost": cost,
             "skipped": skipped,
+            "trapped_total": trapped_total,
+            "unreachable": dark_count,
             "people": [
                 {"device_id": r.get("device_id"),
                  "display_name": r.get("display_name"),
