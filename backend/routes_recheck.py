@@ -138,7 +138,13 @@ async def recheck_status(request: Request):
         request, request.headers.get("x-admin-token"), ADMIN_TRIGGER_PASSWORD, db
     )
     require_role(principal, "admin", "operator")
-    trapped = await db.device_status.count_documents({"status": "trapped"})
+    # A2 (Batch 7): counts read from the same function every other
+    # dashboard surface reads from. Previously this line was a bare
+    # count_documents({"status": "trapped"}) which ignored the test-entry
+    # filter and included rescued rows whose `status` was still 'trapped'.
+    from people_counts import compute_counts
+    _c = await compute_counts(db, include_test=False)
+    trapped = _c.needs_help
     return {
         "enabled": recheck_sweeper.enabled,
         "task_running": bool(recheck_sweeper.task and not recheck_sweeper.task.done()),

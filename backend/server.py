@@ -395,6 +395,12 @@ async def get_devices(
     )
 
     def clean(r: dict) -> dict:
+        # Derive effective_status the SAME way people_counts does, so
+        # the dashboard's map marker layer reads one authoritative field
+        # and can never draw a rescued tick under a trapped triangle
+        # (Batch 7 A2). Import lazily to keep the endpoint's cold-start
+        # cost identical.
+        from people_counts import effective_status as _eff
         return {
             "device_id": r.get("device_id"),
             # short_code is derived on read, not stored — that way any change
@@ -408,6 +414,11 @@ async def get_devices(
             # a name still work.
             "display_name": r.get("display_name"),
             "status": r.get("status") or "unknown",
+            # Batch 7 A2: single source of truth for what to DISPLAY. If
+            # `rescued_at` is set, effective_status is "rescued" no matter
+            # what `status` says. Dashboards must read effective_status,
+            # not status, for markers/chips/counts.
+            "effective_status": _eff(r),
             "severity": r.get("severity"),
             "mobility": r.get("mobility"),
             "egress": r.get("egress"),
@@ -604,17 +615,29 @@ async def get_status_checks():
 async def public_summary():
     """Aggregate counts ONLY — the B2-style view for anonymous visitors.
     No device ids, no short codes, no coordinates, no operator identities.
-    This is everything a signed-out dashboard is allowed to show."""
-    rows = await db.device_status.find({}, {"_id": 0, "status": 1}).to_list(10000)
-    counts = {"safe": 0, "trapped": 0, "rescued": 0, "not_responding": 0, "unknown": 0}
-    for r in rows:
-        st = r.get("status") or "unknown"
-        counts[st if st in counts else "unknown"] += 1
+    This is everything a signed-out dashboard is allowed to show.
+
+    Reads through `people_counts.compute_counts` — the same function the
+    signed-in dashboard, the re-check panel, and the PDF aggregate table
+    read from. Before Batch 7 A2 this endpoint had its own inline loop
+    that skipped the test-entry filter, so the public number was higher
+    than the operator number for the same moment (Paul, 2026-08-19).
+    """
+    from people_counts import compute_counts
+    c = await compute_counts(db, include_test=False)
     alert_dt = await _last_alert_start()
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "total": len(rows),
-        "counts": counts,
+        "total": c.total,
+        # Field names preserved for backwards-compat with the deployed
+        # dashboard JS (which reads counts.safe / counts.trapped / etc.).
+        "counts": {
+            "safe": c.safe,
+            "trapped": c.trapped,
+            "rescued": c.rescued,
+            "not_responding": c.not_responding,
+            "unknown": c.unknown,
+        },
         # Timestamp of the most recent alert broadcast (non-personal). The
         # dashboard anchors its "Since the alert" window to this.
         "last_alert_at": alert_dt.isoformat() if alert_dt else None,
@@ -794,6 +817,26 @@ async def get_audit_log(
     # Merge and clip.
     events.sort(key=lambda e: e.get("at") or "", reverse=True)
     events = events[:limit]
+
+    # Batch 7 C6: backfill display_name onto any event still missing it.
+    # Old recheck_sent / recheck_missed rows (pre-2026-08-19) were
+    # written without the name snapshot, so the activity feed showed
+    # "🔁 RE-CHECK · CODE" while every other row rendered
+    # "🔁 UPDATE · NAME · CODE". Look up current device_status names in
+    # a single query and stamp them onto any event still missing one —
+    # never overwrite a real snapshot, so a person who was renamed
+    # after the event still sees their historical name on old rows.
+    _missing = {e.get("device_id") for e in events
+                if e.get("device_id") and not e.get("display_name")}
+    if _missing:
+        _name_rows = await db.device_status.find(
+            {"device_id": {"$in": list(_missing)}},
+            {"_id": 0, "device_id": 1, "display_name": 1},
+        ).to_list(len(_missing))
+        _names = {r["device_id"]: r.get("display_name") for r in _name_rows if r.get("display_name")}
+        for e in events:
+            if not e.get("display_name") and e.get("device_id") in _names:
+                e["display_name"] = _names[e["device_id"]]
 
     return {
         "count": len(events),

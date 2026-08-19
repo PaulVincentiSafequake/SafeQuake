@@ -122,6 +122,17 @@ async def _get_authority_name() -> str:
     return name or "the responsible authorities"
 
 
+async def _get_authority_cooperation_claim() -> bool:
+    """Whether the public report may state that Quake Angel is operating
+    'in cooperation with' the named authority. Default False (D2 lock,
+    Batch 7 2026-08-19). The neutral wording — "Authority: [name]" — is
+    always safe; the cooperation phrasing implies an operational partnership
+    and next-of-kin notification which must not be asserted until an admin
+    has knowingly enabled it. See PRD standing rule #86."""
+    settings = await _get_dashboard_settings()
+    return bool(settings.get("authority_cooperation_claim") is True)
+
+
 # ─── Confidentiality banner (PDF + CSV) ─────────────────────────────────
 #
 # Every export that contains personal data (CSV audit, PDF audit, B1
@@ -1451,7 +1462,18 @@ async def casualty_report_operational_pdf(
     require_role(principal, "admin", "operator")
 
     events, since_dt, until_dt, raw_rows = await _gather_devices_in_report_window(since, until)
-    counts = _bucket_by_status(events)
+    # A2/D1 (Batch 7): the aggregate table reads CURRENT state from the
+    # same function as the live dashboard. The narrative continues to
+    # use window-bounded event counts (that's a genuinely different
+    # question: "how many told us they were trapped DURING this window"
+    # vs "how many are trapped RIGHT NOW"). Previously both read the
+    # same _bucket_by_status(events), which counted the latest event
+    # per device WITHIN the window — so a device that became trapped
+    # BEFORE the window opened produced no in-window trapped event and
+    # the aggregate showed 0 while the narrative correctly said 1.
+    from people_counts import compute_counts
+    current_counts = await compute_counts(db, include_test=False)
+    counts = _bucket_by_status(events)   # window-bounded, used by narrative
     authority = await _get_authority_name()   # for the footer copy — never hard-coded
     await _backfill_display_names(events)
     generated_by = principal.get("email", "?")
@@ -1505,13 +1527,13 @@ async def casualty_report_operational_pdf(
 
     summary_data = [
         ["", "Count"],
-        ["Safe", str(counts["safe"])],
-        ["Trapped / needs help (red)",    str(counts["trapped_red"])],
-        ["Trapped / needs help (yellow)", str(counts["trapped_yellow"])],
-        ["Trapped / needs help (green)",  str(counts["trapped_green"])],
-        ["Trapped — severity not set",    str(counts["trapped_unknown"])],
-        ["Rescued",                       str(counts["rescued"])],
-        ["Total",                         str(counts["total_devices"])],
+        ["Safe", str(current_counts.safe)],
+        ["Trapped / needs help (red)",    str(current_counts.trapped_red)],
+        ["Trapped / needs help (yellow)", str(current_counts.trapped_yellow)],
+        ["Trapped / needs help (green)",  str(current_counts.trapped_green)],
+        ["Trapped — severity not set",    str(current_counts.trapped_unknown)],
+        ["Rescued",                       str(current_counts.rescued)],
+        ["Total",                         str(current_counts.total)],
     ]
     summary_tbl = Table(summary_data, colWidths=[70*mm, 30*mm])
     summary_tbl.setStyle(TableStyle([
@@ -1723,8 +1745,15 @@ async def casualty_report_public_pdf(
     require_role(principal, "admin", "operator")
 
     events, since_dt, until_dt, raw_rows = await _gather_devices_in_report_window(since, until)
+    # A2/D1 (Batch 7): aggregate reads CURRENT state, matches live board.
+    from people_counts import compute_counts
+    current_counts = await compute_counts(db, include_test=False)
     counts = _bucket_by_status(events)
     authority = await _get_authority_name()   # configurable, never hard-coded
+    # D2 (Batch 7): default to neutral "Authority: [name]" wording. Any
+    # phrasing that implies operational partnership or next-of-kin
+    # notification is behind an explicit admin setting (see PRD #86).
+    _cooperation_ok = await _get_authority_cooperation_claim()
 
     # Belt-and-braces assertion. If a future refactor accidentally left
     # a per-person field in `counts`, this assertion refuses to render
@@ -1771,9 +1800,19 @@ async def casualty_report_public_pdf(
         # the document is attributable to Quake Angel's official output —
         # never the individual operator (no personal email on a document
         # going to press and families).
+        #
+        # D2 (Batch 7): neutral-by-default. Cooperation phrasing is gated
+        # on the admin setting `authority_cooperation_claim` — off by
+        # default. Never asserts partnership silently just because a name
+        # is present in the config.
         Paragraph(
-            f"Issued by the Quake Angel emergency response system, "
-            f"in cooperation with {authority}.",
+            (
+                f"Issued by the Quake Angel emergency response system, "
+                f"in cooperation with {authority}."
+            ) if _cooperation_ok else (
+                f"Issued by the Quake Angel emergency response system. "
+                f"Authority: {authority}."
+            ),
             meta_style,
         ),
         Paragraph("Current status of people using the Quake Angel app in the affected area:", body_style),
@@ -1789,13 +1828,13 @@ async def casualty_report_public_pdf(
     # region column, no timestamp-of-latest-event column.
     summary_data = [
         ["", ""],
-        ["People checked in as safe",                str(counts["safe"])],
-        ["People rescued",                           str(counts["rescued"])],
-        ["People awaiting rescue",                   str(counts["awaiting_rescue"])],
-        ["  — of which reporting critical injury",   str(counts["trapped_red"])],
-        ["  — of which reporting moderate injury",   str(counts["trapped_yellow"])],
-        ["  — of which reporting minor injury",      str(counts["trapped_green"])],
-        ["Total people accounted for",               str(counts["total_devices"])],
+        ["People checked in as safe",                str(current_counts.safe)],
+        ["People rescued",                           str(current_counts.rescued)],
+        ["People awaiting rescue",                   str(current_counts.needs_help)],
+        ["  — of which reporting critical injury",   str(current_counts.trapped_red)],
+        ["  — of which reporting moderate injury",   str(current_counts.trapped_yellow)],
+        ["  — of which reporting minor injury",      str(current_counts.trapped_green)],
+        ["Total people accounted for",               str(current_counts.total)],
     ]
     summary_tbl = Table(summary_data, colWidths=[110*mm, 30*mm])
     summary_tbl.setStyle(TableStyle([
@@ -1840,13 +1879,24 @@ async def casualty_report_public_pdf(
     story.append(_KT(timeline_block))
 
     story.append(Spacer(0, 14))
-    story.append(Paragraph(
-        "Notes: These counts reflect app users who have checked in via Quake Angel during the "
-        "window shown. They do not represent the total affected population. Individual "
-        "identities are not disclosed in this report to protect privacy and to preserve formal "
-        f"next-of-kin notification procedures conducted by {authority}.",
-        footer_style,
-    ))
+    # D2 (Batch 7): neutral footer wording by default. The "conducted by
+    # [authority]" claim is gated behind the same cooperation setting as
+    # the issuer line.
+    if _cooperation_ok:
+        _notes_line = (
+            "Notes: These counts reflect app users who have checked in via Quake Angel during the "
+            "window shown. They do not represent the total affected population. Individual "
+            "identities are not disclosed in this report to protect privacy and to preserve formal "
+            f"next-of-kin notification procedures conducted by {authority}."
+        )
+    else:
+        _notes_line = (
+            "Notes: These counts reflect app users who have checked in via Quake Angel during the "
+            "window shown. They do not represent the total affected population. Individual "
+            "identities are not disclosed in this report to protect privacy and to preserve formal "
+            "next-of-kin notification procedures conducted by the appropriate authorities."
+        )
+    story.append(Paragraph(_notes_line, footer_style))
 
     buf = _io.BytesIO()
     doc = r["SimpleDocTemplate"](

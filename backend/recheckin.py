@@ -240,6 +240,11 @@ async def _dispatch_rechecks(
         if pending:
             await db.status_events.insert_one({
                 "device_id": did,
+                # Batch 7 C6: snapshot display_name onto the row so the
+                # activity feed can render "🔁 RE-CHECK · NAME · CODE"
+                # like every other row. Without this, RE-CHECK rows
+                # showed the code alone (Paul, 2026-08-19).
+                "display_name": r.get("display_name"),
                 "kind": "recheck_missed",
                 "check_id": pending,
                 "status": r.get("status"),
@@ -290,6 +295,11 @@ async def _dispatch_rechecks(
                     sent += 1
                 await db.status_events.insert_one({
                     "device_id": ev.get("user_id"),
+                    # Batch 7 C6: snapshot the display_name (from the
+                    # meta lookup captured at check-formation time) so
+                    # the activity-feed row can render name+code, not
+                    # just the code. See recheck_missed above.
+                    "display_name": (meta.get(ev.get("check_id"), {}).get("row") or {}).get("display_name"),
                     "kind": "recheck_sent",
                     "check_id": ev.get("check_id"),
                     "delivered": bool(ev.get("delivered")),
