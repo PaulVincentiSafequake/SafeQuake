@@ -5701,7 +5701,7 @@ window.QuakeAngelRescue = (function () {
     if (e.key === "Escape" && modal.classList.contains("show")) hideModal();
   });
 
-  async function sendTriggerAlert() {
+  async function sendTriggerAlert(confirmationPhrase) {
     if (!window.qaApi) {
       showBanner("err", "Auth not loaded — reload the page.", 8000);
       return;
@@ -5725,13 +5725,17 @@ window.QuakeAngelRescue = (function () {
           triggeredBy: "dashboard",
           magnitude: 6.4,
           distance_km: 12,
-          intensity: "VII"
+          intensity: "VII",
+          // #245 (Batch 7 R4): the exact phrase the operator typed in
+          // the confirm dialog. Backend refuses to send if this is
+          // missing or wrong.
+          confirmation_phrase: confirmationPhrase
         })
       });
 
       if (res.status === 401) {
         hideBanner();
-        showBanner("err", "Session expired — please sign in again.", 6000);
+        showBanner("err", "You've been signed out. Please sign in again, then try again.", 6000);
         if (window.qaAuth) window.qaAuth.signIn();
         return;
       }
@@ -5739,8 +5743,13 @@ window.QuakeAngelRescue = (function () {
         showBanner("err", "Your account isn't allowed to trigger alerts.", 8000);
         return;
       }
+      if (res.status === 400) {
+        var d = await res.json().catch(function () { return {}; });
+        showBanner("err", (d && d.detail) || "The confirmation didn't match — alert NOT sent.", 8000);
+        return;
+      }
       if (!res.ok) {
-        showBanner("err", "Server error (" + res.status + "). Alert NOT sent.");
+        showBanner("err", "The server rejected the request. Alert NOT sent. Please contact support.", 0);
         return;
       }
 
@@ -5748,24 +5757,62 @@ window.QuakeAngelRescue = (function () {
       var n = (data && typeof data.recipients === "number") ? data.recipients : 0;
       var delivered = data && data.push_delivered;
       var text =
-        "ALERT BROADCAST — " + n + " device" + (n === 1 ? "" : "s") +
-        (delivered === false ? " (delivery issue — check /api/admin/last-push-events)" : "");
+        "Alert broadcast — " + n + " " + (n === 1 ? "phone" : "phones") +
+        (delivered === false ? " (some phones weren't reached — check the delivery log)" : "");
       showBanner(delivered === false ? "err" : "ok", text, delivered === false ? 0 : 6000);
     } catch (e) {
-      showBanner("err", "Network error: " + (e && e.message ? e.message : e));
+      showBanner("err", "Network error. Alert NOT sent. Check your connection and try again.");
     } finally {
       btn.disabled = false;
     }
   }
 
-  btn.addEventListener("click", function onTriggerClick() {
-    var confirmed = window.confirm(
-      "Broadcast an EARTHQUAKE ALERT to every registered device?\n\n" +
-      "This will push a notification to all installed apps and flip their " +
-      "dashboard status to 'not responding' until they mark themselves safe."
-    );
-    if (!confirmed) return;
-    sendTriggerAlert();
+  btn.addEventListener("click", async function onTriggerClick() {
+    // #245 (Batch 7 R4): two-step confirmation. First we fetch the
+    // live recipient count so the operator sees, in the dialog, how
+    // many phones will siren. Then the operator must TYPE the phrase
+    // — not just click — matching the standard already used for
+    // delete-user and change-role on this dashboard.
+    var preview;
+    try {
+      var r = await window.qaApi("/api/admin/trigger-alert/preview", { method: "GET" });
+      if (r.status === 401) {
+        showBanner("err", "You've been signed out. Please sign in again.", 6000);
+        if (window.qaAuth) window.qaAuth.signIn();
+        return;
+      }
+      if (!r.ok) {
+        showBanner("err", "Could not check how many phones are on the system. Alert NOT sent.", 8000);
+        return;
+      }
+      preview = await r.json();
+    } catch (e) {
+      showBanner("err", "Network error preparing confirmation. Alert NOT sent.", 8000);
+      return;
+    }
+
+    var total = Number(preview && preview.total) || 0;
+    var phrase = (preview && preview.confirmation_phrase) || "SEND EARTHQUAKE ALERT TO ALL PHONES";
+    if (total === 0) {
+      window.alert("No phones are registered on this system. There is nothing to broadcast to.");
+      return;
+    }
+
+    // Use the same type-to-confirm modal the delete-user flow uses so
+    // an operator recognises the pattern from other high-stakes actions.
+    var body =
+      "This will siren " + total + " " + (total === 1 ? "phone" : "phones") +
+      " right now, including phones on silent, and mark everyone as " +
+      "'not answered yet' until they check in.\n\n" +
+      "Type this phrase exactly to confirm:";
+    var ok;
+    try {
+      ok = await confirmTyping("Send a real earthquake alert?", body, phrase);
+    } catch (_) { ok = false; }
+    if (!ok) return;
+    // confirmTyping only resolves true when typed matches expected, so
+    // we can send the phrase itself — it's what the operator typed.
+    sendTriggerAlert(phrase);
   });
 
   // ── False-alarm recovery: stop the repeating check-in reminders ─────────
