@@ -1032,6 +1032,77 @@
     tryInit();
   }
 
+  // ── Global helpers exposed for use OUTSIDE this IIFE ─────────────────
+  // A single HTML escaper accessible from every script tag on the page.
+  // Batch 7 C1 (2026-08-19): `histMapLink` and other orphan callers
+  // referenced a local `esc()` that lived inside an unrelated IIFE, so
+  // opening a person's full history threw "ReferenceError: Can't find
+  // variable: esc" — the legal-record modal was dead. Now every caller
+  // uses window.qgEsc, which is defined exactly once, right here.
+  window.qgEsc = function (s) {
+    return String(s == null ? "" : s)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  };
+
+  // Human-friendly error translator. Never let a JavaScript error object,
+  // enum string, or CORS-style browser-console phrase reach an operator.
+  // Batch 7 Pattern 5.
+  window.qgFriendlyError = function (err, opts) {
+    opts = opts || {};
+    var raw = (err && (err.message || err.toString && err.toString())) || String(err || "");
+    if (/ReferenceError|TypeError|SyntaxError/i.test(raw)) {
+      try { console.warn("qgFriendlyError raw:", raw); } catch (_) {}
+      return opts.fallback || "Something went wrong loading this. Please refresh the page.";
+    }
+    if (/NetworkError|Failed to fetch|Load failed/i.test(raw)) {
+      return "We couldn't reach the backend. Check your connection and try again.";
+    }
+    if (/access control|CORS|Fetch API cannot load/i.test(raw)) {
+      return "We couldn't reach the backend. Check your connection and try again.";
+    }
+    try { console.warn("qgFriendlyError raw:", raw); } catch (_) {}
+    return opts.fallback || "Something went wrong. Please refresh the page.";
+  };
+
+  // Prominent banner shown once when the session drops mid-use. Batch 7
+  // A1 (minimum carve-out): stops the "signed out for 40 min, still
+  // reading stale numbers" failure mode. Full stale-banner design (per-
+  // panel "not live" chips, retry messaging, three-state live/falling-
+  // behind/stale) is Round 3 — this is the deliberately-narrow minimum.
+  function qgShowSessionExpiredBanner() {
+    var id = "qg-session-expired-banner";
+    if (document.getElementById(id)) return;
+    var el = document.createElement("div");
+    el.id = id;
+    el.setAttribute("role", "alert");
+    el.style.cssText = [
+      "position:fixed", "top:0", "left:0", "right:0", "z-index:99999",
+      "background:#b0141a", "color:#fff", "padding:14px 16px",
+      "font:600 15px system-ui, -apple-system, sans-serif",
+      "text-align:center", "box-shadow:0 2px 8px rgba(0,0,0,0.25)",
+    ].join(";");
+    el.innerHTML =
+      "You've been signed out. Sign in again to see live data — the numbers on this page are no longer updating." +
+      ' <button type="button" style="margin-left:12px;background:#fff;color:#b0141a;border:0;padding:6px 12px;border-radius:4px;font-weight:700;cursor:pointer" ' +
+      'onclick="this.parentNode.remove()">Dismiss</button>';
+    document.body.appendChild(el);
+  }
+  window.qgShowSessionExpiredBanner = qgShowSessionExpiredBanner;
+
+  // Global auth-loss beacon. Any authenticated polling loop can (and
+  // will, going forward) check `window.qgAuthed` and short-circuit its
+  // fetches once the session drops. For Round 1 minimum, this just
+  // flips + fires the banner; Round 3 wires it into every poller.
+  window.qgAuthed = !!getStoredJwt();
+  listeners.add(function () {
+    var was = window.qgAuthed;
+    window.qgAuthed = !!getStoredJwt();
+    if (was && !window.qgAuthed) {
+      try { qgShowSessionExpiredBanner(); } catch (_) {}
+    }
+  });
+
   function escapeHtml(s) {
     return String(s ?? "").replace(/[&<>"']/g, c => ({
       "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
@@ -1076,7 +1147,12 @@
     const jwt = getStoredJwt();
     if (jwt) headers["Authorization"] = "Bearer " + jwt;
     const r = await fetch(CONFIG.API_BASE + path, Object.assign({}, options, {headers}));
-    if (r.status === 401) {
+    if (r.status === 401 || r.status === 403) {
+      // Batch 7 A1 (minimum carve-out): treat 403 the same as 401 for
+      // session-loss purposes. setStored(null,null) fires notify() which
+      // flips window.qgAuthed and triggers the session-expired banner.
+      // The full stale-banner design (three-state live/falling/stale
+      // with per-panel chips and server-side action refusal) is Round 3.
       setStored(null, null);
     }
     return r;
@@ -1782,11 +1858,17 @@
 
 <div class="layout">
   <div id="map-wrap">
-    <div class="map-filters">
+    <div class="map-filters" role="group" aria-label="Filter map by severity">
       <button class="map-filter-btn active" data-filter="all" onclick="setFilter('all')">All</button>
-      <button class="map-filter-btn" data-filter="red" onclick="setFilter('red')">🔴 Immediate</button>
-      <button class="map-filter-btn" data-filter="yellow" onclick="setFilter('yellow')">🟡 Serious/Stable</button>
-      <button class="map-filter-btn" data-filter="green" onclick="setFilter('green')">🟢 Minor</button>
+      <!-- Batch 7 C6: shape + word + colour, matching the map pins and
+           the severity chips exactly. Colour alone fails accessibility
+           and fails black-and-white print. -->
+      <button class="map-filter-btn" data-filter="red" onclick="setFilter('red')" aria-label="Filter: Immediate">
+        <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true" style="vertical-align:-1px;margin-right:5px"><circle cx="6" cy="6" r="5" fill="#C21818" stroke="#000" stroke-width="1"/></svg>Immediate</button>
+      <button class="map-filter-btn" data-filter="yellow" onclick="setFilter('yellow')" aria-label="Filter: Serious/Stable">
+        <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true" style="vertical-align:-1px;margin-right:5px"><polygon points="6,1 11,10.5 1,10.5" fill="#F2A114" stroke="#000" stroke-width="1" stroke-linejoin="round"/></svg>Serious/Stable</button>
+      <button class="map-filter-btn" data-filter="green" onclick="setFilter('green')" aria-label="Filter: Minor">
+        <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true" style="vertical-align:-1px;margin-right:5px"><rect x="1.5" y="1.5" width="9" height="9" fill="#1F8A3A" stroke="#000" stroke-width="1"/></svg>Minor</button>
     </div>
     <div id="map"></div>
   </div>
@@ -2400,12 +2482,29 @@
         ? (window.qgDurWords ? window.qgDurWords(Date.now() - new Date(d.last_sweep_at).getTime()) + " ago" : d.last_sweep_at)
         : "not yet";
       var sent = d.last_result && d.last_result.sent != null ? d.last_result.sent : 0;
+      // Batch 7 C6: the previous phrasing "Last check ran less than a
+      // minute ago and asked 0" contradicts "3 people currently need
+      // help" in the same block. Say what "asked 0" actually meant:
+      // either nobody was due for a check, or nobody was reachable.
+      var trappedN = d.trapped_count || 0;
+      var lastSentence;
+      if (!d.last_sweep_at) {
+        lastSentence = "No check has run yet.";
+      } else if (sent > 0) {
+        lastSentence = "Last check ran " + last + " and asked " + sent +
+          (sent === 1 ? " person." : " people.");
+      } else if (trappedN === 0) {
+        lastSentence = "Last check ran " + last +
+          " — nobody was marked as needing help, so nobody was asked.";
+      } else {
+        lastSentence = "Last check ran " + last +
+          " — nobody was due for a check yet, so nobody was asked.";
+      }
       stateEl.innerHTML =
         (enabled
           ? "Automatic checks are <b>on</b>. "
           : '<span class="qg-rc-paused">Automatic checks are PAUSED — nobody is being asked.</span> ') +
-        people + " currently need help. Last check ran " + esc(last) +
-        (d.last_sweep_at ? " and asked " + sent + "." : ".") +
+        people + " currently need help. " + window.qgEsc(lastSentence) +
         "<br>People are asked more often at first and less often as time passes, and less often again when their battery is low.";
       pauseBtn.textContent = enabled ? "Pause automatic checks" : "Resume automatic checks";
       pauseBtn.className = enabled ? "" : "danger";
@@ -3892,12 +3991,9 @@ window.QuakeAngelRescue = (function () {
   </div>
 </div>
 
-<footer class="qg-powered-by">
-  Powered by <strong>Quake Angel</strong> · Emergency response platform
-</footer>
-
 <!-- ═════════════════════════════════════════════════════════════════════
-     Admin testing tools — deliberately at the BOTTOM of the page.
+     Admin testing tools — deliberately at the BOTTOM of the working area,
+     but ABOVE the "Powered by Quake Angel" footer (Batch 7 C2, 2026-08-19).
      Preview Mode (incl. PANIC KILL + radius override) used to be injected
      at the very top, above the map and triage list. During a live incident
      an operator must see who needs help first — never test tooling — and
@@ -3906,7 +4002,9 @@ window.QuakeAngelRescue = (function () {
      2026-08-13). The panel itself still renders into #qa-preview-panel;
      we MOVE that node here at runtime so its script and event delegation
      keep working untouched, and wrap it in a collapsed <details> so it is
-     reached deliberately.
+     reached deliberately. Nothing must sit after "Powered by Quake Angel"
+     — a section AFTER the footer reads as "extra / unofficial / not part
+     of this product" to an operator.
      ═════════════════════════════════════════════════════════════════════ -->
 <details id="qg-admintools" style="display:none; margin:16px 12px; padding:4px 16px 16px; background:var(--surface); border:1px dashed var(--border-strong, #999); border-radius:8px">
   <summary style="cursor:pointer; font-size:14px; font-weight:700; color:var(--text); padding:10px 0; user-select:none">
@@ -3918,6 +4016,10 @@ window.QuakeAngelRescue = (function () {
   </div>
   <div id="qg-admintools-slot"></div>
 </details>
+
+<footer class="qg-powered-by">
+  Powered by <strong>Quake Angel</strong> · Emergency response platform
+</footer>
 <script>
 (function () {
   var panel = document.getElementById("qa-preview-panel");
@@ -4239,10 +4341,17 @@ window.QuakeAngelRescue = (function () {
   .qg-mrk-wrap { background: none; border: none; }
   .qg-mrk { display: flex; flex-direction: column; align-items: center; }
   .qg-mrk svg { display: block; filter: drop-shadow(0 1px 2px rgba(0,0,0,0.45)); }
+  /* Batch 7 C5: labels wrap to two lines rather than truncating. A pin
+     label is read aloud over radio, so "Paul Vincent…" (truncated) is
+     worse than a slightly taller pin. Max two lines caps the height,
+     word-break:break-word protects against a single 40-char token. */
   .qg-mrk .qg-mrk-tag {
-    font: 700 9px/1.3 system-ui, sans-serif; color: #fff; background: #C21818;
-    border-radius: 3px; padding: 0 3px; margin-top: 1px; white-space: nowrap;
+    font: 700 9px/1.25 system-ui, sans-serif; color: #fff; background: #C21818;
+    border-radius: 3px; padding: 1px 4px; margin-top: 1px;
     box-shadow: 0 1px 2px rgba(0,0,0,0.4);
+    max-width: 140px; text-align: center;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+    overflow: hidden; word-break: break-word;
   }
   .qg-mrk .qg-mrk-tag.rescued { background: #1F8A3A; }
   .qg-mrk .qg-mrk-tag.plain { background: rgba(22, 30, 40, 0.82); }
@@ -4502,21 +4611,33 @@ window.QuakeAngelRescue = (function () {
     // Every pin carries the person's short code (item 2) — the same
     // string as the triage card and the team report table.
     var code = qgCode(u);
-    // C3: pin labels carry the name too. Truncated hard — a pin label is
-    // 56px of map furniture, not a text field.
-    var nm = u.displayName ? String(u.displayName).slice(0, 12) : "";
+    // Batch 7 C5: names are read aloud over radio. Truncating "Paul
+    // Vincenti" to "Paul Vincent" (no ellipsis) reads as a different
+    // person on the wire. Update (2026-08-19, Paul): let the label
+    // wrap to two lines instead of truncating at all. CSS caps it at
+    // two lines (-webkit-line-clamp) and 140px wide. Very-long names
+    // still cap at ~24 chars before line-clamp hides the tail, but
+    // that's a soft visual cut rather than a silent chop of the raw
+    // string — the tooltip on the pin still carries the full name.
+    var nm = u.displayName ? String(u.displayName) : "";
     var ident = nm ? code + " " + nm : code;
     var tagText = v.kind === "immediate" ? ("SOS " + ident)
       : v.kind === "rescued" ? ("\u2713 " + ident)
       : ident;
     var tagCls = v.kind === "immediate" ? "" : v.kind === "rescued" ? " rescued" : " plain";
-    var tagH = tagText ? 13 : 0;
-    var tag = tagText ? '<span class="qg-mrk-tag' + tagCls + '">' + tagText + "</span>" : "";
+    // Two-line labels need ~24px of vertical space (2 × 12px line-box).
+    // Detect "will probably wrap" by length heuristic — cheap and good
+    // enough since we can't measure before insertion.
+    var willWrap = tagText.length > 18;
+    var tagH = tagText ? (willWrap ? 26 : 13) : 0;
+    var tag = tagText ? '<span class="qg-mrk-tag' + tagCls + '" title="' + window.qgEsc(tagText) + '">' + window.qgEsc(tagText) + "</span>" : "";
+    // Icon container width up to 152 (matches the 140px CSS + padding).
+    var iconW = Math.max(s, tagText ? 152 : 56);
     return L.divIcon({
       className: "qg-mrk-wrap",
       html: '<div class="qg-mrk">' + svgShape(v.shape, v.color, s) + tag + "</div>",
-      iconSize: [Math.max(s, 56), s + tagH],
-      iconAnchor: [Math.max(s, 56) / 2, s / 2],
+      iconSize: [iconW, s + tagH],
+      iconAnchor: [iconW / 2, s / 2],
     });
   }
 
@@ -4740,7 +4861,17 @@ window.QuakeAngelRescue = (function () {
         }).addTo(map);
         marker._qgDevice = u;
         marker._qgIconSig = iconSignature(u);
-        marker.bindPopup(popupHtml(u));
+        // Batch 7 C5: autoPan lets Leaflet reposition the map so the
+        // popup fits the viewport (previously the popup could open with
+        // its top clipped by the map container). maxHeight gives it
+        // scroll if the popup is very tall (multi-line rescue notes).
+        marker.bindPopup(popupHtml(u), {
+          autoPan: true,
+          autoPanPadding: L.point(16, 16),
+          maxWidth: 320,
+          maxHeight: 360,
+          keepInView: true,
+        });
         marker.on("popupopen", function () {
           var el = marker.getPopup() && marker.getPopup().getElement();
           if (el) wireRescueButtons(el, marker._qgDevice);
@@ -4894,10 +5025,15 @@ window.QuakeAngelRescue = (function () {
     if (e.latitude == null || e.longitude == null) return "";
     // GDPR (2026-06): recentre our own map; never disclose a casualty's
     // position to a third party via an outbound URL.
+    // Batch 7 C1 (2026-08-19): use window.qgEsc — the local `esc`
+    // referenced here previously lived inside an unrelated IIFE, which
+    // meant this function threw ReferenceError and killed the full-
+    // history modal entirely.
+    var _e = window.qgEsc;
     return ' · <a href="#map-wrap" class="qg-maplink"' +
-      ' data-qg-map-lat="' + esc(e.latitude) + '"' +
-      ' data-qg-map-lon="' + esc(e.longitude) + '"' +
-      ' data-qg-map-label="' + esc(e.short_code || e.device_id || "") + '"' +
+      ' data-qg-map-lat="' + _e(e.latitude) + '"' +
+      ' data-qg-map-lon="' + _e(e.longitude) + '"' +
+      ' data-qg-map-label="' + _e(e.short_code || e.device_id || "") + '"' +
       ' title="Show this location on the map above">📍 map</a>';
   }
 
@@ -4970,7 +5106,18 @@ window.QuakeAngelRescue = (function () {
     bodyEl.innerHTML = "Loading…";
     try {
       var r = await window.qaApi("/api/admin/device-history/" + encodeURIComponent(deviceId) + "?limit=500");
-      if (!r.ok) { bodyEl.innerHTML = "Could not load history (HTTP " + r.status + ")."; return; }
+      if (!r.ok) {
+        // Batch 7 Pattern 5: no HTTP number to the operator. Translate
+        // status codes into plain words.
+        var msg;
+        if (r.status === 401 || r.status === 403) {
+          msg = "You've been signed out. Sign in again to see this person's history.";
+        } else {
+          msg = "We couldn't load this person's history. Please try again in a moment.";
+        }
+        bodyEl.innerHTML = "<div class='qg-hist-error'>" + msg + "</div>";
+        return;
+      }
       var d = await r.json();
       var lk = d.last_known || {};
       var staleNote = lk.is_stale
@@ -4990,7 +5137,15 @@ window.QuakeAngelRescue = (function () {
       bodyEl.innerHTML = header + (d.events || []).map(histEventHtml).join("") +
         ((d.events || []).length === 0 ? '<div class="qg-hist-row">No recorded events.</div>' : "");
     } catch (err) {
-      bodyEl.innerHTML = "Could not load history: " + err;
+      // Batch 7 Pattern 5: never render a raw Error object to a human.
+      // window.qgFriendlyError translates ReferenceError / NetworkError /
+      // CORS-style browser strings into plain language. The raw error is
+      // still console.warn'd for support.
+      bodyEl.innerHTML = "<div class='qg-hist-error'>" +
+        (window.qgFriendlyError ? window.qgFriendlyError(err, {
+          fallback: "We couldn't load this person's history. Please try again in a moment.",
+        }) : "We couldn't load this person's history. Please try again in a moment.") +
+        "</div>";
     }
   }
 
@@ -5449,6 +5604,28 @@ window.QuakeAngelRescue = (function () {
   }
 
   if (stopBtn) {
+    // Batch 7 C3: hide the stop-reminders button when signed out, same
+    // pattern as the trigger button. The endpoint is 401-gated server-
+    // side (require_role admin/operator on
+    // /api/admin/reminders/cancel) — this makes the action unreachable
+    // for anonymous visitors at BOTH layers.
+    function syncStopBtnVisibility() {
+      var u = window.qaAuth && window.qaAuth.user && window.qaAuth.user();
+      var role = (u && typeof u.role === "string") ? u.role.toLowerCase() : null;
+      stopBtn.style.display = (role === "admin" || role === "operator") ? "" : "none";
+    }
+    syncStopBtnVisibility();
+    if (window.qaAuth && window.qaAuth.onChange) {
+      window.qaAuth.onChange(syncStopBtnVisibility);
+    }
+    // Same async-session-restore poll as the trigger button.
+    var __srTicks = 0;
+    var __srPoll = setInterval(function () {
+      __srTicks += 1;
+      syncStopBtnVisibility();
+      if (__srTicks >= 15) clearInterval(__srPoll);
+    }, 400);
+
     stopBtn.addEventListener("click", function onStopClick() {
       var ok = window.confirm(
         "Stop the repeating 'Are you safe?' reminders on every phone?\n\n" +
