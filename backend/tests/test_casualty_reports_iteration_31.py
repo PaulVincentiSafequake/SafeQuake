@@ -51,9 +51,20 @@ assert MONGO_URL, "MONGO_URL missing"
 B1_URL = f"{BASE_URL}/api/admin/casualty-report/operational.pdf"
 B2_URL = f"{BASE_URL}/api/admin/casualty-report/public.pdf"
 
-TEST_TRAPPED_DEVICE = "qg-test-casualty-pii-1234"
+# Batch 7 A2/D1: the aggregate reads through people_counts.compute_counts
+# which filters `is_test_device()` rows by default. These IDs used to
+# contain "test" (qg-test-casualty-*) which triggered that filter, so
+# the seeded rescued/trapped person was correctly excluded from the
+# aggregate — but the test expected to see them counted.
+#
+# Fixed by moving to IDs that match the real-device pattern
+# `qg-<epoch>-<suffix>` (see _REAL_DEVICE_ID_RE in deps.py). The names
+# still start with TEST_ so an operator visually browsing MongoDB sees
+# these are test data; but is_test_device() is deliberately checking
+# the ID pattern, not the display name.
+TEST_TRAPPED_DEVICE = "qg-1755600000000-caspii01"
 TEST_TRAPPED_NAME = "TEST_CASUALTY_PII_NAME"
-TEST_RESCUED_DEVICE = "qg-test-casualty-rescued-5678"
+TEST_RESCUED_DEVICE = "qg-1755600000000-casrsc01"
 TEST_RESCUED_NAME = "TEST_CASUALTY_RESCUED_NAME"
 
 
@@ -138,8 +149,30 @@ def seeded_events(mongo_db):
         "notes": "TEST_rescued_note",
     }
     mongo_db.status_events.insert_many([trapped_row, rescued_row])
+    # Batch 7 A2: the aggregate table now reads current state from
+    # `device_status` (via compute_counts) so a status_events-only seed
+    # is invisible to it. Mirror the seed into device_status so both
+    # feeds see the same person — same shape the app produces on a real
+    # status update. `rescued` gets a `rescued_at` timestamp so the
+    # effective_status classifier resolves it correctly.
+    now = datetime.now(timezone.utc)
+    now_ds = now.isoformat()
+    mongo_db.device_status.insert_many([
+        {
+            **trapped_row,
+            "updated_at": now_ds,
+        },
+        {
+            **rescued_row,
+            "updated_at": now_ds,
+            # effective_status treats `rescued_at` as authoritative.
+            "rescued_at": now_ds,
+            "rescued_by": "test-fixture",
+        },
+    ])
     yield {"trapped": trapped_row, "rescued": rescued_row}
     mongo_db.status_events.delete_many({"device_id": {"$in": [TEST_TRAPPED_DEVICE, TEST_RESCUED_DEVICE]}})
+    mongo_db.device_status.delete_many({"device_id": {"$in": [TEST_TRAPPED_DEVICE, TEST_RESCUED_DEVICE]}})
 
 
 def _extract_pdf_text(content: bytes) -> str:
@@ -329,7 +362,10 @@ class TestConsistencyB1vsB2:
         assert b1_total == b2_total, f"B1 total {b1_total} != B2 total {b2_total}"
 
         # Also verify each aggregate line's number in B2 matches text we'd expect.
-        # Extract counts from B2 for safe/rescued/awaiting.
+        # Extract counts from B2 for every row that a person could occupy.
+        # Batch 7 D1: `not_responding` and `unknown` are now explicit rows
+        # on the B2 aggregate table (previously they existed on the system
+        # but were absent from the report, so rows didn't sum to Total).
         counts_pat = {
             "safe": r"People checked in as safe\s+(\d+)",
             "rescued": r"People rescued\s+(\d+)",
@@ -337,14 +373,21 @@ class TestConsistencyB1vsB2:
             "red": r"critical injury\s+(\d+)",
             "yellow": r"moderate injury\s+(\d+)",
             "green": r"minor injury\s+(\d+)",
+            "not_responding": r"People not responding\s+(\d+)",
+            "unknown_status": r"People with status not yet reported\s+(\d+)",
         }
         got = {}
         for k, p in counts_pat.items():
             mm = re.search(p, b2_text)
             assert mm, f"B2 missing count line for {k}"
             got[k] = int(mm.group(1))
-        # trapped_red + trapped_yellow + trapped_green must be <= awaiting; safe+rescued+awaiting == total
-        assert got["safe"] + got["rescued"] + got["awaiting"] == b2_total, got
+        # Batch 7 D1 invariant: every person occupies exactly one top-level
+        # row (safe / rescued / awaiting / not_responding / unknown_status).
+        # Sub-rows (red/yellow/green) break out awaiting and are NOT summed.
+        assert (
+            got["safe"] + got["rescued"] + got["awaiting"]
+            + got["not_responding"] + got["unknown_status"]
+        ) == b2_total, got
 
         # Since we seeded 1 trapped/red and 1 rescued, verify those are counted.
         assert got["rescued"] >= 1

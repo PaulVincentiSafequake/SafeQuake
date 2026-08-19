@@ -39,7 +39,21 @@ B1_URL = f"{BASE_URL}/api/admin/casualty-report/operational.pdf"
 B2_URL = f"{BASE_URL}/api/admin/casualty-report/public.pdf"
 RESCUE_URL = f"{BASE_URL}/api/mark-rescued"
 
-TAG = f"TEST_HARDEN_{uuid.uuid4().hex[:8]}"
+# Batch 7 A2/D1: the aggregate now reads device_status via compute_counts,
+# which filters is_test_device. A device_id containing "test" (like the
+# previous TAG "TEST_HARDEN_...") is treated as a test entry and dropped.
+# Move to the real-device-id pattern (`qg-<13 epoch>-<suffix>`) so the
+# seeded rows count on both the aggregate table AND the narrative. The
+# TAG suffix (still visible in display_name / _test_seed) keeps these
+# rows easy to identify in MongoDB for cleanup.
+_TAG_SUFFIX = uuid.uuid4().hex[:8]
+TAG = f"TEST_HARDEN_{_TAG_SUFFIX}"    # visible label / cleanup marker only
+# Each seed device gets its own real-device-shaped id. `_h` prefix keeps
+# these easy to `grep -o 'qg-\d+-h[a-z0-9]+' | uniq` for cleanup, and
+# `[a-z0-9]{6,12}` is the pattern _REAL_DEVICE_ID_RE demands.
+_DEV_NAMED = f"qg-1755700000000-hn{_TAG_SUFFIX[:6]}"    # dev-named
+_DEV_ANON  = f"qg-1755700000000-ha{_TAG_SUFFIX[:6]}"    # dev-anon
+_DEV_SELF  = f"qg-1755700000000-hs{_TAG_SUFFIX[:6]}"    # dev-selfsafe
 HEADERS = {"X-Admin-Token": ADMIN_TOKEN}
 
 
@@ -63,8 +77,8 @@ def seeded(request):
     client = MongoClient(MONGO_URL)
     db = client[DB_NAME]
     now = datetime.now(timezone.utc)
-    dev_named = f"{TAG}-dev-named"
-    dev_anon = f"{TAG}-dev-anon"
+    dev_named = _DEV_NAMED
+    dev_anon = _DEV_ANON
 
     # status_events WITHOUT display_name (historical shape) + device_status
     # WITH a name → export must backfill it. Precise 12-dp coordinates →
@@ -113,7 +127,7 @@ def seeded(request):
     )
     # trapped then SELF-REPORTED safe — must appear in the narrative as its
     # own separately-worded figure, never merged into "found by a rescue team"
-    dev_selfsafe = f"{TAG}-dev-selfsafe"
+    dev_selfsafe = _DEV_SELF
     db.status_events.insert_one({
         "recorded_at": (now - timedelta(minutes=90)).isoformat(),
         "device_id": dev_selfsafe, "display_name": None,
@@ -183,7 +197,11 @@ class TestCsvStructure:
         r = requests.get(CSV_URL, headers=HEADERS, params=_window(), timeout=15)
         header, rows, _, _hi = _parse(r.text)
         assert "at_simple" in header
-        ours = [x for x in rows if x.get("device_id", "").startswith(TAG)]
+        # Batch 7: seeded device IDs moved to the real-device pattern
+        # (qg-<epoch>-<suffix>) so `is_test_device()` doesn't filter them
+        # out. Each seed device uses `_TAG_SUFFIX[:6]` in its suffix.
+        _seed_frag = _TAG_SUFFIX[:6]
+        ours = [x for x in rows if _seed_frag in x.get("device_id", "") and x.get("device_id", "").startswith("qg-1755700000000-h")]
         assert ours, "seeded rows missing from export"
         for row in ours:
             # Plain sortable timestamp: "YYYY-MM-DD HH:MM"
@@ -347,7 +365,8 @@ class TestTimeWindowsAndCodes:
     def test_devices_trapped_since_and_short_codes(self, seeded):
         r = requests.get(f"{BASE_URL}/api/devices?limit=5000", headers=HEADERS, timeout=15)
         devs = {d["device_id"]: d for d in r.json()["devices"]}
-        anon = devs.get(f"{TAG}-dev-anon")
+        # Batch 7: seed IDs now use the real-device pattern.
+        anon = devs.get(_DEV_ANON)
         assert anon and anon.get("trapped_since"), "trapped device missing trapped_since"
         codes = [d["short_code"] for d in devs.values() if d.get("short_code")]
         assert len(codes) == len(set(codes)), "duplicate short codes served to the dashboard"
@@ -380,7 +399,11 @@ class TestPdfHardening:
         assert "<br/>" not in text and "<font" not in text, "raw HTML leaked into B1"
         assert "Harden Test Person" in text
         assert "35.887200385677" not in text, "unrounded coordinate leaked into B1"
-        assert "Response over time" in text
+        # Batch 7 D1: heading renamed from "Response over time" to
+        # "What happened during this window" — explicitly distinguishes
+        # the window-scoped narrative section from the current-state
+        # aggregate above it.
+        assert "What happened during this window" in text
         assert "This only counts people using the app." in text
 
     def test_b1_has_no_percentage_statistic(self, seeded):
@@ -441,7 +464,7 @@ class TestPdfHardening:
         r = requests.get(B2_URL, headers=HEADERS, params=_window(), timeout=30)
         assert r.status_code == 200
         text = _pdf_text(r.content)
-        assert "How the situation has changed over time" in text
+        assert "What happened during this window" in text
         assert "%" not in text, "B2 must never show a percentage"
         assert "This only counts people using the app." in text
         # Privacy invariant: no names/codes on B2.

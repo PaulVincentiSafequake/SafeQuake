@@ -1356,6 +1356,15 @@ async def _gather_devices_in_report_window(
     q = {"recorded_at": {"$gte": since_dt.isoformat(), "$lte": until_dt.isoformat()}}
     rows = await db.status_events.find(q, {"_id": 0}).sort("recorded_at", -1).to_list(5000)
 
+    # Batch 7 A2/D1: test/synthetic devices are filtered here — the ONE
+    # place — so both the aggregate table (compute_counts) and the
+    # narrative (which reads collapsed events + raw rows) agree about
+    # who's included. Without this, the table said 0 rescued while the
+    # narrative said "9 found by a rescue team" for the same window
+    # (Pattern 2, caught by test_b2_rescued_narrative_equals_table).
+    from deps import is_test_device
+    rows = [r for r in rows if not is_test_device(r)]
+
     # Collapse to latest-per-device.
     by_device: dict[str, dict] = {}
     for r in rows:
@@ -1509,13 +1518,24 @@ async def casualty_report_operational_pdf(
             "B1Covers", parent=styles["Normal"], fontSize=9.5,
             textColor=colors.HexColor("#222222"), spaceAfter=4,
         )),
+        # D1 (Batch 7): this line reports how many devices reported
+        # DURING the window (activity in the period). Distinct from the
+        # aggregate table below which is CURRENT state. Kept the "during"
+        # figure here because a team-report header is about "how much
+        # activity in this window" — the current-state number lives in
+        # its own labelled section below.
         Paragraph(
-            f"Total devices reporting: {counts['total_devices']} &nbsp;·&nbsp; "
+            f"Devices active during this window: {counts['total_devices']} &nbsp;·&nbsp; "
+            f"Currently on the system: {current_counts.total} &nbsp;·&nbsp; "
             f"Generated: {datetime.now(timezone.utc).isoformat()} &nbsp;·&nbsp; "
             f"By: {generated_by}",
             meta_style,
         ),
-        Paragraph("Aggregate", h2_style),
+        # D1 (Batch 7): the aggregate table and the response-over-time
+        # section count different things — one is CURRENT state, one is
+        # everything that happened DURING the window. Correctness alone
+        # isn't enough; a tired reader has to know which is which.
+        Paragraph("Where things stand right now", h2_style),
     ]
     _gap = await _window_gap_warning(since_dt)
     if _gap:
@@ -1525,6 +1545,9 @@ async def casualty_report_operational_pdf(
             fontName="Helvetica-Bold",
         )))
 
+    # D1 (Batch 7): rows sum to Total. `not_responding` and `unknown`
+    # are separate labelled rows so nobody a device_status row represents
+    # is invisible in the aggregate.
     summary_data = [
         ["", "Count"],
         ["Safe", str(current_counts.safe)],
@@ -1533,6 +1556,8 @@ async def casualty_report_operational_pdf(
         ["Trapped / needs help (green)",  str(current_counts.trapped_green)],
         ["Trapped — severity not set",    str(current_counts.trapped_unknown)],
         ["Rescued",                       str(current_counts.rescued)],
+        ["Not responding",                str(current_counts.not_responding)],
+        ["Status not yet reported",       str(current_counts.unknown)],
         ["Total",                         str(current_counts.total)],
     ]
     summary_tbl = Table(summary_data, colWidths=[70*mm, 30*mm])
@@ -1549,10 +1574,21 @@ async def casualty_report_operational_pdf(
     story.append(summary_tbl)
     story.append(Spacer(0, 10))
 
-    # ── Response over time ──────────────────────────────────────────
+    # D1 (Batch 7): the transition sentence. Explicit about what the
+    # two sections count differently so a reader never concludes the
+    # document contradicts itself.
+    story.append(Paragraph(
+        "These count different things. The table above is the situation right now. "
+        "The section below covers everything that happened during the period.",
+        PS("B1SepNote", parent=styles["Normal"], fontSize=9, leading=12,
+           textColor=colors.HexColor("#444444"), spaceAfter=6),
+    ))
+    story.append(Spacer(0, 4))
+
+    # ── What happened during this window ────────────────────────────
     # Chart + plain-language progress (no percentages — see
     # _plain_language_progress hard locks).
-    story.append(Paragraph("Response over time", h2_style))
+    story.append(Paragraph("What happened during this window", h2_style))
     plain_style = PS("PL", parent=styles["Normal"], fontSize=9, leading=13, spaceAfter=1)
     buckets, _hourly = _bucket_timeline(raw_rows, since_dt, until_dt)
     if any(b["trapped"] or b["safe"] or b["rescued"] for b in buckets):
@@ -1708,7 +1744,14 @@ async def casualty_report_operational_pdf(
         headers={
             # Plain-language filename (issue #133) — "team-report", not "B1".
             "Content-Disposition": f'attachment; filename="CONFIDENTIAL-quakeangel-team-report{_suffix}-{datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")}.pdf"',
-            "X-Row-Count": str(counts["total_devices"]),
+            # X-Row-Count reports the AGGREGATE TABLE'S total (current
+            # state, from compute_counts), so it matches what the header
+            # of the report shows and what the B2 public report's total
+            # shows. Before Batch 7 D1 this used counts["total_devices"]
+            # (window-scoped), which meant B1's header disagreed with
+            # the aggregate table on the page below it — same bug class
+            # the D1 rewrite fixed for the reader.
+            "X-Row-Count": str(current_counts.total),
             # X-Report-Kind lets the dashboard sanity-check that clicking "B1"
             # actually returned a B1 (defense-in-depth against endpoint mixup).
             "X-Report-Kind": "B1-operational",
@@ -1815,7 +1858,10 @@ async def casualty_report_public_pdf(
             ),
             meta_style,
         ),
-        Paragraph("Current status of people using the Quake Angel app in the affected area:", body_style),
+        # D1 (Batch 7): explicit heading for the current-state table.
+        # Distinguishes it from the timeline below so a tired reader
+        # never concludes the document contradicts itself.
+        Paragraph("Where things stand right now", h2_style),
     ]
     _gap = await _window_gap_warning(since_dt)
     if _gap:
@@ -1826,6 +1872,14 @@ async def casualty_report_public_pdf(
 
     # Aggregate table — ONLY counts. Deliberately no "who" column, no
     # region column, no timestamp-of-latest-event column.
+    #
+    # D1 (Batch 7): the rows MUST sum to the Total. Previously not_responding
+    # and unknown existed on the system but were absent from the table, so
+    # a reader could sum "Safe + Rescued + Awaiting" and get less than the
+    # Total below and reasonably conclude the report contradicted itself.
+    # Every row a person could occupy is now present. Sub-rows (critical /
+    # moderate / minor / severity not set) are indented and NOT counted in
+    # the running sum — they break out the "awaiting rescue" total above.
     summary_data = [
         ["", ""],
         ["People checked in as safe",                str(current_counts.safe)],
@@ -1834,6 +1888,12 @@ async def casualty_report_public_pdf(
         ["  — of which reporting critical injury",   str(current_counts.trapped_red)],
         ["  — of which reporting moderate injury",   str(current_counts.trapped_yellow)],
         ["  — of which reporting minor injury",      str(current_counts.trapped_green)],
+        ["  — of which severity not yet reported",   str(current_counts.trapped_unknown)],
+        # Silence-is-information (batch 5 lock): people the system has
+        # not heard from lately are ALWAYS a distinct row, never merged
+        # into "unknown" and never invisible.
+        ["People not responding",                    str(current_counts.not_responding)],
+        ["People with status not yet reported",      str(current_counts.unknown)],
         ["Total people accounted for",               str(current_counts.total)],
     ]
     summary_tbl = Table(summary_data, colWidths=[110*mm, 30*mm])
@@ -1852,7 +1912,19 @@ async def casualty_report_public_pdf(
     ]))
     story.append(summary_tbl)
 
-    # ── How the situation has changed over time ─────────────────────
+    # D1 (Batch 7): explicit transition sentence between "right now" and
+    # "during this window". A journalist or family member reading the
+    # report must understand that the two sections count different
+    # things before they scan the numbers below.
+    story.append(Spacer(0, 8))
+    story.append(Paragraph(
+        "These count different things. The table above is the situation right now. "
+        "The section below covers everything that happened during the period.",
+        PS("B2SepNote", parent=body_style, fontSize=9.5, leading=13,
+           textColor=colors.HexColor("#444444"), spaceAfter=4),
+    ))
+
+    # ── What happened during this window ────────────────────────────
     # Counts only — NO percentages on B2. A bare "68% rescued" would be
     # quoted by press as 68% of everyone caught in the earthquake, when
     # the denominator is only app users who checked in. Locked with
@@ -1861,10 +1933,10 @@ async def casualty_report_public_pdf(
     # The heading, chart AND its plain-language explanation are ONE
     # KeepTogether block (3b, 2026-08-13): a reader must never have to
     # turn the page to find out what the chart means.
-    story.append(Spacer(0, 12))
+    story.append(Spacer(0, 8))
     buckets, _hourly = _bucket_timeline(raw_rows, since_dt, until_dt)
     from reportlab.platypus import KeepTogether as _KT
-    timeline_block = [Paragraph("How the situation has changed over time", h2_style)]
+    timeline_block = [Paragraph("What happened during this window", h2_style)]
     if any(b["trapped"] or b["safe"] or b["rescued"] for b in buckets):
         timeline_block.append(_timeline_chart(buckets, 170 * mm, 50 * mm))
         timeline_block.append(Spacer(0, 4))

@@ -4341,10 +4341,17 @@ window.QuakeAngelRescue = (function () {
   .qg-mrk-wrap { background: none; border: none; }
   .qg-mrk { display: flex; flex-direction: column; align-items: center; }
   .qg-mrk svg { display: block; filter: drop-shadow(0 1px 2px rgba(0,0,0,0.45)); }
+  /* Batch 7 C5: labels wrap to two lines rather than truncating. A pin
+     label is read aloud over radio, so "Paul Vincent…" (truncated) is
+     worse than a slightly taller pin. Max two lines caps the height,
+     word-break:break-word protects against a single 40-char token. */
   .qg-mrk .qg-mrk-tag {
-    font: 700 9px/1.3 system-ui, sans-serif; color: #fff; background: #C21818;
-    border-radius: 3px; padding: 0 3px; margin-top: 1px; white-space: nowrap;
+    font: 700 9px/1.25 system-ui, sans-serif; color: #fff; background: #C21818;
+    border-radius: 3px; padding: 1px 4px; margin-top: 1px;
     box-shadow: 0 1px 2px rgba(0,0,0,0.4);
+    max-width: 140px; text-align: center;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+    overflow: hidden; word-break: break-word;
   }
   .qg-mrk .qg-mrk-tag.rescued { background: #1F8A3A; }
   .qg-mrk .qg-mrk-tag.plain { background: rgba(22, 30, 40, 0.82); }
@@ -4605,32 +4612,27 @@ window.QuakeAngelRescue = (function () {
     // string as the triage card and the team report table.
     var code = qgCode(u);
     // Batch 7 C5: names are read aloud over radio. Truncating "Paul
-    // Vincenti" to "Paul Vincent" (12 chars, no ellipsis) reads as a
-    // different person on the wire. Rule: keep full names up to 20
-    // chars; longer names cut at a word boundary and an ellipsis is
-    // appended so the truncation is announced rather than silent.
-    var nm = "";
-    if (u.displayName) {
-      var full = String(u.displayName);
-      if (full.length <= 20) {
-        nm = full;
-      } else {
-        var cut = full.slice(0, 20);
-        var sp = cut.lastIndexOf(" ");
-        nm = (sp >= 8 ? cut.slice(0, sp) : cut) + "…";
-      }
-    }
+    // Vincenti" to "Paul Vincent" (no ellipsis) reads as a different
+    // person on the wire. Update (2026-08-19, Paul): let the label
+    // wrap to two lines instead of truncating at all. CSS caps it at
+    // two lines (-webkit-line-clamp) and 140px wide. Very-long names
+    // still cap at ~24 chars before line-clamp hides the tail, but
+    // that's a soft visual cut rather than a silent chop of the raw
+    // string — the tooltip on the pin still carries the full name.
+    var nm = u.displayName ? String(u.displayName) : "";
     var ident = nm ? code + " " + nm : code;
     var tagText = v.kind === "immediate" ? ("SOS " + ident)
       : v.kind === "rescued" ? ("\u2713 " + ident)
       : ident;
     var tagCls = v.kind === "immediate" ? "" : v.kind === "rescued" ? " rescued" : " plain";
-    var tagH = tagText ? 13 : 0;
-    var tag = tagText ? '<span class="qg-mrk-tag' + tagCls + '">' + tagText + "</span>" : "";
-    // Icon container width scales to the label so the tag isn't clipped
-    // (Batch 7 C5). Cap at 220px so a very long ident doesn't dominate
-    // adjacent pins.
-    var iconW = Math.max(s, tagText ? Math.min(220, 40 + tagText.length * 7) : 56);
+    // Two-line labels need ~24px of vertical space (2 × 12px line-box).
+    // Detect "will probably wrap" by length heuristic — cheap and good
+    // enough since we can't measure before insertion.
+    var willWrap = tagText.length > 18;
+    var tagH = tagText ? (willWrap ? 26 : 13) : 0;
+    var tag = tagText ? '<span class="qg-mrk-tag' + tagCls + '" title="' + window.qgEsc(tagText) + '">' + window.qgEsc(tagText) + "</span>" : "";
+    // Icon container width up to 152 (matches the 140px CSS + padding).
+    var iconW = Math.max(s, tagText ? 152 : 56);
     return L.divIcon({
       className: "qg-mrk-wrap",
       html: '<div class="qg-mrk">' + svgShape(v.shape, v.color, s) + tag + "</div>",
