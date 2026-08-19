@@ -2245,6 +2245,142 @@ async def cancel_check_in_reminders(request: Request):
     }
 
 
+@api_router.get("/admin/tremor-diagnostics")
+async def tremor_diagnostics(request: Request):
+    """"Tremor notifications — what's been sent."
+
+    Batch 7 #225 (2026-08-19): after weeks in which Paul believed the app
+    was sending tremor notices while the shipped code disagreed, this is
+    the one place a human can go to see the actual truth. If the system
+    is deliberately switched off, this endpoint says so — plainly — and
+    the dashboard renders a persistent top-strip warning that cannot be
+    dismissed.
+
+    Design invariant this establishes:
+      A feature that is switched off MUST say so somewhere a human will
+      see it. This endpoint is the machine-readable half; the dashboard
+      strip + panel are the human-readable half.
+
+    Returns a shape optimised for the dashboard renderer — every field
+    is either a number, a plain-English string, or a list of already-
+    formatted rows. NO enums (`would_have_fired`, `shadow_mode`,
+    `trigger_tier`) reach the caller. Pattern 5 discipline.
+    """
+    principal = await resolve_principal(
+        request, request.headers.get("x-admin-token"), ADMIN_TRIGGER_PASSWORD, db,
+    )
+    require_role(principal, "admin", "operator")
+
+    now = datetime.now(timezone.utc)
+    cfg = await db.country_configs.find_one({"country_code": "MT"}) or {}
+    pm = cfg.get("preview_mode") or {}
+    preview_on = bool(pm.get("enabled"))
+    allowlist = list(pm.get("device_ids") or [])
+
+    # Pull the most recent sends from BOTH tremor collections. Both use
+    # the same fields (device_id, outcome, kind, region, magnitude,
+    # delivered) so we can merge into one dated list.
+    prev_rows = await db.emsc_preview_notifications.find(
+        {"outcome": {"$in": ["sent", "delivered"]}},
+        {"_id": 0}
+    ).sort("at", -1).to_list(50)
+    place_rows = await db.emsc_place_notifications.find(
+        {"outcome": {"$in": ["sent", "delivered"]}},
+        {"_id": 0}
+    ).sort("at", -1).to_list(50)
+
+    def _row(r, source):
+        return {
+            "at": _iso(r.get("at")) or _iso(r.get("created_at")),
+            "kind": ("Own-location tremor" if source == "preview"
+                     else "Saved-place notice"),
+            "region": r.get("region") or r.get("place_name") or "—",
+            "magnitude": r.get("magnitude"),
+            "delivered": int(r.get("delivered") or 0),
+            "targeted": int(r.get("targeted") or 1),
+            "device_id_tail": (r.get("device_id") or "")[-6:].upper(),
+        }
+    merged = ([_row(r, "preview") for r in prev_rows] +
+              [_row(r, "place")   for r in place_rows])
+    merged.sort(key=lambda r: r["at"] or "", reverse=True)
+    recent_sends = merged[:20]
+    last_send = recent_sends[0] if recent_sends else None
+
+    # Ingestion health for context — if events are flowing but nothing is
+    # sending, the human_state distinguishes "off" from "on but silent".
+    n24 = await db.emsc_events.count_documents(
+        {"ingested_at": {"$gte": now - timedelta(hours=24)}}
+    )
+    n7 = await db.emsc_events.count_documents(
+        {"ingested_at": {"$gte": now - timedelta(days=7)}}
+    )
+    poller = await db.emsc_poller_health.find_one({}, sort=[("last_success_at", -1)]) or {}
+
+    # ── Plain-language state string ──────────────────────────────────────
+    # This is what the persistent strip and the panel headline both read.
+    # Never render an enum here — the caller is a human, not a machine.
+    # See Pattern 5. Two-line max: one for state, one for what to do next.
+    def _human_state_line() -> str:
+        if not preview_on:
+            return (
+                "This system is not sending tremor notifications to anyone at the moment."
+            )
+        if not allowlist:
+            return (
+                "Tremor notifications are switched on, but nobody is on the list to receive them."
+            )
+        if not last_send:
+            return (
+                f"Tremor notifications are switched on for {len(allowlist)} phone"
+                f"{'' if len(allowlist)==1 else 's'}, but nothing has been sent yet."
+            )
+        # We have at least one send. Report the most recent in plain words.
+        last_dt = datetime.fromisoformat(last_send["at"]) if last_send["at"] else None
+        gap_days = (now - last_dt).days if last_dt else None
+        if gap_days is not None and gap_days >= 3:
+            return (
+                f"Nothing has been sent for {gap_days} days. "
+                f"The last one went out on {last_dt.strftime('%d %B at %H:%M')} UTC, "
+                f"to {last_send['delivered']} phone"
+                f"{'' if last_send['delivered']==1 else 's'}."
+            )
+        return (
+            f"Last tremor notice sent {last_dt.strftime('%d %B at %H:%M')} UTC, "
+            f"to {last_send['delivered']} phone"
+            f"{'' if last_send['delivered']==1 else 's'}."
+        )
+
+    def _how_to_turn_on_line() -> Optional[str]:
+        # Only shown when preview_on is False. Never explains ENUM values,
+        # only actions.
+        if preview_on:
+            return None
+        return (
+            "To turn it back on: an admin must enable tremor previews and "
+            "add at least one phone to the list, in Admin settings."
+        )
+
+    return {
+        "at": _iso(now),
+        # Human-facing fields — these are what the dashboard renders.
+        "is_sending": bool(preview_on and allowlist),
+        "headline": _human_state_line(),
+        "how_to_turn_on": _how_to_turn_on_line(),
+        "phones_on_list": len(allowlist),
+        "last_send": last_send,
+        "recent_sends": recent_sends,      # already plain-formatted
+        # Ingestion side (kept plain-worded too).
+        "events_ingested_24h": n24,
+        "events_ingested_7d": n7,
+        "poller_last_success_at": _iso(poller.get("last_success_at")),
+        "poller_last_error": poller.get("last_error"),
+        # Provenance — admin sees when the config was last touched, so
+        # "changed on 12 August" answers "what changed" without exposing
+        # the change itself.
+        "config_last_updated_at": _iso(cfg.get("updated_at")),
+    }
+
+
 @api_router.get("/cors-debug")
 async def cors_debug(request: Request):
     """Echo the deployed CORS allowlist and evaluate the caller's Origin

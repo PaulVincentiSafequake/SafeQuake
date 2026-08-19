@@ -1856,6 +1856,25 @@
   </div>
 </header>
 
+<!-- ═══════════════════════════════════════════════════════════════════
+     Batch 7 #225: persistent tremor-notifications state strip.
+     Design invariant (new, Batch 7): a feature that is switched off
+     MUST say so somewhere a human will see it. This strip renders one
+     sentence, always visible on every view, not dismissible. Detail
+     lives in the collapsible panel further down; the strip alone is
+     enough to answer "is anything being sent at all?".
+
+     Admin+operator only — the strip stays hidden for signed-out
+     visitors (they don't operate this system). Fetched from the same
+     read-only endpoint the panel consumes.
+     ═══════════════════════════════════════════════════════════════════ -->
+<div id="qg-tremor-strip" role="status" aria-live="polite"
+     style="display:none; padding:10px 16px; font:600 13.5px system-ui, sans-serif;
+            border-bottom:1px solid #b0141a; background:#fef4f2; color:#5a0f13; text-align:center">
+  <span id="qg-tremor-strip-text"></span>
+  <span id="qg-tremor-strip-cta" style="margin-left:12px; font-weight:500; color:#5a0f13"></span>
+</div>
+
 <div class="layout">
   <div id="map-wrap">
     <div class="map-filters" role="group" aria-label="Filter map by severity">
@@ -3992,6 +4011,23 @@ window.QuakeAngelRescue = (function () {
 </div>
 
 <!-- ═════════════════════════════════════════════════════════════════════
+     Batch 7 #225: "Tremor notifications — what's been sent" panel.
+     Reference tier (per dashboard-restructure-spec): sits below the
+     working area, above the admin testing tools, admin+operator only.
+     Panel body is populated by JS from /api/admin/tremor-diagnostics.
+     Plain language only — no enums, no jargon.
+     ═════════════════════════════════════════════════════════════════════ -->
+<details id="qg-tremor-panel" style="display:none; margin:12px 12px 4px; padding:6px 16px 14px;
+     background:var(--surface); border:1px solid var(--border, #d0d3d9); border-radius:8px">
+  <summary style="cursor:pointer; font-size:14px; font-weight:700; color:var(--text); padding:10px 0; user-select:none">
+    Tremor notifications — what's been sent
+  </summary>
+  <div id="qg-tremor-panel-body" style="font-size:13px; color:var(--text); line-height:1.5">
+    Loading…
+  </div>
+</details>
+
+<!-- ═════════════════════════════════════════════════════════════════════
      Admin testing tools — deliberately at the BOTTOM of the working area,
      but ABOVE the "Powered by Quake Angel" footer (Batch 7 C2, 2026-08-19).
      Preview Mode (incl. PANIC KILL + radius override) used to be injected
@@ -5637,6 +5673,130 @@ window.QuakeAngelRescue = (function () {
       if (!ok) return;
       sendStopReminders();
     });
+  }
+
+  // ── Batch 7 #225: tremor-notifications state renderer ─────────────
+  // Populates both the persistent top-strip and the collapsible panel.
+  // Admin+operator only. Falls back to hidden when signed out or when
+  // the endpoint returns 401/403 — the strip must never lie by showing
+  // a fresh state to a user who can't refresh it.
+  var _tremorStrip     = document.getElementById("qg-tremor-strip");
+  var _tremorStripText = document.getElementById("qg-tremor-strip-text");
+  var _tremorStripCta  = document.getElementById("qg-tremor-strip-cta");
+  var _tremorPanel     = document.getElementById("qg-tremor-panel");
+  var _tremorPanelBody = document.getElementById("qg-tremor-panel-body");
+
+  function _tremorSignedIn() {
+    var u = window.qaAuth && window.qaAuth.user && window.qaAuth.user();
+    var role = (u && typeof u.role === "string") ? u.role.toLowerCase() : null;
+    return role === "admin" || role === "operator";
+  }
+
+  function _tremorFmtRow(r) {
+    var esc = window.qgEsc;
+    var mag = (r.magnitude == null) ? "M?" : ("M" + Number(r.magnitude).toFixed(1));
+    var when = r.at ? new Date(r.at).toLocaleString() : "—";
+    return '<tr>' +
+      '<td style="padding:4px 8px; white-space:nowrap">' + esc(when) + '</td>' +
+      '<td style="padding:4px 8px">' + esc(r.kind || "") + '</td>' +
+      '<td style="padding:4px 8px">' + esc(mag) + " · " + esc(r.region || "—") + '</td>' +
+      '<td style="padding:4px 8px; text-align:right">' + esc(String(r.delivered || 0)) + ' of ' + esc(String(r.targeted || 1)) + '</td>' +
+      '<td style="padding:4px 8px; font-family:ui-monospace,monospace; color:#666">' + esc(r.device_id_tail || "") + '</td>' +
+      '</tr>';
+  }
+
+  function _renderTremorPanel(d) {
+    var esc = window.qgEsc;
+    var head = '<p style="margin:2px 0 12px"><b>' + esc(d.headline || "") + '</b></p>';
+    if (d.how_to_turn_on) {
+      head += '<p style="margin:0 0 12px; color:#5a0f13">' + esc(d.how_to_turn_on) + '</p>';
+    }
+    // Ingestion side, plain-worded.
+    var ingest =
+      '<p style="margin:0 0 10px; color:#555">' +
+      esc(String(d.events_ingested_24h || 0)) + ' events picked up in the last 24 hours, ' +
+      esc(String(d.events_ingested_7d || 0)) + ' in the last 7 days. ' +
+      (d.poller_last_error
+        ? '<span style="color:#b0141a">Last check-in with the earthquake feed failed: ' + esc(d.poller_last_error) + '</span>'
+        : 'The earthquake feed is being checked normally.') +
+      '</p>';
+    var body;
+    if (!d.recent_sends || d.recent_sends.length === 0) {
+      body = '<p style="margin:0; color:#555"><i>Nothing has been sent yet.</i></p>';
+    } else {
+      body = '<table style="border-collapse:collapse; width:100%; font-size:12px; margin-top:4px">' +
+        '<thead><tr style="background:#f0f2f6; text-align:left">' +
+          '<th style="padding:6px 8px">When</th>' +
+          '<th style="padding:6px 8px">Kind</th>' +
+          '<th style="padding:6px 8px">Event</th>' +
+          '<th style="padding:6px 8px; text-align:right">Delivered</th>' +
+          '<th style="padding:6px 8px">Phone</th>' +
+        '</tr></thead><tbody>' +
+        d.recent_sends.map(_tremorFmtRow).join("") +
+        '</tbody></table>';
+    }
+    var provenance = d.config_last_updated_at
+      ? '<p style="margin:12px 0 0; color:#888; font-size:11px">' +
+        'Settings last changed on ' +
+        esc(new Date(d.config_last_updated_at).toLocaleString()) +
+        '. Fetched at ' + esc(new Date(d.at || Date.now()).toLocaleTimeString()) + '.</p>'
+      : "";
+    _tremorPanelBody.innerHTML = head + ingest + body + provenance;
+  }
+
+  async function _refreshTremorState() {
+    if (!_tremorSignedIn()) {
+      _tremorStrip.style.display = "none";
+      _tremorPanel.style.display = "none";
+      return;
+    }
+    _tremorPanel.style.display = "";
+    try {
+      var r = await window.qaApi("/api/admin/tremor-diagnostics", { cache: "no-store" });
+      if (!r.ok) {
+        // 401/403 → the qaApi wrapper flips the auth banner; stay quiet
+        // rather than showing a wrong state.
+        _tremorStrip.style.display = "none";
+        _tremorPanelBody.innerHTML = '<p style="color:#5a0f13">' +
+          window.qgFriendlyError(new Error("HTTP " + r.status), {
+            fallback: "We couldn't read the tremor-notifications state right now.",
+          }) + '</p>';
+        return;
+      }
+      var d = await r.json();
+      // Persistent strip: ALWAYS visible when signed in as admin/operator.
+      // Amber tint when "off", subtle when sending.
+      _tremorStrip.style.display = "block";
+      _tremorStripText.textContent = d.headline || "";
+      if (d.is_sending) {
+        _tremorStrip.style.background = "#f0f7f2";
+        _tremorStrip.style.color = "#0f4a1f";
+        _tremorStrip.style.borderBottom = "1px solid #1F8A3A";
+        _tremorStripCta.textContent = "";
+      } else {
+        _tremorStrip.style.background = "#fef4f2";
+        _tremorStrip.style.color = "#5a0f13";
+        _tremorStrip.style.borderBottom = "1px solid #b0141a";
+        _tremorStripCta.textContent = d.how_to_turn_on || "";
+      }
+      _renderTremorPanel(d);
+    } catch (e) {
+      _tremorStrip.style.display = "none";
+      _tremorPanelBody.innerHTML = '<p style="color:#5a0f13">' +
+        window.qgFriendlyError(e, {
+          fallback: "We couldn't read the tremor-notifications state right now.",
+        }) + '</p>';
+    }
+  }
+
+  if (_tremorStrip && _tremorPanel) {
+    _refreshTremorState();
+    if (window.qaAuth && window.qaAuth.onChange) {
+      window.qaAuth.onChange(_refreshTremorState);
+    }
+    // Poll every 60s so an off→on flip on the backend surfaces without a
+    // reload. Cheap: two small collections + one config doc per call.
+    setInterval(_refreshTremorState, 60000);
   }
 })();
 </script>
