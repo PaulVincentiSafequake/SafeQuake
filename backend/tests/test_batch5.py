@@ -598,7 +598,13 @@ class TestBuildIdentification:
         # version number is now single-source (#251, Batch 7 R4) — read
         # from `info.app_version` — so all three version rows on the
         # Diagnostics card are guaranteed to agree.
-        assert "#208 R4 primary alert" in diag
+        #
+        # v1.0.40 (2026-08-20, Paul): marker updated for the #208 probe
+        # build — the diag screen now describes the mobile tap probe
+        # (which is what this specific IPA carries) rather than the
+        # earlier "#208 R4" symptom-fix wording. Test still catches a
+        # stale IPA — just against the current fix marker.
+        assert "#208 mobile probe" in diag
         # Batch 7 D (#252): the label was renamed from "fixes in this
         # build" to "What's fixed in it" when the Diagnostics screen
         # was rewritten human-first — either wording carries the

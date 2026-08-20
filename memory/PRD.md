@@ -1699,3 +1699,70 @@ No new mobile build required.
 
 If entry #1 is still `{}`, diagnosis was wrong; do NOT ship further,
 probe deeper.
+
+---
+
+## 2026-08-20 late evening — #208 confirmed live + regression sweep
+
+### #208 verified live by Paul on his own iPhone
+Real earthquake alert triggered from production dashboard → lock
+screen tap → landed on /alert with siren looping and safe/injured
+buttons showing. Tap log entry #1: kind=critical_alert,
+action_url=/alert, magnitude ✓, chosenRoute=/alert?siren=1&
+magnitude=6.4&distance_km=12&intensity=VII, fully-populated
+rawPayload. Previous empty entry preserved in the log for
+comparison.
+
+### #174 and #205 — closed by the same v1.0.40 backend fix
+Both are downstream symptoms of the same wrong-nest bug the #208
+probe exposed. No separate work needed. Test path documented in
+Paul's message reply.
+
+### Regression sweep — findings
+
+Backend (all tests exercising touched surfaces):
+- 183 tests pass on the payload-adjacent files
+  (test_apns_body_nesting_208, test_batch5, test_recheck_escalation,
+  test_recheckin_c1, test_batch5_independent_iteration_32,
+  test_c1_phase2_manual_recheck, test_neo_batch_2026_08_20,
+  test_neo_255_place_notice, test_preview_radius_override,
+  test_seismic_map, test_trigger_alert_confirmation).
+- 5 failures on this slice — verified by git-stash comparison to
+  be PRE-EXISTING (identical failures on the pre-fix commit). Not
+  caused by the payload nest change:
+    * test_neo_255_place_notice.py: 3 preview-place-notice pipeline
+      tests failing on "expected 1 row, got 0" — unrelated to
+      payload shape, live for backlog cleanup.
+    * test_batch5.py::TestBuildIdentification: fixed in this sweep
+      (updated the hard-coded IPA marker from "#208 R4 primary
+      alert" to "#208 mobile probe" to match the current v1.0.40
+      diag.tsx wording — same test intent, current build's marker).
+    * test_batch5.py::TestIssue169SirenPlaysOnTest:
+      test_home_test_trigger_passes_siren_and_test_params flags a
+      substring inside a source comment, not real code. Pre-existing.
+- Broader suite (all tests): 631 pass, ~140 fail on 401 auth
+  (fixtures missing ADMIN_TRIGGER_PASSWORD context) — pre-existing
+  environmental issue, verified identical on pre-fix commit.
+
+Backend API surface:
+- GET /api/ → 200
+- GET /api/admin/incident-status → 200
+- GET /api/admin/relay-health → 200
+- Backend restarted cleanly on new code; EMSC poller, testimonies
+  sweeper, and re-check sweeper all started.
+
+Dashboard renderer (routes_diagnostics.py):
+- Reads only payload["aps"].sound.critical/name and
+  ["aps"].interruption-level for the badge summary. Everything
+  else renders as JSON in <pre>. The nested body dict simply
+  appears in the pre block. No renderer changes needed.
+
+Mobile:
+- No mobile code changed since Paul verified v1.0.40 build 40 live.
+- Lint on /app/frontend/app: 4 problems in alert.tsx and
+  quake/[unid].tsx, all pre-existing and unrelated to the probe.
+- Preview frontend serving 200 on / and /diag.
+
+### Not started
+Home-screen redesign (§8) — held per Paul's instruction until the
+regression sweep is signed off.
