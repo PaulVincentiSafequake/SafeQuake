@@ -1610,3 +1610,92 @@ next fix evidence-based instead of another guess.
 - `expo-clipboard@8.0.8` via `yarn expo install expo-clipboard`
   (needed for the Copy button; the existing Share-based flow is
   kept as fallback).
+
+---
+
+## v1.0.40 backend fix — 2026-08-20 evening — #208 root cause closed
+
+Paul's v1.0.40 build 40 probe returned `rawPayload: {}` on a real
+lock-screen tap. The empty payload proved the routing code was never
+at fault. Investigation of the four possible layers isolated the
+cause to the shape of the APNs userInfo dict this backend builds.
+
+### Root cause (with citation)
+`node_modules/expo-notifications/ios/EXNotifications/Notifications/
+EXNotificationSerializer.m` lines 80–84:
+
+```objc
++ (NSDictionary<NSString *, NSObject *> *)serializedNotificationData:
+                                          (UNNotificationRequest *)request
+{
+  BOOL isRemote = [request.trigger isKindOfClass:
+                    [UNPushNotificationTrigger class]];
+  return isRemote ? request.content.userInfo[@"body"]
+                  : request.content.userInfo;
+}
+```
+
+For remote (APNs) pushes, expo-notifications populates `content.data`
+from `userInfo["body"]` only — never from siblings of `aps`.
+Every APNs push this backend built put routing keys as siblings of
+`aps` (the standard APNs shape), so `content.data` arrived as `{}` on
+every iOS device the app has ever shipped to.
+
+### Symptoms this closes
+- #208: lock-screen tap on a critical earthquake alert lands on
+        /quake/unknown instead of /alert (Paul's probe log, v1.0.40).
+- #174: tremor tap opens a blank screen (missing preview payload).
+- #205: notification carries magnitude but detail screen renders "—".
+
+Same wrong-nest. One fix closes all three.
+
+### What changed
+`/app/backend/apns.py` — three builders now nest routing keys under a
+top-level `body` dict at the APNs userInfo layer:
+- `_build_critical_payload`
+- `_build_preview_payload`
+- `_build_recheck_payload`
+
+`aps` (Apple's reserved namespace) stays at the top of userInfo — the
+title/body/sound the phone displays on the lock screen were never
+broken and still travel that path.
+
+### What is NOT changed
+- Mobile app: zero code change. Paul stays on v1.0.40 build 40. The
+  tap handler already reads `data.kind`, `data.action_url`,
+  `data.magnitude` etc.; those keys will now actually be present.
+- Android SuprSend path in `server.py`: untouched. FCM's Android
+  serializer (`NotificationSerializer.java:63-74`) copies data-as-is
+  when `body` isn't a JSON string, so leaving Android's dict shape
+  alone preserves current Android delivery.
+- Probe (`tapProbe.ts` + diag UI + `_layout.tsx` logging): unchanged.
+  It's the verification path.
+
+### Tests
+- Old tests that pinned `p["kind"]`, `p["action_url"]`, `p["check_id"]`,
+  `p["escalated_to_critical"]`, `p["consecutive_missed"]` updated to
+  assert on `p["body"][...]` to reflect the new nest.
+- New file `tests/test_apns_body_nesting_208.py`: 5 pinning tests that
+  fail loudly if any future refactor "flattens" custom keys back to
+  the top level, with a docstring citing the expo-notifications iOS
+  serializer contract so nobody has to re-discover this bug.
+- All 16 originally-affected tests + 5 new tests pass locally against
+  the preview backend.
+
+### Deployment
+Backend only. Paul hits Publish (top-right) to redeploy production.
+No new mobile build required.
+
+### Live verification protocol (Paul's phone)
+1. Publish backend to production.
+2. From deployed dashboard, tap Trigger Earthquake Alert.
+3. Lock iPhone (v1.0.40 build 40 already installed).
+4. Tap the critical notification from the lock screen.
+5. Expect: land on /alert with siren looping (the bug fix effect).
+6. Open app → Diagnostics → "For support — last 5 notification taps".
+7. Entry #1 should read: `kind: critical_alert`,
+   `chosenRoute: /alert?siren=1&…`, `rawPayload: { kind, action_url,
+   magnitude, distance_km, intensity }` — no more `{}`.
+
+If entry #1 is still `{}`, diagnosis was wrong; do NOT ship further,
+probe deeper.

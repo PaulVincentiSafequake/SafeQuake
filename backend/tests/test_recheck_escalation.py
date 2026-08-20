@@ -36,7 +36,7 @@ def test_default_recheck_is_time_sensitive():
     # sound is a plain string filename, NOT the critical dict — the
     # difference is what tells iOS to breach the silent switch.
     assert p["aps"]["sound"] == "recheck.wav"
-    assert p["escalated_to_critical"] is False
+    assert p["body"]["escalated_to_critical"] is False
 
 
 def test_explicit_escalation_uses_critical_sound_and_level():
@@ -46,7 +46,7 @@ def test_explicit_escalation_uses_critical_sound_and_level():
     assert p["aps"]["interruption-level"] == "critical"
     assert isinstance(p["aps"]["sound"], dict)
     assert p["aps"]["sound"].get("critical") == 1
-    assert p["escalated_to_critical"] is True
+    assert p["body"]["escalated_to_critical"] is True
 
 
 def test_count_alone_does_not_escalate():
@@ -59,20 +59,24 @@ def test_count_alone_does_not_escalate():
     # this incident was already escalated once and won't do it again).
     p = _build_recheck_payload(**_kw(consecutive_missed=10, escalate=False))
     assert p["aps"]["interruption-level"] == "time-sensitive"
-    assert p["escalated_to_critical"] is False
-    assert p["consecutive_missed"] == 10  # still exposed for diagnostics
+    assert p["body"]["escalated_to_critical"] is False
+    assert p["body"]["consecutive_missed"] == 10  # still exposed for diagnostics
 
 
 def test_diagnostic_fields_are_always_present():
     """The tremor-diagnostics panel reads these fields to explain why a
     specific check escalated. They must appear whether or not this send
-    escalated."""
+    escalated.
+
+    v1.0.40 fix (#208 root cause): custom keys moved to `body` nested
+    dict so expo-notifications iOS actually surfaces them in
+    content.data on the phone."""
     for missed, esc in [(0, False), (3, True), (10, False)]:
         p = _build_recheck_payload(**_kw(consecutive_missed=missed, escalate=esc))
-        assert "consecutive_missed" in p
-        assert "escalated_to_critical" in p
-        assert p["consecutive_missed"] == missed
-        assert p["escalated_to_critical"] is esc
+        assert "consecutive_missed" in p["body"]
+        assert "escalated_to_critical" in p["body"]
+        assert p["body"]["consecutive_missed"] == missed
+        assert p["body"]["escalated_to_critical"] is esc
 
 
 def test_kind_and_action_url_unchanged_by_escalation():
@@ -81,6 +85,6 @@ def test_kind_and_action_url_unchanged_by_escalation():
     screen — #208 defence-in-depth relies on it."""
     for esc in (False, True):
         p = _build_recheck_payload(**_kw(escalate=esc))
-        assert p["kind"] == "recheck"
-        assert p["action_url"] == "/recheck"
+        assert p["body"]["kind"] == "recheck"
+        assert p["body"]["action_url"] == "/recheck"
         assert p["aps"]["category"] == "RECHECK_V1"

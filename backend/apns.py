@@ -296,10 +296,24 @@ def _build_critical_payload(
     alerts MUST always carry this field.
 
     Event-specific fields (magnitude, distance_km, intensity, depth_km,
-    region, unid, provider) are embedded at the top level so the /alert
-    screen can render the actual event data rather than showing stale
-    or hardcoded defaults. Fields left as None simply don't appear in
-    the payload — the mobile app renders "—" when a field is absent.
+    region, unid, provider) are embedded inside the top-level `body`
+    dict so the /alert screen can render the actual event data rather
+    than showing stale or hardcoded defaults. Fields left as None
+    simply don't appear in the payload — the mobile app renders "—"
+    when a field is absent.
+
+    IMPORTANT — expo-notifications iOS serializer contract:
+    `EXNotificationSerializer.serializedNotificationData` (see
+    node_modules/expo-notifications/ios/.../EXNotificationSerializer.m
+    lines 80–84) returns `request.content.userInfo[@"body"]` for any
+    remote push. That means custom keys MUST be nested inside a top-
+    level `"body"` object at the APNs userInfo layer — putting them as
+    siblings of `aps` makes `content.data` land in JS as `{}`, which is
+    exactly the #208 lock-screen wrong-screen failure Paul reported on
+    v1.0.40 (the probe log showed rawPayload={} for a real earthquake
+    alert). Do not "flatten" this back — an APNs-standard shape is
+    correct at the APNs layer but wrong for anything routed through
+    expo-notifications' JS bridge on iOS.
 
     IMPORTANT: `sound.name` must reference a file actually bundled inside the
     iOS app's `Library/Sounds/` directory — one of `.caf`, `.aiff`, or `.wav`,
@@ -311,13 +325,7 @@ def _build_critical_payload(
     into `Library/Sounds/` at build time, so `name: "siren.caf"` resolves
     on device and iOS honours the critical-alert semantics.
     """
-    payload: dict = {
-        "aps": {
-            "alert": {"title": title, "body": body},
-            "sound": {"critical": 1, "name": "siren.caf", "volume": 1.0},
-            "interruption-level": "critical",
-            "relevance-score": 1,
-        },
+    body_data: dict = {
         # kind is REQUIRED — the mobile tap handler routes by this field.
         # Missing kind → informational fallback (never siren).
         "kind": "critical_alert",
@@ -325,13 +333,24 @@ def _build_critical_payload(
     }
     # Event-specific fields — only include when non-None so the mobile
     # renderer can distinguish "unknown" (missing key) from "known-and-zero".
-    if magnitude is not None:   payload["magnitude"] = magnitude
-    if distance_km is not None: payload["distance_km"] = distance_km
-    if intensity is not None:   payload["intensity"] = intensity
-    if depth_km is not None:    payload["depth_km"] = depth_km
-    if region is not None:      payload["region"] = region
-    if unid is not None:        payload["unid"] = unid
-    if provider is not None:    payload["provider"] = provider
+    if magnitude is not None:   body_data["magnitude"] = magnitude
+    if distance_km is not None: body_data["distance_km"] = distance_km
+    if intensity is not None:   body_data["intensity"] = intensity
+    if depth_km is not None:    body_data["depth_km"] = depth_km
+    if region is not None:      body_data["region"] = region
+    if unid is not None:        body_data["unid"] = unid
+    if provider is not None:    body_data["provider"] = provider
+    payload: dict = {
+        "aps": {
+            "alert": {"title": title, "body": body},
+            "sound": {"critical": 1, "name": "siren.caf", "volume": 1.0},
+            "interruption-level": "critical",
+            "relevance-score": 1,
+        },
+        # expo-notifications iOS ONLY reads `userInfo["body"]` for
+        # `content.data` on remote pushes — see docstring above.
+        "body": body_data,
+    }
     return payload
 
 
@@ -393,14 +412,7 @@ def _build_recheck_payload(
         sound = "recheck.wav"
         interruption = "time-sensitive"
 
-    payload: dict = {
-        "aps": {
-            "alert": {"title": title, "body": body},
-            "sound": sound,
-            "interruption-level": interruption,
-            "relevance-score": 1,
-            "category": RECHECK_CATEGORY_ID,
-        },
+    body_data: dict = {
         # kind is REQUIRED — the mobile handler routes by this field, and a
         # missing/unknown kind is treated as informational (never a siren).
         "kind": "recheck",
@@ -414,7 +426,20 @@ def _build_recheck_payload(
         "escalated_to_critical": bool(escalate),
     }
     if ladder_step is not None:
-        payload["ladder_step"] = ladder_step
+        body_data["ladder_step"] = ladder_step
+    payload: dict = {
+        "aps": {
+            "alert": {"title": title, "body": body},
+            "sound": sound,
+            "interruption-level": interruption,
+            "relevance-score": 1,
+            "category": RECHECK_CATEGORY_ID,
+        },
+        # expo-notifications iOS ONLY reads `userInfo["body"]` for
+        # `content.data` on remote pushes — nesting here is what makes
+        # the tap on a re-check notification actually land on /recheck.
+        "body": body_data,
+    }
     return payload
 
 
@@ -451,9 +476,31 @@ def _build_preview_payload(
         sound. NOT the critical siren.
       - `apns-priority: 5` (set on the header) — power-efficient delivery.
 
-    Event details are embedded at the top level so the /quake/[unid]
-    detail screen can render specifics without a second network round-trip.
+    Event details are embedded inside the top-level `body` dict so the
+    /quake/[unid] detail screen can render specifics without a second
+    network round-trip. This is the expo-notifications iOS contract —
+    see the fuller explanation in _build_critical_payload's docstring.
+    Before the fix (pre-v1.0.40-backend), every key here landed on the
+    phone but was invisible to JS because content.data was pulled from
+    the wrong nest, causing #174 (tremor tap → blank screen) and #205
+    (magnitude in payload but "—" on screen).
     """
+    body_data: dict = {
+        # kind is REQUIRED — mobile tap handler distinguishes preview
+        # from real alert. Missing kind → informational fallback.
+        "kind": "emsc_preview",
+        "action_url": action_url,
+        "preview": True,
+    }
+    if magnitude is not None:   body_data["magnitude"] = magnitude
+    if distance_km is not None: body_data["distance_km"] = distance_km
+    if depth_km is not None:    body_data["depth_km"] = depth_km
+    if latitude is not None:    body_data["latitude"] = latitude
+    if longitude is not None:   body_data["longitude"] = longitude
+    if region is not None:      body_data["region"] = region
+    if unid is not None:        body_data["unid"] = unid
+    if provider is not None:    body_data["provider"] = provider
+    if observed_at is not None: body_data["observed_at"] = observed_at
     payload: dict = {
         "aps": {
             "alert": {"title": title, "body": body},
@@ -468,21 +515,10 @@ def _build_preview_payload(
             # cannot share configuration because they don't share an id.
             "category": TREMOR_CATEGORY_ID,
         },
-        # kind is REQUIRED — mobile tap handler distinguishes preview
-        # from real alert. Missing kind → informational fallback.
-        "kind": "emsc_preview",
-        "action_url": action_url,
-        "preview": True,
+        # expo-notifications iOS ONLY reads `userInfo["body"]` for
+        # `content.data` on remote pushes.
+        "body": body_data,
     }
-    if magnitude is not None:   payload["magnitude"] = magnitude
-    if distance_km is not None: payload["distance_km"] = distance_km
-    if depth_km is not None:    payload["depth_km"] = depth_km
-    if latitude is not None:    payload["latitude"] = latitude
-    if longitude is not None:   payload["longitude"] = longitude
-    if region is not None:      payload["region"] = region
-    if unid is not None:        payload["unid"] = unid
-    if provider is not None:    payload["provider"] = provider
-    if observed_at is not None: payload["observed_at"] = observed_at
     return payload
 
 

@@ -93,7 +93,10 @@ class TestB9TremorActionsCategory:
         from apns import _build_preview_payload, TREMOR_CATEGORY_ID
         p = _build_preview_payload("t", "b", "/quake/x", magnitude=3.6, distance_km=210)
         assert p["aps"]["category"] == TREMOR_CATEGORY_ID
-        assert p["kind"] == "emsc_preview"
+        # v1.0.40 fix (#208 root cause): custom keys are nested under
+        # "body" because expo-notifications iOS reads content.data from
+        # userInfo["body"] and nowhere else.
+        assert p["body"]["kind"] == "emsc_preview"
 
     def test_critical_payload_has_no_category(self):
         """Non-negotiable: nothing may compete with I'M SAFE / I'M TRAPPED."""
@@ -101,7 +104,7 @@ class TestB9TremorActionsCategory:
         p = _build_critical_payload("t", "b", "/alert", magnitude=6.4)
         assert "category" not in p["aps"]
         assert p["aps"]["sound"]["critical"] == 1
-        assert p["kind"] == "critical_alert"
+        assert p["body"]["kind"] == "critical_alert"
 
     def test_preview_body_includes_distance(self):
         """B3: distance belongs in the notification, not only on the screen."""

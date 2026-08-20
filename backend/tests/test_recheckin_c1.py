@@ -334,8 +334,12 @@ def test_recheck_payload_default_is_time_sensitive_not_critical():
     assert aps["interruption-level"] == "time-sensitive"
     assert aps["sound"] == "recheck.wav"   # ~1s chime, NOT the 30s siren
     assert aps["category"] == RECHECK_CATEGORY_ID != "TREMOR_INFO"
-    assert p["kind"] == "recheck" and p["action_url"] == "/recheck"
-    assert p["check_id"] == "c1"
+    # v1.0.40 fix (#208 root cause): routing keys nested under `body`
+    # because expo-notifications iOS reads content.data from
+    # userInfo["body"]. Without this, a trapped-person "still ok?" tap
+    # landed on /quake/unknown instead of /recheck — a life-safety miss.
+    assert p["body"]["kind"] == "recheck" and p["body"]["action_url"] == "/recheck"
+    assert p["body"]["check_id"] == "c1"
 
 
 def test_recheck_payload_escalates_when_asked():
