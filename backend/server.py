@@ -2180,6 +2180,71 @@ async def trigger_alert_preview(
     }
 
 
+@api_router.get("/admin/device-registry")
+async def device_registry(
+    request: Request,
+    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
+):
+    """#262 follow-up (Neo, 2026-08-20 — Paul): a signed-in, in-dashboard
+    view of every registered device, so an operator never has to visit
+    a raw URL with the admin password sitting in the query string
+    (that page — GET /api/admin/devices — still exists for now and is
+    NOT removed by this change; this is an additive, safer alternative
+    the dashboard can render inline).
+
+    Deliberately queries `push_devices` with NO filter and returns the
+    SAME ios/android/total breakdown as /admin/trigger-alert/preview,
+    computed the same way, so the two numbers an operator sees
+    (this list, and the count in the trigger confirm dialog) are
+    always the same source and can be visually reconciled — that
+    mismatch was the entire reason #262 was raised.
+
+    Same auth + role gate as the trigger preview itself (admin OR
+    operator) — this is audit information for the same audience who
+    decides whether to pull the trigger, not a wider-access surface.
+
+    Returns device_id (client-generated, not a secret — same value
+    already shown on /admin/emsc/preview/candidates) and a token
+    FINGERPRINT only; the raw push token is never returned here.
+    """
+    principal = await resolve_principal(request, x_admin_token, ADMIN_TRIGGER_PASSWORD, db)
+    require_role(principal, "admin", "operator")
+
+    rows = await db.push_devices.find(
+        {}, {"_id": 0, "user_id": 1, "platform": 1, "device_token": 1,
+             "created_at": 1, "updated_at": 1},
+    ).sort("updated_at", -1).to_list(5000)
+
+    def _fingerprint(tok: Optional[str]) -> Optional[str]:
+        tok = tok or ""
+        if not tok:
+            return None
+        return f"{tok[:8]}…{tok[-8:]}" if len(tok) > 16 else tok
+
+    ios = sum(
+        1 for d in rows
+        if (d.get("platform") or "").lower() == "ios" and d.get("device_token")
+    )
+    android = sum(1 for d in rows if (d.get("platform") or "").lower() != "ios")
+
+    return {
+        "total": len(rows),
+        "ios": ios,
+        "android": android,
+        "generated_at": _iso(datetime.now(timezone.utc)),
+        "devices": [
+            {
+                "device_id": r.get("user_id"),
+                "platform": (r.get("platform") or "unknown"),
+                "registered_at": _iso(r.get("created_at")),
+                "last_seen_at": _iso(r.get("updated_at")),
+                "device_token_fingerprint": _fingerprint(r.get("device_token")),
+            }
+            for r in rows
+        ],
+    }
+
+
 @api_router.post("/trigger-alert")
 async def trigger_alert(
     body: TriggerAlertBody,

@@ -4340,6 +4340,31 @@ window.QuakeAngelRescue = (function () {
   <div id="qg-admintools-slot"></div>
 </details>
 
+<!-- ═════════════════════════════════════════════════════════════════════
+     #262 follow-up (Neo, 2026-08-20): "Registered devices" — signed-in,
+     in-dashboard replacement for opening /api/admin/devices?token=<pwd>
+     in a raw browser tab. Read-only, admin+operator, same reference-tier
+     placement as the tremor panel (informational, not needed mid-incident,
+     but reachable in one click). Deliberately shows the SAME ios/android/
+     total breakdown as the real trigger's confirm dialog so the two
+     numbers can be checked against each other in one place.
+     ═════════════════════════════════════════════════════════════════════ -->
+<details id="qg-devices-panel" style="display:none; margin:12px 12px 4px; padding:6px 16px 14px;
+     background:var(--surface); border:1px solid var(--border, #d0d3d9); border-radius:8px">
+  <summary style="cursor:pointer; font-size:14px; font-weight:700; color:var(--text); padding:10px 0; user-select:none">
+    📱 Registered devices
+  </summary>
+  <div style="font-size:12px; color:var(--text-muted); margin:0 0 10px">
+    Every device that will receive a real siren alert if you trigger one — the same
+    count shown in the trigger confirmation, listed out. Read-only.
+  </div>
+  <div id="qg-devices-summary" style="font-size:13px; color:var(--text); margin-bottom:10px">Loading…</div>
+  <div style="margin-bottom:10px">
+    <button type="button" id="qg-devices-refresh" class="qg-export-btn">Refresh</button>
+  </div>
+  <div id="qg-devices-body" style="max-height:360px; overflow:auto"></div>
+</details>
+
 <footer class="qg-powered-by">
   Powered by <strong>Quake Angel</strong> · Emergency response platform
 </footer>
@@ -6358,6 +6383,102 @@ window.QuakeAngelRescue = (function () {
     // Poll every 60s so an off→on flip on the backend surfaces without a
     // reload. Cheap: two small collections + one config doc per call.
     setInterval(_refreshTremorState, 60000);
+  }
+})();
+</script>
+
+<script>
+(function () {
+  // ── #262 follow-up: "Registered devices" panel renderer ───────────
+  // Admin+operator only, same gate as the trigger's own preview count.
+  // No auto-poll (unlike the tremor strip) — this is an audit/browse
+  // tool checked deliberately before a decision, not a live status
+  // indicator, and a full push_devices scan every 60s for every open
+  // dashboard tab is needless DB load. Loads once on sign-in + manual
+  // Refresh button for "give me this second's truth" right before
+  // triggering.
+  var _devPanel   = document.getElementById("qg-devices-panel");
+  var _devSummary = document.getElementById("qg-devices-summary");
+  var _devBody    = document.getElementById("qg-devices-body");
+  var _devRefresh = document.getElementById("qg-devices-refresh");
+
+  function _devSignedIn() {
+    var u = window.qaAuth && window.qaAuth.user && window.qaAuth.user();
+    var role = (u && typeof u.role === "string") ? u.role.toLowerCase() : null;
+    return role === "admin" || role === "operator";
+  }
+
+  function _devFmtRow(d) {
+    var esc = window.qgEsc;
+    var reg = d.registered_at ? new Date(d.registered_at).toLocaleString() : "—";
+    var seen = d.last_seen_at ? new Date(d.last_seen_at).toLocaleString() : "—";
+    return '<tr>' +
+      '<td style="padding:4px 8px; font-family:ui-monospace,monospace; font-size:11px">' + esc(d.device_id || "") + '</td>' +
+      '<td style="padding:4px 8px">' + esc((d.platform || "").toUpperCase()) + '</td>' +
+      '<td style="padding:4px 8px; white-space:nowrap; font-size:12px">' + esc(reg) + '</td>' +
+      '<td style="padding:4px 8px; white-space:nowrap; font-size:12px">' + esc(seen) + '</td>' +
+      '</tr>';
+  }
+
+  function _renderDevices(d) {
+    var esc = window.qgEsc;
+    _devSummary.innerHTML =
+      '<b>' + esc(String(d.total || 0)) + ' total</b> · ' +
+      esc(String(d.ios || 0)) + ' iOS · ' + esc(String(d.android || 0)) + ' Android' +
+      ' <span style="color:var(--text-muted); font-size:11px">' +
+      '(same count as the trigger confirmation) · fetched ' +
+      esc(d.generated_at ? new Date(d.generated_at).toLocaleTimeString() : "now") + '</span>';
+    if (!d.devices || d.devices.length === 0) {
+      _devBody.innerHTML = '<p style="margin:0; color:var(--text-muted)"><i>No devices registered.</i></p>';
+      return;
+    }
+    _devBody.innerHTML =
+      '<table style="border-collapse:collapse; width:100%; font-size:12px">' +
+      '<thead><tr style="background:var(--surface-2); text-align:left; position:sticky; top:0">' +
+        '<th style="padding:6px 8px">Device ID</th>' +
+        '<th style="padding:6px 8px">Platform</th>' +
+        '<th style="padding:6px 8px">Registered</th>' +
+        '<th style="padding:6px 8px">Last seen</th>' +
+      '</tr></thead><tbody>' +
+      d.devices.map(_devFmtRow).join("") +
+      '</tbody></table>';
+  }
+
+  async function _refreshDevices() {
+    if (!_devSignedIn()) {
+      _devPanel.style.display = "none";
+      return;
+    }
+    _devPanel.style.display = "";
+    _devSummary.textContent = "Loading…";
+    try {
+      var r = await window.qaApi("/api/admin/device-registry", { cache: "no-store" });
+      if (!r.ok) {
+        _devSummary.innerHTML = '<span style="color:#5a0f13">' +
+          window.qgFriendlyError(new Error("HTTP " + r.status), {
+            fallback: "We couldn't read the device list right now.",
+          }) + '</span>';
+        _devBody.innerHTML = "";
+        return;
+      }
+      _renderDevices(await r.json());
+    } catch (e) {
+      _devSummary.innerHTML = '<span style="color:#5a0f13">' +
+        window.qgFriendlyError(e, {
+          fallback: "We couldn't read the device list right now.",
+        }) + '</span>';
+      _devBody.innerHTML = "";
+    }
+  }
+
+  if (_devPanel) {
+    _refreshDevices();
+    if (window.qaAuth && window.qaAuth.onChange) {
+      window.qaAuth.onChange(_refreshDevices);
+    }
+    if (_devRefresh) {
+      _devRefresh.addEventListener("click", _refreshDevices);
+    }
   }
 })();
 </script>
