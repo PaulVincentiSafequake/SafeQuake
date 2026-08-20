@@ -1383,7 +1383,7 @@ const styles = StyleSheet.create({
   aftershockText: {
     flex: 1,
     color: "#FFD79A",
-    fontSize: 13,
+    fontSize: 14,
     lineHeight: 18,
     fontWeight: "600",
   },
@@ -1396,7 +1396,7 @@ const styles = StyleSheet.create({
   },
   aftershockActionText: {
     color: "#FFE7C2",
-    fontSize: 13,
+    fontSize: 14,
     fontWeight: "800",
   },
   topBanner: {
@@ -1417,7 +1417,7 @@ const styles = StyleSheet.create({
   },
   liveText: {
     color: colors.onSurface,
-    fontSize: 12,
+    fontSize: 14,
     letterSpacing: 3,
     fontWeight: "800",
   },
@@ -1675,7 +1675,7 @@ const styles = StyleSheet.create({
   // glance while the siren is going.
   unansweredNote: {
     color: "rgba(255,255,255,0.82)",
-    fontSize: 13,
+    fontSize: 14,
     lineHeight: 18,
     textAlign: "center",
     marginTop: spacing.md,

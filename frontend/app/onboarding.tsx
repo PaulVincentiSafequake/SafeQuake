@@ -444,13 +444,13 @@ const styles = StyleSheet.create({
   },
   bulletBody: {
     color: colors.onSurfaceTertiary,
-    fontSize: 13,
+    fontSize: 14,
     lineHeight: 18,
   },
   footnote: {
     marginTop: spacing.xl,
     color: colors.onSurfaceTertiary,
-    fontSize: 12,
+    fontSize: 14,
     lineHeight: 18,
     textAlign: "center",
   },

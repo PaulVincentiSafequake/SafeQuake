@@ -278,14 +278,14 @@ const styles = StyleSheet.create({
     borderRadius: 12, padding: 14, marginBottom: 16,
   },
   criticalBannerTitle: { color: "#8A0F0F", fontSize: 15, fontWeight: "800" },
-  criticalBannerBody: { color: "#8A0F0F", fontSize: 13, marginTop: 2, lineHeight: 18 },
+  criticalBannerBody: { color: "#8A0F0F", fontSize: 14, marginTop: 2, lineHeight: 18 },
 
   rulePanel: {
     flexDirection: "row", gap: 10, alignItems: "flex-start",
     backgroundColor: "#0F2818", borderColor: "#1F8A3A", borderWidth: 1,
     borderRadius: 12, padding: 14, marginBottom: 20,
   },
-  ruleText: { flex: 1, color: "#B3E5C4", fontSize: 13, lineHeight: 20 },
+  ruleText: { flex: 1, color: "#B3E5C4", fontSize: 14, lineHeight: 20 },
   ruleTextBold: { fontWeight: "700", color: "#E7EDF5" },
 
   options: { gap: 10 },
@@ -298,15 +298,15 @@ const styles = StyleSheet.create({
   optionText: { flex: 1 },
   optionTitle: { color: "#E7EDF5", fontSize: 16, fontWeight: "700" },
   optionTitleActive: { color: "#5DB1FF" },
-  optionSubtitle: { color: "#8FA0BC", fontSize: 13, marginTop: 2 },
-  optionHelper: { color: "#8FA0BC", fontSize: 12, marginTop: 10, lineHeight: 17 },
+  optionSubtitle: { color: "#8FA0BC", fontSize: 14, marginTop: 2 },
+  optionHelper: { color: "#8FA0BC", fontSize: 14, marginTop: 10, lineHeight: 17 },
   radioEmpty: {
     width: 24, height: 24, borderRadius: 12,
     borderWidth: 2, borderColor: "#8FA0BC",
   },
 
   footer: {
-    color: "#8FA0BC", fontSize: 12, fontStyle: "italic",
+    color: "#8FA0BC", fontSize: 14, fontStyle: "italic",
     textAlign: "center", marginTop: 24, lineHeight: 18,
   },
   placesLink: {
@@ -315,5 +315,5 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: "#25324A", marginTop: 20, minHeight: 48,
   },
   placesLinkTitle: { color: "#E7EDF5", fontSize: 15, fontWeight: "700" },
-  placesLinkBody: { color: "#8FA0BC", fontSize: 12, marginTop: 2, lineHeight: 17 },
+  placesLinkBody: { color: "#8FA0BC", fontSize: 14, marginTop: 2, lineHeight: 17 },
 });

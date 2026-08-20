@@ -318,6 +318,29 @@ export default function DiagScreen() {
           </Text>
         </Section>
 
+        {/* §6 #144 (Neo round 2): the setup rehearsal is shown once at
+            the end of first-run onboarding, but it must be repeatable —
+            not a one-time thing someone can miss forever. This is the
+            SAME button/path as "TRIGGER TEST ALERT" on Home and the
+            onboarding "PLAY THE DEMO" step: real siren, real vibration,
+            no report filed. */}
+        <Section title="Setup rehearsal (siren + vibration)">
+          <Text style={styles.help}>
+            The same siren-and-vibration demo shown at the end of first-run
+            setup. Useful if you skipped it, or just want to feel it again.
+            Nothing is sent anywhere — it&apos;s identical to Trigger Test
+            Alert on the Home screen.
+          </Text>
+        </Section>
+
+        <TouchableOpacity
+          style={styles.btnGhost}
+          onPress={() => router.push("/alert?siren=1&test=1" as any)}
+          testID="diag-setup-rehearsal"
+        >
+          <Text style={styles.btnGhostText}>Replay the siren + vibration demo</Text>
+        </TouchableOpacity>
+
         <Section title="Aftershock rehearsal">
           <Text style={styles.help}>
             Shows what happens when a second earthquake alert arrives while you
@@ -583,7 +606,7 @@ const styles = StyleSheet.create({
   scroll: { flex: 1, backgroundColor: "#0e1116" },
   scrollBody: { padding: 16, paddingBottom: 40 },
   header: { marginBottom: 16 },
-  help: { color: "#8a94a6", fontSize: 13, lineHeight: 19 },
+  help: { color: "#8a94a6", fontSize: 14, lineHeight: 19 },
   helpBold: { color: "#e6e8ec", fontWeight: "700" },
   healthRow: {
     flexDirection: "row",
@@ -614,10 +637,10 @@ const styles = StyleSheet.create({
     borderColor: "#3a4051",
   },
   techToggleText: {
-    color: "#8a94a6", fontSize: 13, fontWeight: "600",
+    color: "#8a94a6", fontSize: 14, fontWeight: "600",
   },
   h1: { color: "#fff", fontSize: 22, fontWeight: "700" },
-  subtitle: { color: "#8a94a6", fontSize: 13, marginTop: 4 },
+  subtitle: { color: "#8a94a6", fontSize: 14, marginTop: 4 },
   section: { marginBottom: 16 },
   sectionTitle: {
     color: "#8a94a6",
@@ -644,13 +667,13 @@ const styles = StyleSheet.create({
   },
   rowLabel: {
     color: "#8a94a6",
-    fontSize: 13,
+    fontSize: 14,
     width: 110,
     paddingTop: 1,
   },
   rowValue: {
     color: "#e6e8ec",
-    fontSize: 13,
+    fontSize: 14,
     flex: 1,
     textAlign: "right",
   },
@@ -667,7 +690,7 @@ const styles = StyleSheet.create({
     padding: 12,
     marginBottom: 12,
   },
-  msgText: { color: "#a5d6a7", fontSize: 13 },
+  msgText: { color: "#a5d6a7", fontSize: 14 },
   testRow: {
     flexDirection: "row",
     gap: 10,

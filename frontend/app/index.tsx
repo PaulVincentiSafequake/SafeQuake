@@ -1106,7 +1106,8 @@ const styles = StyleSheet.create({
   },
   statusText: {
     color: colors.onSurface,
-    fontSize: 13,
+    // §7 #257 (Neo round 2): body-size (was 13).
+    fontSize: 14,
     letterSpacing: 0.5,
     fontWeight: "700",
   },
@@ -1143,7 +1144,8 @@ const styles = StyleSheet.create({
   },
   sectionSub: {
     color: colors.onSurfaceTertiary,
-    fontSize: 13,
+    // §7 #257 (Neo round 2): body-size (was 13).
+    fontSize: 14,
     marginTop: spacing.xs,
     marginBottom: spacing.lg,
   },
@@ -1186,7 +1188,9 @@ const styles = StyleSheet.create({
   },
   tipBody: {
     color: colors.onSurfaceTertiary,
-    fontSize: 13,
+    // §7 #257 (Neo round 2): body-size (was 13) — these are the DROP /
+    // COVER / HOLD ON safety instructions; wording unchanged, only size.
+    fontSize: 14,
     lineHeight: 18,
   },
   infoCard: {
@@ -1202,7 +1206,8 @@ const styles = StyleSheet.create({
   infoText: {
     flex: 1,
     color: colors.onSurfaceSecondary,
-    fontSize: 13,
+    // §7 #257 (Neo round 2): body-size (was 13).
+    fontSize: 14,
     lineHeight: 19,
   },
   stickyBar: {
@@ -1241,10 +1246,10 @@ const styles = StyleSheet.create({
     letterSpacing: 2,
   },
   // #244 (Batch 7 D): honest disclaimer under the test button.
-  // §7 #257 (Neo 2026-08-20): 11 → 13 for readability under stress.
+  // §7 #257 (Neo round 2): 11 → 13 → 14 for readability under stress.
   triggerHonestyNote: {
     color: colors.onSurfaceTertiary,
-    fontSize: 13,
+    fontSize: 14,
     lineHeight: 18,
     textAlign: "center",
     marginTop: 8,
@@ -1261,7 +1266,8 @@ const styles = StyleSheet.create({
   },
   diagLinkText: {
     color: colors.onSurfaceTertiary,
-    fontSize: 12,
+    // §7 #257 (Neo round 2): body-size (was 12).
+    fontSize: 14,
     fontWeight: "600",
     letterSpacing: 1,
     textTransform: "uppercase",
@@ -1341,7 +1347,8 @@ const styles = StyleSheet.create({
   updateReminderFootnote: {
     marginTop: 4,
     color: colors.onSurfaceTertiary,
-    fontSize: 12,
+    // §7 #257 (Neo round 2): body-size (was 12).
+    fontSize: 14,
     lineHeight: 17,
     fontStyle: "italic",
   },
@@ -1353,7 +1360,8 @@ const styles = StyleSheet.create({
   },
   updateReminderOptOutText: {
     color: colors.onSurfaceSecondary,
-    fontSize: 13,
+    // §7 #257 (Neo round 2): body-size (was 13).
+    fontSize: 14,
     textDecorationLine: "underline",
   },
 
@@ -1374,13 +1382,15 @@ const styles = StyleSheet.create({
   },
   watchOkPillText: {
     color: "#7ED89A",
-    fontSize: 12,
+    // §7 #257 (Neo round 2): body-size (was 12).
+    fontSize: 14,
     fontWeight: "700",
     letterSpacing: 0.2,
   },
   watchOkPillMeta: {
     color: colors.onSurfaceTertiary,
-    fontSize: 11,
+    // §7 #257 (Neo round 2): body-size (was 11).
+    fontSize: 14,
     fontWeight: "600",
     marginLeft: 4,
   },

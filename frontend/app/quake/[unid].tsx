@@ -441,7 +441,7 @@ const styles = StyleSheet.create({
   },
   missingNoticeText: {
     color: colors.text,
-    fontSize: 13,
+    fontSize: 14,
     lineHeight: 18,
     flex: 1,
   },
@@ -464,7 +464,7 @@ const styles = StyleSheet.create({
   },
   timeAgo: {
     color: colors.textDim,
-    fontSize: 13,
+    fontSize: 14,
     marginTop: 2,
     marginBottom: 16,
   },
@@ -480,7 +480,7 @@ const styles = StyleSheet.create({
   },
   previewNoticeText: {
     color: colors.text,
-    fontSize: 13,
+    fontSize: 14,
     lineHeight: 19,
     flex: 1,
   },
@@ -534,7 +534,7 @@ const styles = StyleSheet.create({
   },
   footerText: {
     color: colors.textDim,
-    fontSize: 12,
+    fontSize: 14,
     fontStyle: "italic",
     textAlign: "center",
     lineHeight: 18,

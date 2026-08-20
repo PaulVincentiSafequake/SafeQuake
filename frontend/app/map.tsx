@@ -586,7 +586,7 @@ const styles = StyleSheet.create({
     backgroundColor: "#3A1919",
   },
   disclaimerText: {
-    color: "#FFB4B4", fontSize: 12, fontWeight: "600", flexShrink: 1,
+    color: "#FFB4B4", fontSize: 14, fontWeight: "600", flexShrink: 1,
   },
 
   windowRow: {
@@ -623,9 +623,9 @@ const styles = StyleSheet.create({
     shadowColor: "#000", shadowOpacity: 0.35, shadowRadius: 4, shadowOffset: {width: 0, height: 2},
     elevation: 4,
   },
-  wideBtnText: { color: "#0B1220", fontWeight: "800", fontSize: 13 },
+  wideBtnText: { color: "#0B1220", fontWeight: "800", fontSize: 14 },
   wideBtnCaption: {
-    color: "#E7EDF5", fontSize: 11, fontWeight: "600",
+    color: "#E7EDF5", fontSize: 14, fontWeight: "600",
     backgroundColor: "rgba(11,18,32,0.75)",
     paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6,
   },
@@ -636,7 +636,7 @@ const styles = StyleSheet.create({
     padding: 10, marginTop: 4, marginBottom: 12,
     borderRadius: 8, backgroundColor: "#151E2F", borderWidth: 1, borderColor: "#25324A",
   },
-  webNoticeText: { color: "#8FA0BC", fontSize: 12, flexShrink: 1 },
+  webNoticeText: { color: "#8FA0BC", fontSize: 14, flexShrink: 1 },
 
   listRow: {
     flexDirection: "row", alignItems: "center", gap: 12,
@@ -650,7 +650,7 @@ const styles = StyleSheet.create({
   },
   magBadgeText: { color: "#0B1220", fontWeight: "800", fontSize: 15 },
   listRegion: { color: "#E7EDF5", fontSize: 14, fontWeight: "700" },
-  listMeta: { color: "#8FA0BC", fontSize: 12, marginTop: 2 },
+  listMeta: { color: "#8FA0BC", fontSize: 14, marginTop: 2 },
 
   emptyPanel: {
     alignItems: "center", justifyContent: "center",
@@ -685,17 +685,17 @@ const styles = StyleSheet.create({
     color: "#E7EDF5", fontSize: 15, fontWeight: "700", lineHeight: 20,
   },
   legendDisclaimer: {
-    color: "#B3E5C4", fontSize: 13, fontStyle: "italic",
+    color: "#B3E5C4", fontSize: 14, fontStyle: "italic",
     lineHeight: 18, marginTop: -2,
   },
   legendRow: {
     flexDirection: "row", alignItems: "center", gap: 8,
   },
   legendCaption: {
-    color: "#B0BED9", fontSize: 13, fontWeight: "600",
+    color: "#B0BED9", fontSize: 14, fontWeight: "600",
   },
   legendCaptionRight: {
-    color: "#B0BED9", fontSize: 13, marginLeft: "auto",
+    color: "#B0BED9", fontSize: 14, marginLeft: "auto",
   },
   legendSizeSwatch: {
     flexDirection: "row", alignItems: "center", gap: 6,

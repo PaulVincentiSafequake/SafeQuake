@@ -604,7 +604,7 @@ const styles = StyleSheet.create({
     backgroundColor: "#0F2818", borderColor: "#1F8A3A", borderWidth: 1,
     borderRadius: 12, padding: 14, marginBottom: 20,
   },
-  ruleText: { flex: 1, color: "#B3E5C4", fontSize: 13, lineHeight: 20 },
+  ruleText: { flex: 1, color: "#B3E5C4", fontSize: 14, lineHeight: 20 },
   ruleTextBold: { fontWeight: "700", color: "#E7EDF5" },
 
   switchRow: {
@@ -613,9 +613,9 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: "#25324A", marginBottom: 16,
   },
   switchLabel: { color: "#E7EDF5", fontSize: 15, fontWeight: "700" },
-  switchHelper: { color: "#8FA0BC", fontSize: 12, marginTop: 2, lineHeight: 17 },
+  switchHelper: { color: "#8FA0BC", fontSize: 14, marginTop: 2, lineHeight: 17 },
 
-  empty: { color: "#8FA0BC", fontSize: 13, lineHeight: 19, marginBottom: 8 },
+  empty: { color: "#8FA0BC", fontSize: 14, lineHeight: 19, marginBottom: 8 },
   list: { gap: 10, marginBottom: 8 },
   placeRow: {
     flexDirection: "row", alignItems: "flex-start", gap: 12,
@@ -628,8 +628,8 @@ const styles = StyleSheet.create({
     backgroundColor: "#241C08",
   },
   placeName: { color: "#E7EDF5", fontSize: 16, fontWeight: "700" },
-  placeCoords: { color: "#8FA0BC", fontSize: 13, marginTop: 2, lineHeight: 18 },
-  placeCoordsHint: { color: "#61708A", fontSize: 12, fontStyle: "italic" },
+  placeCoords: { color: "#8FA0BC", fontSize: 14, marginTop: 2, lineHeight: 18 },
+  placeCoordsHint: { color: "#61708A", fontSize: 14, fontStyle: "italic" },
   mismatchNotice: {
     marginTop: 10, padding: 10, borderRadius: 8,
     backgroundColor: "rgba(244,200,66,0.08)",
@@ -688,10 +688,10 @@ const styles = StyleSheet.create({
   resolvedAddress: {
     color: "#E7EDF5", fontSize: 15, fontWeight: "700", marginBottom: 2,
   },
-  resolvedText: { color: "#B3E5C4", fontSize: 12 },
+  resolvedText: { color: "#B3E5C4", fontSize: 14 },
   resolvedHint: {
-    color: "#8FA0BC", fontSize: 11, fontStyle: "italic",
-    marginTop: 6, lineHeight: 15,
+    color: "#8FA0BC", fontSize: 14, fontStyle: "italic",
+    marginTop: 6, lineHeight: 18,
   },
   saveBtn: {
     minHeight: 50, borderRadius: 10, backgroundColor: "#1F8A3A",
@@ -701,7 +701,7 @@ const styles = StyleSheet.create({
   btnDisabled: { opacity: 0.45 },
 
   footer: {
-    color: "#8FA0BC", fontSize: 12, fontStyle: "italic",
+    color: "#8FA0BC", fontSize: 14, fontStyle: "italic",
     textAlign: "center", marginTop: 24, lineHeight: 18,
   },
 });

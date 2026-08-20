@@ -130,7 +130,7 @@ const onboardingStyles = StyleSheet.create({
   },
   fixLabel: {
     color: colors.warning,
-    fontSize: 13,
+    fontSize: 14,
     fontWeight: "700",
     marginBottom: 4,
   },
@@ -205,7 +205,7 @@ const compactStyles = StyleSheet.create({
   },
   body: {
     color: colors.onSurfaceSecondary,
-    fontSize: 13,
+    fontSize: 14,
     lineHeight: 19,
   },
   fixCard: {
@@ -218,22 +218,22 @@ const compactStyles = StyleSheet.create({
   },
   fixLabel: {
     color: colors.warning,
-    fontSize: 12,
+    fontSize: 14,
     fontWeight: "700",
     marginBottom: 2,
   },
   stepRow: baseStepRow,
   stepNum: {
     color: colors.warning,
-    fontSize: 12,
+    fontSize: 14,
     fontWeight: "800",
-    width: 16,
+    width: 18,
   },
   stepText: {
     flex: 1,
     color: colors.onSurfaceSecondary,
-    fontSize: 12,
-    lineHeight: 17,
+    fontSize: 14,
+    lineHeight: 19,
   },
   stepBold: {
     color: colors.onSurface,
@@ -258,7 +258,7 @@ const compactStyles = StyleSheet.create({
   },
   updateNoteText: {
     color: colors.onSurfaceSecondary,
-    fontSize: 12,
-    lineHeight: 17,
+    fontSize: 14,
+    lineHeight: 19,
   },
 });

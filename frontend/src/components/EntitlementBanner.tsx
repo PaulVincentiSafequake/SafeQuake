@@ -190,7 +190,7 @@ const styles = StyleSheet.create({
     flex: 1, color: "#E7EDF5", fontSize: 15, fontWeight: "700",
   },
   dismissBtn: { padding: 2 },
-  body: { color: "#B3BCCC", fontSize: 13, lineHeight: 19 },
+  body: { color: "#B3BCCC", fontSize: 14, lineHeight: 19 },
   cta: {
     flexDirection: "row", alignItems: "center", justifyContent: "center",
     gap: 6, paddingVertical: 10, paddingHorizontal: 14,
