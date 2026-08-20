@@ -1329,7 +1329,14 @@
     if (!jwt) {
       return new Response("{}", {
         status: 401,
-        statusText: "Signed out — no token",
+        // Batch 7 R5 hotfix (2026-08-19): statusText MUST be ASCII
+        // reason-phrase per RFC 7230. An em-dash here made Chrome
+        // and Safari throw TypeError synchronously (Firefox is more
+        // lenient), which broke every qaApi caller on the live
+        // dashboard — including the admin preview fetch that
+        // un-hides the trigger button, and every authed poll. Same
+        // shape as #219 (one JS error kills unrelated handlers).
+        statusText: "Signed out - no token",
         headers: {"Content-Type": "application/json"},
       });
     }
