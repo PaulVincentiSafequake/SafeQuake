@@ -334,7 +334,7 @@ export default function DiagScreen() {
             label="What's fixed in it"
             value={
               (info?.app_version ?? "?") +
-              " — #266/#260 truthful registration status (single row driven by a server read-back, never local state), #208 R4 primary alert routes to check-in, #245 type-to-confirm on trigger, #199 clear-on-stand-down, #247 saved place no longer points at wrong city, #249 saved places on the map, #211 recency-ramp map key, #243 zoom in to epicentre, #250 not-responding wording, #252 human-first diagnostics, #244 honest test-button wording."
+              " — #208 unanswered-alert redirect now takes over from ANY screen on lock/unlock (moved into the app-wide layout, tracks AppState transitions), #266/#260 truthful registration status (single row driven by a server read-back, never local state), #208 R4 primary alert routes to check-in, #245 type-to-confirm on trigger, #199 clear-on-stand-down, #247 saved place no longer points at wrong city, #249 saved places on the map, #211 recency-ramp map key, #243 zoom in to epicentre, #250 not-responding wording, #252 human-first diagnostics, #244 honest test-button wording."
             }
           />
         </Section>

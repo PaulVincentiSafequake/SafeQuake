@@ -82,12 +82,20 @@ from deps import (
 )
 
 # #245 (Batch 7 R4, 2026-08-19 night): the phrase the operator must
-# type to broadcast a real earthquake alert. Fixed string so an audit
-# reader can grep for it; capitalised so it reads as a formal command,
-# not a suggestion; and it names the consequence in the words
-# themselves. The phrase is checked case-insensitively so a stressed
-# operator typing in a hurry does not fail on shift-key differences.
-TRIGGER_ALERT_CONFIRMATION = "SEND EARTHQUAKE ALERT TO ALL PHONES"
+# #267 (Neo, 2026-08-20 — Paul):
+#   "Do not use CONFIRM — it is generic enough to become reflex, which
+#    defeats the purpose of typed confirmation. Use a word that names
+#    the consequence, and make the two words different enough that
+#    muscle memory from one cannot carry into the other."
+#
+# SIREN names exactly what the operator is about to do — light up every
+# phone. Letter-distinct from WIPE (device purge) and STANDDOWN (recall);
+# no shared prefix, no shared shape, no accidental cross-over from a
+# hand mid-flow.
+#
+# Case-insensitive + strip() on both sides so an operator typing under
+# stress does not fail on shift-key differences or a stray leading space.
+TRIGGER_ALERT_CONFIRMATION = "SIREN"
 
 # ---------- Deploy fingerprint ----------
 # Computed once at process start. Cheap way to tell whether the running
@@ -2443,7 +2451,7 @@ class StandDownBody(BaseModel):
     confirmation_phrase: Optional[str] = None
 
 
-STAND_DOWN_CONFIRMATION = "STAND DOWN THIS ALERT"
+STAND_DOWN_CONFIRMATION = "STANDDOWN"
 
 
 @api_router.post("/admin/alert/stand-down")
@@ -2470,12 +2478,17 @@ async def alert_stand_down(
     typed = (body.confirmation_phrase or "").strip().upper()
     expected = STAND_DOWN_CONFIRMATION.strip().upper()
     if typed != expected:
+        # #267 (Neo, 2026-08-20): name the phrase the operator was asked
+        # to type, and name what the action would have done. The previous
+        # generic "type the phrase shown in the confirm dialog exactly"
+        # was correct but the dashboard was throwing it away and showing
+        # only a red flash — Paul reported repeatedly getting no feedback
+        # when he typed the phrase in the wrong case.
         raise HTTPException(
             status_code=400,
             detail=(
-                "Confirmation phrase missing or wrong. "
-                "Type the phrase shown in the confirm dialog exactly, "
-                "then send again."
+                f"That did not match. Type {STAND_DOWN_CONFIRMATION} "
+                f"to recall this alert."
             ),
         )
 
@@ -2575,6 +2588,108 @@ async def trigger_alert_preview(
     }
 
 
+@api_router.get("/admin/incident-status")
+async def admin_incident_status(
+    request: Request,
+    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
+):
+    """#135 (Neo, 2026-08-20 — Paul):
+      "The dashboard must NEVER sign an operator out while an
+       earthquake alert is live and unresolved. Being signed out
+       mid-incident is a safety failure, not an inconvenience.
+       Suspend the idle timer entirely whenever there is an active
+       alert with anyone still unanswered."
+
+    A live alert = the most recent trigger in `push_events` has no
+    stand-down recorded after it AND arrived within the last 72h.
+    72h matches the dashboard's existing "since the alert" active
+    window (ALERT_ACTIVE_MS in the dashboard JS) so the operator's
+    UI and this idle-timer suspend share one definition of "live".
+
+    Returned fields:
+      - active                    (bool)
+      - last_trigger_at           (ISO string or null)
+      - last_stand_down_at        (ISO string or null)
+      - hours_since_trigger       (float or null)
+      - reason                    (plain-English, non-empty when active)
+    Same admin+operator gate as /admin/device-registry — this is
+    dashboard-driven diagnostic info for the same audience.
+    """
+    principal = await resolve_principal(
+        request, x_admin_token, ADMIN_TRIGGER_PASSWORD, db
+    )
+    require_role(principal, "admin", "operator")
+
+    ACTIVE_WINDOW_H = 72.0
+
+    async def _latest(kind: str):
+        # #135: tolerate historical trigger rows that were inserted
+        # before we started stamping `kind: "trigger"` on them. A row
+        # without a `kind` is by convention a trigger — the only other
+        # kind ever written to push_events is `alert_stood_down`.
+        if kind == "trigger":
+            query = {"$or": [{"kind": "trigger"}, {"kind": {"$exists": False}}]}
+        else:
+            query = {"kind": kind}
+        rows = await db.push_events.find(
+            query, {"_id": 0, "created_at": 1},
+        ).sort("created_at", -1).to_list(1)
+        if not rows:
+            return None
+        try:
+            dt = datetime.fromisoformat(
+                str(rows[0]["created_at"]).replace("Z", "+00:00")
+            )
+            return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        except (ValueError, TypeError):
+            return None
+
+    last_trigger = await _latest("trigger")
+    last_stand_down = await _latest("alert_stood_down")
+
+    now = datetime.now(timezone.utc)
+    hours_since = None
+    if last_trigger is not None:
+        hours_since = (now - last_trigger).total_seconds() / 3600.0
+
+    active = False
+    reason = None
+    if last_trigger is not None and hours_since is not None:
+        stood_down_after = (
+            last_stand_down is not None and last_stand_down > last_trigger
+        )
+        within_window = hours_since <= ACTIVE_WINDOW_H
+        if within_window and not stood_down_after:
+            active = True
+            # Round to a human-readable phrase so the dashboard banner
+            # can say "alert live for 2h 14m" without doing math client-side.
+            h = int(hours_since)
+            m = int(round((hours_since - h) * 60))
+            if h == 0 and m == 0:
+                dur = "under a minute"
+            elif h == 0:
+                dur = f"{m}m"
+            elif m == 0:
+                dur = f"{h}h"
+            else:
+                dur = f"{h}h {m}m"
+            reason = (
+                f"An earthquake alert has been live for {dur} without a "
+                f"stand-down. Idle sign-out is suspended until you send "
+                f"a stand-down or the {int(ACTIVE_WINDOW_H)}h window closes."
+            )
+
+    return {
+        "active": active,
+        "reason": reason,
+        "last_trigger_at": last_trigger.isoformat() if last_trigger else None,
+        "last_stand_down_at": last_stand_down.isoformat() if last_stand_down else None,
+        "hours_since_trigger": hours_since,
+        "active_window_hours": ACTIVE_WINDOW_H,
+        "generated_at": now.isoformat(),
+    }
+
+
 @api_router.get("/admin/device-registry")
 async def device_registry(
     request: Request,
@@ -2667,7 +2782,7 @@ async def device_registry(
 # admin-only (not "admin","operator" like the read/preview endpoints) —
 # wiping the whole registry is a materially bigger blast radius than
 # viewing it or triggering one alert.
-DEVICE_PURGE_CONFIRMATION = "CLEAR ALL DEVICES"
+DEVICE_PURGE_CONFIRMATION = "WIPE"
 
 
 class DevicePurgeBody(BaseModel):
@@ -2685,9 +2800,13 @@ async def purge_all_devices(
 
     typed = (body.confirmation_phrase or "").strip().upper()
     if typed != DEVICE_PURGE_CONFIRMATION:
+        # #267 (Neo, 2026-08-20 — Paul): plain-English match error
+        # naming the phrase AND the action. The dashboard shows this
+        # inside the modal so a mistyped attempt is never a silent flash.
         raise HTTPException(
             400,
-            f"Type the confirmation phrase exactly: \"{DEVICE_PURGE_CONFIRMATION}\".",
+            f"That did not match. Type {DEVICE_PURGE_CONFIRMATION} "
+            f"to erase every registered device.",
         )
 
     before = await db.push_devices.count_documents({})
@@ -2736,19 +2855,18 @@ async def trigger_alert(
     triggered_by_user = audit_attribution(principal)
 
     # #245 (Batch 7): phrase check. Case-insensitive; whitespace-tolerant.
-    # We do NOT reveal the expected phrase in the error — that is up to
-    # the dashboard modal, which shows it in the confirm dialog.
+    # #267 (Neo, 2026-08-20 — Paul): name the phrase in the error
+    # detail. The dashboard shows this verbatim inside the confirm
+    # modal, replacing the silent-red-flash mismatch that read as
+    # "button broken".
     typed = (body.confirmation_phrase or "").strip().upper()
     expected = TRIGGER_ALERT_CONFIRMATION.strip().upper()
     if typed != expected:
-        # Plain-language HTTP error — never "unauthorised" or a code.
-        # See #237/#239: raw errors don't reach operators in this product.
         raise HTTPException(
             status_code=400,
             detail=(
-                "Confirmation phrase missing or wrong. "
-                "Type the phrase shown in the confirm dialog exactly, "
-                "then send again."
+                f"That did not match. Type {TRIGGER_ALERT_CONFIRMATION} "
+                f"to send the alert."
             ),
         )
 
@@ -2858,6 +2976,13 @@ async def trigger_alert(
     try:
         await db.push_events.insert_one({
             "idempotency_key": idem,
+            # #135 (Neo, 2026-08-20 — Paul): explicit `kind` on the
+            # trigger insert so /admin/incident-status can distinguish
+            # a trigger from a stand-down. Historically the trigger
+            # row had no `kind`; the stand-down insert (line ~2518)
+            # adds `"kind": "alert_stood_down"`. Adding it here makes
+            # the two symmetric and lets `_latest("trigger")` work.
+            "kind": "trigger",
             "created_at": datetime.now(timezone.utc).isoformat(),
             # Post-#9: triggered_by holds the AUTHENTICATED USER's email (or
             # "legacy@dashboard" during migration). The body.triggeredBy

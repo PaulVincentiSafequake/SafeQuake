@@ -27,7 +27,9 @@ import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context"
 
 import { AppleWatchNote } from "@/src/components/AppleWatchNote";
 import EntitlementBanner from "@/src/components/EntitlementBanner";
-import { shouldRedirectToAlert, toAlertQuery } from "@/src/utils/activeAlert";
+// #208 R4 — `shouldRedirectToAlert`/`toAlertQuery` moved to _layout.tsx
+// so the unanswered-alert redirect fires from every screen, not just
+// this one. Keeping the imports here would be dead weight.
 import { colors, radius, spacing } from "@/src/theme";
 import {
   getDisplayName,
@@ -207,37 +209,19 @@ export default function HomeScreen() {
     }
   }, [currentVersion, forcePreview]);
 
-  // #208 R4 (Batch 7, 2026-08-19 — Paul's night verification):
-  //   "Opening the app while an alert is live and unanswered must go
-  //    straight to the check-in screen. An unanswered alert is the
-  //    most important thing in the app's world at that moment; it
-  //    must not be possible to open the app and not see it."
+  // #208 R4 (Batch 7) — moved (Neo, 2026-08-20 — Paul):
+  //   The unanswered-alert redirect now lives in `app/_layout.tsx` so
+  //   it fires from ANY screen, not just Home. The bug that motivated
+  //   the move: locking the phone on Diagnostics, receiving a real
+  //   critical alert, tapping it, and being returned to Diagnostics
+  //   instead of the check-in screen — because the notification tap
+  //   handler's `router.push("/alert")` can race the router-ready
+  //   state on resume from lock, and Home was the only place with a
+  //   compensating watcher.
   //
-  // Runs on mount AND whenever the app returns to foreground so someone
-  // who backgrounded the app during a real alert lands on /alert as
-  // soon as they come back, not on the drop-cover-hold marketing card.
-  //
-  // Cleared by the check-in submit path (safe/trapped). Silence never
-  // clears it — rule 9.2, silence is information, not an answer.
-  useEffect(() => {
-    let cancelled = false;
-    const checkAndRedirect = () => {
-      shouldRedirectToAlert()
-        .then((a) => {
-          if (cancelled || !a) return;
-          router.replace(("/alert" + toAlertQuery(a)) as any);
-        })
-        .catch(() => { /* non-fatal: worst case, home screen renders */ });
-    };
-    checkAndRedirect();
-    const sub = AppState.addEventListener("change", (next: AppStateStatus) => {
-      if (next === "active") checkAndRedirect();
-    });
-    return () => {
-      cancelled = true;
-      sub.remove();
-    };
-  }, [router]);
+  // This screen keeps no watcher of its own — a duplicate would race
+  // the layout watcher and could stack two /alert screens during a
+  // single unlock. The layout is the single source of truth.
 
   // Run on mount and every time app returns to foreground. The AppState
   // listener is what makes the banner truly sticky across sessions —
@@ -576,7 +560,7 @@ export default function HomeScreen() {
               <View style={{ flex: 1 }}>
                 <Text style={styles.statusText}>Connected and ready.</Text>
                 <Text style={styles.statusSubText}>
-                  We'll alert you, and you can tell rescuers how you are and where you are.
+                  We&apos;ll alert you, and you can tell rescuers how you are and where you are.
                 </Text>
               </View>
             </View>

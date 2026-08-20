@@ -1410,3 +1410,131 @@ read back what the server actually holds, and confirmed:
 - push_devices had 0 rows (no phantom persist).
 - status endpoint returned registered:false with truthful last_attempt.
 - admin/relay-health returned healthy:false with the credentials reason.
+
+## v1.0.39 — Neo round (2026-08-20)
+
+### #208 — critical-alert routing on locked phones (from ANY screen)
+Root cause: the `shouldRedirectToAlert()` watcher lived only in
+`app/index.tsx` (Home). Every other screen was a dead end for an
+unanswered alert. The tap handler's `router.push("/alert")` can race
+the router-ready state on resume-from-lock (iOS suspends JS while
+locked) and silently no-op; Home compensated because it had its own
+mount check, no other screen did.
+
+Fix: moved the watcher into `app/_layout.tsx` (which wraps every
+route). Runs on:
+  - Every layout mount (covers cold start).
+  - Every `AppState` transition to "active" (covers background→
+    foreground, lock→unlock, phone-call return, Control Center dismiss).
+  - Every pathname change to anything except /alert or /recheck.
+Uses `router.replace` (not push) so back-stack doesn't accumulate a
+Diagnostics screen underneath /alert. 750ms redirect debounce so
+concurrent triggers (AppState + pathname) don't stack a redirect on
+top of a redirect. Removed the duplicate watcher from `index.tsx`.
+
+### #267 — typed-confirmation dialogs (all 5 sites)
+Three safety-critical (SIREN / STANDDOWN / WIPE) + two operator-mgmt
+(delete-user / role-change, still email-typed). All go through the
+same `confirmTyping()` helper.
+
+Changes in `confirmTyping()`:
+  - Case-insensitive + trim() (matches backend `.strip().upper()`).
+  - Enter to submit; Escape to cancel.
+  - On mismatch: plain-English named message inside the modal
+    ("That did not match. Type SIREN to send the alert.") — replaces
+    the silent red-border flash that Paul reported as "the button was
+    broken".
+  - Input auto-selects on error so the operator can retype in place.
+  - Error clears the moment they resume typing (never a stale red
+    warning while they're clearly correcting).
+
+Backend constants:
+  - TRIGGER_ALERT_CONFIRMATION: "SEND EARTHQUAKE ALERT TO ALL PHONES"
+    → "SIREN"
+  - STAND_DOWN_CONFIRMATION: "STAND DOWN THIS ALERT" → "STANDDOWN"
+    (letter-distinct from SIREN — 3-char no-overlap invariant tested)
+  - DEVICE_PURGE_CONFIRMATION: "CLEAR ALL DEVICES" → "WIPE"
+
+### #135 — idle timeout (2h, alert-aware, protects in-flight work)
+  - IDLE_TIMEOUT_MS: 15min → 2h.
+  - New backend endpoint /api/admin/incident-status: returns
+    `active=true` if the most recent trigger has no stand-down after
+    it AND is within a 72h window (matches ALERT_ACTIVE_MS in the
+    dashboard). Plain-English `reason` field.
+  - Dashboard polls it every 30s. While `active=true`:
+      - Idle timer is FROZEN (no expiry, no warning modal).
+      - Red banner across the top of the dashboard:
+        "⚠ Alert live — idle sign-out suspended. [reason]"
+  - Post-alert (stand-down sent), the timer resumes with a fresh
+    full-length 2h — never sign an operator out the instant they
+    close an incident.
+  - Warning modal now lists in-progress work by name (open typed-
+    confirm modals, focused non-empty inputs) so the 60s countdown
+    is not blind.
+  - After a sign-out that discarded work, a persistent amber banner
+    names what was NOT saved. Dismissable.
+  - #240 already handled personal-data wipe on sign-out — this build
+    just plugs the "silent discard of in-flight input" gap Paul
+    called out.
+  - Trigger endpoint now stamps `kind: "trigger"` on push_events
+    inserts (used to be untagged, only stand-down was tagged). Tolerant
+    of historical rows via `{"kind": {"$exists": false}}` fallback.
+
+### Preview-mode enrolment — last-seen + dead-marker + all-dead banner
+Paul's report: "the enrolled devices list held qg-1786015151886-2zbf6xjy,
+an old install of mine that no longer exists. My live phone was never
+enrolled, so preview notices were being sent to a dead device."
+
+Preview panel now cross-references each enrolled `device_id` against
+/api/admin/device-registry:
+  - Green "live" + last-seen timestamp when the device is in the
+    registry and has an alive token.
+  - Red "unreachable (dead token)" when APNs marked it dead.
+  - Red "no longer exists in the registry" when the enrolment refers
+    to a device that has been purged / never existed. Preview notices
+    to this id go nowhere.
+  - If preview mode is ENABLED and every enrolled device is dead,
+    the panel shows an amber banner right above the list. No more
+    "0 enrolled" or "1 stale enrolled" silently looking fine.
+
+### #57 / #265 — dashboard cache-busting (belt-and-braces)
+  - `<meta http-equiv="Cache-Control" content="no-cache, must-
+    revalidate, max-age=0">` etc. in the head. Browser must
+    conditional-GET every load; a stale copy from a caching proxy
+    can no longer stick around across a deploy.
+  - New DASHBOARD_BUILD_STAMP baked in near the top of body,
+    format `YYYY-MM-DD-hhmmZ-feature-slug`. Bumped by hand every push.
+  - StaleCopyWatch (self-check): every 5min the tab re-fetches its
+    own URL with `cache: 'no-store'` and extracts the fresh
+    DASHBOARD_BUILD_STAMP via regex. If different from the running
+    tab's stamp, an amber "A newer dashboard has been deployed"
+    banner appears at the bottom with a Reload button.
+  - Still to do (needs push access): add explicit
+    `Cache-Control: no-cache, no-store, must-revalidate` headers in
+    `backend_dashboard/server.js` — the ultimate belt. Meta tags are
+    the braces; both together make the caching problem structurally
+    impossible.
+
+### What Paul needs to do to ship v1.0.39
+1. Publish (Emergent button) to redeploy backend so the new
+   /api/admin/incident-status endpoint + phrase changes + trigger
+   kind stamp are live in prod.
+2. Provide a fresh short-lived GitHub PAT so I can push the dashboard
+   changes (already staged in /app/memory/dashboard_build/index.html —
+   contents include #267 modal, #135 idle timer + banner + poster,
+   preview-enrolment cross-reference, cache-busting meta + watchdog).
+3. Rebuild the native iOS app as 1.0.39 build 39 so the #208
+   global unanswered-alert watcher lands on the phone.
+
+### Verified live per rule 4a
+  - /api/admin/incident-status: no-trigger state → active:false; after
+    a trigger with no stand-down → active:true with named reason;
+    after stand-down → active:false again.
+  - /api/trigger-alert 400 on "wrong" now returns
+    "That did not match. Type SIREN to send the alert."
+  - /api/admin/alert/stand-down 400 on "wrong" returns
+    "That did not match. Type STANDDOWN to recall this alert."
+  - /api/admin/device-registry/purge-all 400 on "wrong" returns
+    "That did not match. Type WIPE to erase every registered device."
+  - "siren" / "  SIREN " / "SirEn" all accepted (case + trim).
+  - 23 pytest cases pass across the three test files edited/added.

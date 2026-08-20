@@ -3,6 +3,23 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<!-- #57 / #265 (Neo, 2026-08-20 — Paul):
+     "your fix is live and works, but only after a hard refresh. Before
+      that the old page was still being served. That's #57, the caching
+      problem, still biting. A fix that a user can't receive is not a fix."
+
+     Belt-and-braces: HTTP headers set by backend_dashboard/server.js are
+     the belt; these meta tags are the braces for the case where a proxy
+     between Render and the operator drops or rewrites the headers.
+     `no-cache` (not `no-store`) permits the browser to keep a copy but
+     forces a conditional GET on every load — the round-trip cost is
+     negligible for a 300 KB HTML on a dashboard used from an office
+     LAN, and the guaranteed freshness closes the "user typed the wrong
+     phrase because their cached copy still asked for the old one"
+     class of bug this dashboard cannot afford. -->
+<meta http-equiv="Cache-Control" content="no-cache, must-revalidate, max-age=0" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="0" />
 <title>Quake Angel — Emergency Response Dashboard</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 <style>
@@ -887,6 +904,13 @@
      modal). Set CONFIG.IDLE_TIMEOUT_MS = 0 to disable.
      ═════════════════════════════════════════════════════════════════════ -->
 
+<!-- #57 / #265 (Neo, 2026-08-20 — Paul): DASHBOARD_BUILD_STAMP.
+     The FIRST occurrence in the file below is authoritative. This string
+     is bumped by hand every time we push the dashboard, and read by the
+     stale-copy watchdog to decide whether the operator is looking at a
+     cached-and-outdated tab. Format: YYYY-MM-DD-hhmmZ-feature-slug. -->
+<script>window.DASHBOARD_BUILD_STAMP = "2026-08-20-1615Z-neo-135-208-267";</script>
+
 <div id="qa-auth-container"></div>
 
 <script src="https://accounts.google.com/gsi/client" async defer></script>
@@ -903,13 +927,33 @@
     STORAGE_KEY: "qa_jwt",
     STORAGE_USER_KEY: "qa_user",
     // Idle timeout — signs the operator out after N ms of no activity.
-    // 15 min matches the "currently signed in" definition used elsewhere.
-    // Warning modal appears N ms before expiry with a "Stay signed in" CTA.
+    //
+    // #135 (Neo, 2026-08-20 — Paul):
+    //   "Two hours of inactivity, not four — this screen shows casualty
+    //    locations and rescue codes, and it will run on shared
+    //    workstations. But: the dashboard must NEVER sign an operator
+    //    out while an earthquake alert is live and unresolved.
+    //    Suspend the idle timer entirely whenever there is an active
+    //    alert with anyone still unanswered."
+    //
+    // 2h is long enough to survive coffee + a phone call + admin work,
+    // short enough that a lost laptop does not stay signed in overnight.
+    // The active-alert suspend is enforced by the /admin/incident-status
+    // poll below — while that endpoint returns active=true, the timer
+    // is stopped and a small banner explains why.
+    //
+    // Warning modal appears N ms before expiry with a "Stay signed in"
+    // CTA and a 60s countdown so a stray touch is never a sign-out.
+    //
     // Set IDLE_TIMEOUT_MS to 0 to disable entirely (not recommended on
-    // shared workstations — this is what closes the "walked-away-from-desk"
-    // gap in the per-user attribution model).
-    IDLE_TIMEOUT_MS: 15 * 60 * 1000,
+    // shared workstations — this is what closes the "walked-away-from-
+    // desk" gap in the per-user attribution model).
+    IDLE_TIMEOUT_MS: 2 * 60 * 60 * 1000,
     IDLE_WARNING_MS: 60 * 1000,
+    // #135: how often to poll the incident-active signal. 30s is
+    // small enough that a stand-down resumes idle in well under a
+    // minute; large enough that we're not hammering the server.
+    INCIDENT_POLL_MS: 30 * 1000,
   };
 
   // ── State ─────────────────────────────────────────────────────────────
@@ -1529,6 +1573,16 @@
           '<div class="qa-idle-icon" aria-hidden="true">⏱️</div>' +
           '<div class="qa-idle-title">Still there?</div>' +
           '<div class="qa-idle-body">You\'ll be signed out for inactivity to protect the audit trail. Move your mouse or press any key to stay signed in.</div>' +
+          // #135 (Neo, 2026-08-20 — Paul): "if an operator was
+          // part-way through an action when the session ends, never
+          // silently discard it — say plainly what was not saved."
+          // This slot is populated in showWarning() with a short
+          // named list of open forms/dialogs whose input would be
+          // lost. Empty in the common case, prominent only when it
+          // matters.
+          '<div class="qa-idle-inflight" style="display:none; margin:0 0 10px; padding:8px 10px;' +
+            ' background:#fff4bd; border:1px solid #d19b18; border-radius:4px;' +
+            ' color:#5c3d00; font-size:12px; line-height:1.4; text-align:left"></div>' +
           '<div class="qa-idle-countdown" aria-live="polite">60</div>' +
           '<button type="button" class="qa-idle-btn">Stay signed in</button>' +
         '</div>';
@@ -1536,9 +1590,56 @@
       countdownEl = backdropEl.querySelector(".qa-idle-countdown");
       backdropEl.querySelector(".qa-idle-btn").addEventListener("click", extendSession);
     }
+    // #135 (Neo, 2026-08-20): named list of in-flight work that
+    // would be discarded by a sign-out right now. Used both in the
+    // idle-warning modal (proactively) and by the post-sign-out
+    // banner (retroactively) so the operator is never told
+    // "signed out" without also being told what was lost.
+    function inflightItems() {
+      const items = [];
+      // 1. Any open typed-confirm modal (SIREN / STANDDOWN / WIPE /
+      //    delete-user / role-change). Detected by the modal
+      //    backdrop having the `qa-um-show` class AND the text input
+      //    being visible with non-empty content — an empty modal is
+      //    a decision-in-progress; typed content is real work.
+      const cm = document.getElementById("qa-um-modal-bg");
+      if (cm && cm.classList.contains("qa-um-show")) {
+        const title = (document.getElementById("qa-um-modal-title") || {}).textContent || "";
+        items.push("Confirmation dialog open: “" + (title || "Confirm") + "”");
+      }
+      // 2. Any focused text/textarea input with non-empty value.
+      //    Covers the notes fields, expiry pickers, add-user email,
+      //    etc.
+      const active = document.activeElement;
+      if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA")) {
+        if (active.value && active.value.trim().length > 0) {
+          const label = active.getAttribute("aria-label") ||
+                        active.getAttribute("placeholder") ||
+                        active.id || "an input field";
+          items.push("Text in " + label + " (would be lost on sign-out)");
+        }
+      }
+      return items;
+    }
     function showWarning() {
       ensureModal();
       backdropEl.classList.add("show");
+      const inflightEl = backdropEl.querySelector(".qa-idle-inflight");
+      const items = inflightItems();
+      if (inflightEl) {
+        if (items.length) {
+          inflightEl.innerHTML =
+            '<b>You are part-way through something on this page:</b>' +
+            '<ul style="margin:6px 0 0 18px; padding:0">' +
+            items.map(function (s) { return '<li>' + s.replace(/&/g,'&amp;').replace(/</g,'&lt;') + '</li>'; }).join('') +
+            '</ul>' +
+            'If you don\'t respond in 60s, this input will be lost.';
+          inflightEl.style.display = "block";
+        } else {
+          inflightEl.style.display = "none";
+          inflightEl.innerHTML = "";
+        }
+      }
       let secondsLeft = Math.ceil(CONFIG.IDLE_WARNING_MS / 1000);
       countdownEl.textContent = String(secondsLeft);
       if (countdownInterval) clearInterval(countdownInterval);
@@ -1567,14 +1668,70 @@
       restart();
     }
     async function expire() {
+      // #135 (Neo, 2026-08-20 — Paul): "if an operator was part-way
+      // through an action when the session ends, never silently
+      // discard it — say plainly what was not saved." Capture the
+      // in-flight items BEFORE we sign out (sign-out wipes the DOM),
+      // then use them to render a post-sign-out banner over the
+      // signed-out view so the operator can see, verbatim, what
+      // input was lost.
+      const lost = inflightItems();
       hideWarning();
       stop();
       // Same path as manual sign-out — server-side audit line + client clear.
       try { await window.qaAuth.signOut(); } catch (_) {}
+      if (lost.length) {
+        try { _renderInflightLossNotice(lost); } catch (_) {}
+      }
+    }
+    // #135: post-sign-out red banner listing what was NOT saved.
+    // Rendered on top of the signed-out view. Auto-dismisses on
+    // sign-in (renderChip clears the whole container), or when the
+    // operator clicks the close button.
+    function _renderInflightLossNotice(items) {
+      const existing = document.getElementById("qa-inflight-lost");
+      if (existing) existing.remove();
+      const b = document.createElement("div");
+      b.id = "qa-inflight-lost";
+      b.setAttribute("role", "alert");
+      b.style.cssText = [
+        "position:fixed", "top:44px", "left:16px", "right:16px",
+        "z-index:9998", "padding:12px 16px 12px 16px",
+        "background:#fdecc8", "border:1px solid #d19b18",
+        "border-radius:6px", "color:#5c3d00",
+        "font-size:13px", "line-height:1.5",
+        "box-shadow:0 4px 10px rgba(0,0,0,0.12)",
+        "max-width:640px", "margin:0 auto",
+      ].join(";");
+      const list = items.map(function (s) {
+        return '<li>' + String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;') + '</li>';
+      }).join("");
+      b.innerHTML =
+        '<div style="display:flex; gap:10px; align-items:flex-start">' +
+          '<div style="flex:1">' +
+            '<b>Signed out for inactivity.</b> You were part-way through ' +
+            'something and it was NOT saved:' +
+            '<ul style="margin:6px 0 0 20px; padding:0">' + list + '</ul>' +
+          '</div>' +
+          '<button type="button" aria-label="Dismiss" ' +
+            'style="border:0; background:transparent; color:#5c3d00; ' +
+            'font-size:20px; line-height:1; cursor:pointer; ' +
+            'padding:0 4px">×</button>' +
+        '</div>';
+      document.body.appendChild(b);
+      b.querySelector("button").addEventListener("click", function () { b.remove(); });
     }
     function scheduleExpiry() {
       if (expiryTimer) clearTimeout(expiryTimer);
       if (warningTimer) clearTimeout(warningTimer);
+      // #135 (Neo, 2026-08-20 — Paul): while an alert is live and
+      // unresolved, DO NOT arm the expiry — a mid-incident sign-out
+      // is a safety failure, not an inconvenience. The
+      // /admin/incident-status poller below flips
+      // `_incidentSuspended` on/off; when it goes true we just
+      // return here and no timer fires. When it goes false again a
+      // fresh call to scheduleExpiry() re-arms from scratch.
+      if (_incidentSuspended) return;
       const timeout = CONFIG.IDLE_TIMEOUT_MS;
       const warnAt = timeout - CONFIG.IDLE_WARNING_MS;
       if (warnAt > 0) {
@@ -1619,25 +1776,219 @@
       if (countdownInterval) { clearInterval(countdownInterval); countdownInterval = null; }
       hideWarning();
     }
-    return { start, stop, restart, expire, _debug: {
+
+    // #135 (Neo, 2026-08-20 — Paul): active-alert suspend.
+    // Managed by the incident-status poll below (fires every
+    // INCIDENT_POLL_MS). setSuspended(true) freezes the timer; false
+    // re-arms it from scratch. The banner element is updated by the
+    // poller — we only own timer state here.
+    let _incidentSuspended = false;
+    function setSuspended(next) {
+      const was = _incidentSuspended;
+      _incidentSuspended = !!next;
+      if (_incidentSuspended && !was) {
+        // Freeze — hide any active warning (a live alert must not
+        // be interrupted by a "you were about to be signed out"
+        // countdown; the operator is the LAST person we want
+        // distracting mid-incident).
+        if (expiryTimer)   { clearTimeout(expiryTimer);   expiryTimer = null; }
+        if (warningTimer)  { clearTimeout(warningTimer);  warningTimer = null; }
+        hideWarning();
+      } else if (!_incidentSuspended && was) {
+        // Alert closed → resume with a full-length timeout, exactly
+        // like a fresh sign-in. If the operator has been idle
+        // throughout the incident we do NOT immediately sign them
+        // out — they get a full 2h to keep working.
+        if (getStoredJwt()) {
+          lastActivity = Date.now();
+          scheduleExpiry();
+        }
+      }
+    }
+    return { start, stop, restart, expire, setSuspended, _debug: {
       getLastActivity: () => lastActivity,
       isWarningShowing: () => backdropEl && backdropEl.classList.contains("show"),
+      isSuspended: () => _incidentSuspended,
     }};
+  })();
+
+  // #135 (Neo, 2026-08-20 — Paul): incident-status poller.
+  // Reads /api/admin/incident-status every INCIDENT_POLL_MS. While
+  // active=true, the idle timer is frozen and a small banner tells
+  // the operator why. Failing this call NEVER signs them out — a
+  // network blip or transient 5xx keeps the LAST-KNOWN suspended
+  // state (falsely-suspended is safer than falsely-signed-out during
+  // an incident).
+  const IncidentWatch = (function () {
+    let bannerEl = null;
+    let pollTimer = null;
+    let lastKnown = null; // null | true | false
+    function ensureBanner() {
+      if (bannerEl) return bannerEl;
+      bannerEl = document.createElement("div");
+      bannerEl.id = "qa-incident-live-banner";
+      bannerEl.setAttribute("role", "status");
+      bannerEl.setAttribute("aria-live", "polite");
+      bannerEl.style.cssText = [
+        "display:none", "position:fixed", "top:0", "left:0", "right:0",
+        "z-index:9999", "padding:8px 16px",
+        "background:#5a0f13", "color:#fff", "font-size:13px",
+        "font-weight:600", "text-align:center",
+        "box-shadow:0 2px 6px rgba(0,0,0,0.25)",
+      ].join(";");
+      document.body.appendChild(bannerEl);
+      return bannerEl;
+    }
+    async function tick() {
+      if (!getStoredJwt()) return;
+      try {
+        const r = await window.qaApi(
+          "/api/admin/incident-status",
+          { cache: "no-store" },
+        );
+        if (!r.ok) return; // Keep last-known state on transient failure.
+        const d = await r.json();
+        const active = !!d.active;
+        if (active !== lastKnown) {
+          lastKnown = active;
+          IdleTimeout.setSuspended(active);
+        }
+        const b = ensureBanner();
+        if (active) {
+          b.textContent = "⚠ Alert live — idle sign-out suspended. " +
+            (d.reason || "Send a stand-down to re-arm.");
+          b.style.display = "block";
+        } else {
+          b.style.display = "none";
+        }
+      } catch (_) {
+        // Network error — keep last-known state; DO NOT flip to
+        // un-suspended (that could sign the operator out mid-incident
+        // if the connection blip aligned with the poll).
+      }
+    }
+    function start() {
+      if (pollTimer) return;
+      tick();
+      pollTimer = setInterval(tick, CONFIG.INCIDENT_POLL_MS);
+    }
+    function stop() {
+      if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+      if (bannerEl) bannerEl.style.display = "none";
+      lastKnown = null;
+    }
+    return { start, stop, _tickNow: tick };
   })();
 
   // Wire idle timeout to auth state changes: start on sign-in, stop on
   // sign-out. onChange fires on every setStored() call, so we just check
   // "signed in?" each time and start/stop accordingly.
   window.__qaIdleTimeout = IdleTimeout;
+  window.__qaIncidentWatch = IncidentWatch;
   listeners.add((user) => {
-    if (user) IdleTimeout.start();
-    else IdleTimeout.stop();
+    if (user) { IdleTimeout.start(); IncidentWatch.start(); }
+    else      { IdleTimeout.stop();  IncidentWatch.stop();  }
   });
+
+  // #57 / #265 (Neo, 2026-08-20 — Paul): stale-copy self-check.
+  //   "Your fix is live and works, but only after a hard refresh. Before
+  //    that the old page was still being served. A fix that a user can't
+  //    receive is not a fix."
+  //
+  // Belt-and-braces cache-busting: the `<meta http-equiv>` cache tags in
+  // the head force a conditional GET on every load, and this poll
+  // detects the case where the operator hasn't reloaded at all (kept
+  // the same tab open across a deploy). Every 5 minutes we re-fetch
+  // /index.html WITH a cachebuster query and extract the fresh
+  // DASHBOARD_BUILD_STAMP. If it differs from the stamp baked into
+  // THIS running page, we render an amber banner offering an
+  // in-place reload — no red-flash, no silent lag.
+  //
+  // Non-blocking: the check runs fire-and-forget; a network hiccup
+  // never signs anyone out. The reload banner is dismissable.
+  const StaleCopyWatch = (function () {
+    let bannerEl = null;
+    let pollTimer = null;
+    let localStamp = window.DASHBOARD_BUILD_STAMP || null;
+    const POLL_MS = 5 * 60 * 1000;
+    function ensureBanner(remoteStamp) {
+      if (bannerEl) { bannerEl.style.display = "flex"; return bannerEl; }
+      bannerEl = document.createElement("div");
+      bannerEl.id = "qa-stale-copy-banner";
+      bannerEl.setAttribute("role", "status");
+      bannerEl.style.cssText = [
+        "position:fixed", "bottom:16px", "left:16px", "right:16px",
+        "z-index:9997", "padding:10px 14px",
+        "background:#fdecc8", "border:1px solid #d19b18", "border-radius:6px",
+        "color:#5c3d00", "font-size:13px", "line-height:1.4",
+        "display:flex", "gap:12px", "align-items:center",
+        "max-width:640px", "margin:0 auto",
+        "box-shadow:0 4px 10px rgba(0,0,0,0.12)",
+      ].join(";");
+      bannerEl.innerHTML =
+        '<span style="flex:1"><b>A newer dashboard has been deployed.</b> ' +
+        'This tab is on ' + escapeStamp(localStamp) + '; the current build is ' +
+        escapeStamp(remoteStamp) + '. ' +
+        'Reload to get the latest safety fixes.</span>' +
+        '<button type="button" ' +
+          'style="padding:6px 12px; background:#B0141A; color:#fff; ' +
+          'border:0; border-radius:4px; font-weight:700; cursor:pointer">' +
+          'Reload</button>' +
+        '<button type="button" aria-label="Dismiss" ' +
+          'style="border:0; background:transparent; color:#5c3d00; ' +
+          'font-size:20px; line-height:1; cursor:pointer">×</button>';
+      document.body.appendChild(bannerEl);
+      const buttons = bannerEl.querySelectorAll("button");
+      buttons[0].addEventListener("click", function () {
+        // Force full reload bypassing cache (equivalent to Cmd+Shift+R).
+        window.location.reload();
+      });
+      buttons[1].addEventListener("click", function () {
+        bannerEl.style.display = "none";
+      });
+      return bannerEl;
+    }
+    function escapeStamp(s) {
+      return String(s || "unknown").replace(/[<>&"]/g, function (c) {
+        return { '<':'&lt;', '>':'&gt;', '&':'&amp;', '"':'&quot;' }[c];
+      });
+    }
+    async function tick() {
+      if (!localStamp) return; // Nothing to compare.
+      try {
+        const r = await fetch(
+          window.location.pathname + "?_qgstale=" + Date.now(),
+          { cache: "no-store", credentials: "same-origin" },
+        );
+        if (!r.ok) return;
+        const html = await r.text();
+        // Extract the FIRST DASHBOARD_BUILD_STAMP occurrence — same
+        // one we bake in at the top of body. Regex keeps this cheap
+        // (no full HTML parse) and forgiving of surrounding markup.
+        const m = html.match(/DASHBOARD_BUILD_STAMP\s*=\s*"([^"]+)"/);
+        const remote = m ? m[1] : null;
+        if (remote && remote !== localStamp) {
+          ensureBanner(remote);
+        }
+      } catch (_) { /* network hiccup — try again next tick */ }
+    }
+    function start() {
+      if (pollTimer) return;
+      // First check after 30s, not immediately, so a fresh page load
+      // doesn't spend its first second fetching itself again.
+      setTimeout(tick, 30 * 1000);
+      pollTimer = setInterval(tick, POLL_MS);
+    }
+    function stop() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+    return { start, stop, _tickNow: tick };
+  })();
+  StaleCopyWatch.start();
 
   // ── Boot ──────────────────────────────────────────────────────────────
   renderChip();
   // Start the idle timer immediately if we booted with a cached JWT.
   IdleTimeout.start();
+  IncidentWatch.start();
   (async () => {
     if (!getStoredJwt()) return;
     try {
@@ -1950,12 +2301,62 @@
       <div class="qa-pv-grid">
         <div class="qa-pv-card">
           <h3>Enrolled devices (${enrolled.size})</h3>
-          ${enrolled.size === 0 ? '<div class="qa-pv-empty">No devices enrolled yet.</div>' :
-            Array.from(enrolled).map(id => `
-              <div class="qa-pv-row">
-                <code>${escapeHtml(id)}</code>
-                <button class="qa-pv-btn-remove" data-action="remove" data-id="${escapeHtml(id)}">Remove</button>
-              </div>`).join("")}
+          ${(function () {
+            // #266 follow-up (Neo, 2026-08-20 — Paul): annotate each
+            // enrolled row with last-seen + a "no longer exists"
+            // marker cross-referenced against push_devices. And if
+            // preview mode is ON but every enrolled device is
+            // unreachable, surface a prominent warning so an operator
+            // never assumes the panel is "silently fine" while
+            // notices are being sent into the void.
+            const reg = state.registryByDevice || {};
+            const rows = Array.from(enrolled);
+            if (rows.length === 0) {
+              return '<div class="qa-pv-empty">No devices enrolled yet.</div>';
+            }
+            let liveCount = 0;
+            const rowHtml = rows.map(function (id) {
+              const r = reg[id];
+              let status = "", statusColor = "", meta = "";
+              if (!r) {
+                // Not in registry at all → the device_id was purged
+                // or never actually registered. THIS is exactly the
+                // stale-enrolment case Paul screenshotted.
+                status = "no longer exists in the registry";
+                statusColor = "#c21818";
+                meta = "Preview notices sent to this id go nowhere.";
+              } else if (r.dead_token) {
+                status = "unreachable (dead token)";
+                statusColor = "#c21818";
+                meta = "APNs stopped accepting this token — remove and re-add after re-install.";
+              } else {
+                status = "live";
+                statusColor = "#1F8A3A";
+                meta = "Last seen " + (r.last_seen_at ? timeAgo(r.last_seen_at) : "unknown");
+                liveCount += 1;
+              }
+              return (
+                '<div class="qa-pv-row">' +
+                  '<div>' +
+                    '<code>' + escapeHtml(id) + '</code>' +
+                    '<div class="qa-pv-meta" style="color:' + statusColor + '"><b>' + status + '</b></div>' +
+                    '<div class="qa-pv-meta">' + escapeHtml(meta) + '</div>' +
+                  '</div>' +
+                  '<button class="qa-pv-btn-remove" data-action="remove" data-id="' + escapeHtml(id) + '">Remove</button>' +
+                '</div>'
+              );
+            }).join("");
+            const allDead = enabled && rows.length > 0 && liveCount === 0;
+            const banner = allDead
+              ? ('<div style="margin:6px 0 10px; padding:10px 12px; ' +
+                 'background:#fdecc8; border:1px solid #d19b18; ' +
+                 'border-radius:6px; color:#5c3d00; font-size:13px; line-height:1.4">' +
+                 '<b>⚠ Preview mode is ON but every enrolled device is unreachable.</b> ' +
+                 'No preview notice can be delivered until you enrol a live device from the panel on the right.' +
+                 '</div>')
+              : "";
+            return banner + rowHtml;
+          })()}
         </div>
         <div class="qa-pv-card">
           <h3>Recent iOS registrations (${unenrolled.length})</h3>
@@ -2071,14 +2472,43 @@
   // ── Data loading ─────────────────────────────────────────────────────
   async function refresh() {
     try {
-      const [cfg, cands, recent] = await Promise.all([
+      // #266 follow-up (Neo, 2026-08-20 — Paul):
+      //   "The Enrolled devices list held qg-1786015151886-2zbf6xjy,
+      //    an old install of mine that no longer exists. My live phone
+      //    was never enrolled, so preview notices were being sent to
+      //    a dead device. Show last-seen date and a clear 'this device
+      //    no longer exists' marker in the Enrolled devices list,
+      //    same as you did for the Registered devices panel; make it
+      //    obvious on the dashboard when preview mode is enabled but
+      //    every enrolled device is dead."
+      //
+      // We fetch device-registry in the same round-trip so the
+      // enrolled-devices render can cross-reference each enrolled id
+      // against the live push_devices collection. A candidate LOOKS
+      // fine in the config; only the registry tells us whether that
+      // token is actually reachable today.
+      const [cfg, cands, recent, registry] = await Promise.all([
         apiGet(`/api/admin/emsc/preview/config?country_code=${COUNTRY}`),
         apiGet("/api/admin/emsc/preview/candidates?limit=20"),
         apiGet("/api/admin/emsc/preview/recent?limit=20"),
+        apiGet("/api/admin/device-registry").catch(function () { return null; }),
       ]);
       state.config = cfg;
       state.candidates = cands.candidates || [];
       state.recent = recent.notifications || [];
+      // Build a device_id → { last_seen_at, dead_token, exists } map
+      // from the registry — used by render() to annotate enrolled rows.
+      state.registryByDevice = {};
+      if (registry && Array.isArray(registry.devices)) {
+        registry.devices.forEach(function (d) {
+          state.registryByDevice[d.device_id || d.user_id] = {
+            last_seen_at: d.updated_at || d.last_seen_at || null,
+            dead_token: !!d.dead_token,
+            platform: d.platform || null,
+            status: d.status || null,
+          };
+        });
+      }
       render();
     } catch (err) {
       container.innerHTML = `<div class="qa-pv-banner err">Failed to load preview config: ${escapeHtml(err.message || String(err))}</div>`;
@@ -2434,6 +2864,15 @@
     <p id="qa-um-modal-body"></p>
     <input type="text" id="qa-um-modal-input" style="display:none" autocomplete="off" />
     <input type="datetime-local" id="qa-um-modal-datetime" style="display:none" />
+    <!-- #267 (Neo, 2026-08-20 — Paul): plain-English feedback slot so
+         a mismatched typed-confirmation is never a silent red flash.
+         Empty in normal state; populated by confirmTyping() below with
+         either a case/whitespace hint before the operator has clicked
+         Confirm, or the mismatch message when they do. -->
+    <p id="qa-um-modal-error" role="alert" aria-live="polite"
+       style="display:none; margin:6px 0 12px; padding:8px 10px;
+              background:#fbe4e6; border:1px solid #d9535a; border-radius:4px;
+              color:#5a0f13; font-size:12px; line-height:1.4"></p>
     <div class="qa-um-modal-actions">
       <button class="qa-um-action-btn" id="qa-um-modal-cancel">Cancel</button>
       <button class="qa-um-action-btn qa-um-primary" id="qa-um-modal-confirm">Confirm</button>
@@ -2460,6 +2899,7 @@
   const modalBody  = document.getElementById('qa-um-modal-body');
   const modalInput = document.getElementById('qa-um-modal-input');
   const modalDate  = document.getElementById('qa-um-modal-datetime');
+  const modalError = document.getElementById('qa-um-modal-error');
   const modalCancel  = document.getElementById('qa-um-modal-cancel');
   const modalConfirm = document.getElementById('qa-um-modal-confirm');
 
@@ -2496,26 +2936,88 @@
     modalInput.style.display = 'none';
     modalDate.style.display  = 'none';
     modalInput.value = ''; modalDate.value = '';
+    // #267: reset the plain-English error slot every close so the
+    // next open starts clean.
+    if (modalError) { modalError.style.display = 'none'; modalError.textContent = ''; }
     if (pendingResolve) { const r = pendingResolve; pendingResolve = null; r(value); }
   }
   modalCancel.addEventListener('click', function () { closeModal(null); });
   modalBg.addEventListener('click', function (e) { if (e.target === modalBg) closeModal(null); });
 
-  function confirmTyping(title, body, expectedString) {
+  function confirmTyping(title, body, expectedString, actionVerbPhrase) {
+    // #267 (Neo, 2026-08-20 — Paul):
+    //   "The trigger-alert confirmation box rejects a wrong phrase
+    //    silently — just a brief red flash, no message. I typed it in
+    //    lowercase and got nothing. I assumed the button was broken."
+    //
+    // Three changes rolled in here:
+    //   1. Case-insensitive + trim(): match the backend's `.strip().upper()`
+    //      contract, so the client and server agree on "close enough" —
+    //      no more "you typed the right word in the wrong case, we said
+    //      nothing".
+    //   2. Plain-English message on mismatch, INSIDE the modal, naming
+    //      the phrase the operator was asked to type and what the
+    //      action would have done. Replaces the silent red flash.
+    //   3. Enter to submit — the input is already focused; making
+    //      the operator reach for the mouse to press Confirm was the
+    //      hidden second cost of the silent flash.
+    //
+    // `expectedString`  — the phrase to type (already the short form
+    //                     from #267: SIREN / STANDDOWN / WIPE / etc.).
+    // `actionVerbPhrase`— what the action DOES ("send the alert",
+    //                     "recall this alert", "erase every registered
+    //                     device"). Optional; used to build the
+    //                     mismatch message. Falls back to a generic
+    //                     "continue" if a caller has not been updated.
     return new Promise(function (resolve) {
       modalTitle.textContent = title;
       modalBody.textContent  = body;
       modalInput.style.display = 'block';
       modalInput.placeholder = 'Type: ' + expectedString;
+      modalInput.value = '';
       modalDate.style.display = 'none';
+      if (modalError) { modalError.style.display = 'none'; modalError.textContent = ''; }
       modalBg.classList.add('qa-um-show');
       pendingResolve = resolve;
       modalConfirm.textContent = 'Confirm';
-      modalConfirm.onclick = function () {
-        if (modalInput.value.trim() === expectedString) { closeModal(true); }
-        else {
-          modalInput.style.borderColor = '#b0141a';
-          setTimeout(function () { modalInput.style.borderColor = ''; }, 800);
+
+      const verb = (typeof actionVerbPhrase === 'string' && actionVerbPhrase)
+        ? actionVerbPhrase : 'continue';
+
+      function matches() {
+        // Case-insensitive + whitespace-tolerant on both sides, same
+        // contract as the backend. A stressed operator typing under
+        // pressure fails on shift-key differences and stray spaces —
+        // neither is a security signal, both add zero friction to the
+        // intent test the typed confirmation exists to make.
+        return modalInput.value.trim().toUpperCase() ===
+               String(expectedString).trim().toUpperCase();
+      }
+
+      function tryConfirm() {
+        if (matches()) { closeModal(true); return; }
+        // Never a silent flash — always name the phrase and the action.
+        if (modalError) {
+          modalError.textContent =
+            'That did not match. Type ' + expectedString + ' to ' + verb + '.';
+          modalError.style.display = 'block';
+        }
+        modalInput.style.borderColor = '#b0141a';
+        setTimeout(function () { modalInput.style.borderColor = ''; }, 800);
+        modalInput.focus();
+        modalInput.select();
+      }
+
+      modalConfirm.onclick = tryConfirm;
+      modalInput.onkeydown = function (ev) {
+        if (ev.key === 'Enter') { ev.preventDefault(); tryConfirm(); }
+        else if (ev.key === 'Escape') { closeModal(null); }
+        else if (modalError && modalError.style.display !== 'none') {
+          // As soon as the operator starts typing again, hide the
+          // stale mismatch message — never leave a red "wrong" note
+          // hanging while they clearly are trying to correct it.
+          modalError.style.display = 'none';
+          modalError.textContent = '';
         }
       };
       setTimeout(function () { modalInput.focus(); }, 50);
@@ -2671,7 +3173,7 @@
     if (act === 'delete') {
       const ok = await confirmTyping('Delete ' + email + '?',
         'This permanently removes the user from the allowlist. Their historical audit rows remain, but they lose all access immediately. Type the full email to confirm.',
-        email);
+        email, 'delete this user');
       if (ok) await doAction('delete', email);
     } else if (act === 'expiry') {
       const iso = await chooseDatetime('Set expiry for ' + email,
@@ -2683,7 +3185,7 @@
         (newrole === 'admin'
           ? 'Admins can add, disable, and delete other operators. Grant sparingly. Type the full email to confirm.'
           : 'Demoting from admin to operator removes their user-management access. Type the full email to confirm.'),
-        email);
+        email, 'change this user\u2019s role');
       if (ok) await doAction('role', email, {newrole: newrole});
     } else {
       await doAction(act, email);
@@ -6173,7 +6675,7 @@ window.QuakeAngelRescue = (function () {
     }
 
     var total = Number(preview && preview.total) || 0;
-    var phrase = (preview && preview.confirmation_phrase) || "SEND EARTHQUAKE ALERT TO ALL PHONES";
+    var phrase = (preview && preview.confirmation_phrase) || "SIREN";
 
     // Use the same type-to-confirm modal the delete-user flow uses so
     // an operator recognises the pattern from other high-stakes actions.
@@ -6202,7 +6704,12 @@ window.QuakeAngelRescue = (function () {
       // threw `ReferenceError: confirmTyping is not defined` outside
       // the UM IIFE. The catch below swallowed it, producing zero UI
       // feedback — the "silence" symptom. Now via window.confirmTyping.
-      ok = await window.confirmTyping("Send a real earthquake alert?", body, phrase);
+      ok = await window.confirmTyping(
+        "Send a real earthquake alert?",
+        body,
+        phrase,
+        "send the alert",
+      );
     } catch (err) {
       showBanner("err",
         "Couldn't open the confirmation dialog. Alert NOT sent. Reload the page and try again.",
@@ -6248,7 +6755,7 @@ window.QuakeAngelRescue = (function () {
       return;
     }
     var total = Number(preview && preview.total) || 0;
-    var phrase = (preview && preview.confirmation_phrase) || "STAND DOWN THIS ALERT";
+    var phrase = (preview && preview.confirmation_phrase) || "STANDDOWN";
     if (total === 0) {
       showBanner("err", "No phones are registered on this system. There is nothing to stand down.", 8000);
       return;
@@ -6269,7 +6776,12 @@ window.QuakeAngelRescue = (function () {
     try {
       // Batch 7 R5 hotfix (2026-08-19): via window.confirmTyping. See
       // the trigger-button handler above for the full explanation.
-      ok = await window.confirmTyping("Call the alert off?", body, phrase);
+      ok = await window.confirmTyping(
+        "Call the alert off?",
+        body,
+        phrase,
+        "recall this alert",
+      );
     } catch (err) {
       showBanner("err",
         "Couldn't open the confirmation dialog. Stand-down NOT sent. Reload the page and try again.",
@@ -6687,7 +7199,14 @@ window.QuakeAngelRescue = (function () {
   // for the real trigger-alert send — a full wipe of the registry
   // deserves the same friction as sending a real siren, not a plain
   // confirm() dialog someone can reflex-click through.
-  var DEVICE_PURGE_PHRASE = "CLEAR ALL DEVICES";
+  //
+  // #267 (Neo, 2026-08-20 — Paul): shortened from CLEAR ALL DEVICES to
+  // WIPE for the same reason SIREN replaced SEND EARTHQUAKE ALERT TO
+  // ALL PHONES — a long phrase becomes reflex to type, defeating the
+  // typed-confirmation friction. WIPE is one word, letter-distinct
+  // from SIREN and STANDDOWN so muscle memory from one cannot carry
+  // into another.
+  var DEVICE_PURGE_PHRASE = "WIPE";
 
   async function _onPurgeAllDevices() {
     if (!window.confirmTyping) {
@@ -6701,8 +7220,9 @@ window.QuakeAngelRescue = (function () {
         "This permanently deletes every row in the device registry — every " +
         "phone that would receive a real siren alert. Only do this to wipe " +
         "out your own test installs before real pilot testers start. " +
-        "Type the phrase exactly to continue.",
+        "Type " + DEVICE_PURGE_PHRASE + " below to continue.",
         DEVICE_PURGE_PHRASE,
+        "erase every registered device",
       );
     } catch (err) {
       try { console.error("confirmTyping threw:", err); } catch (_) {}

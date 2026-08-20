@@ -45,11 +45,16 @@ def test_missing_phrase_is_refused_with_plain_language():
     })
     assert r.status_code == 400, r.text
     body = r.json()
-    # The operator-facing message must say what to do next, not carry a
-    # bare status code or the word "unauthorised".
+    # #267 (Neo, 2026-08-20 — Paul): the operator-facing message must
+    # NAME the phrase and the consequence, not carry a bare status
+    # code or the word "unauthorised". Previous rule was "must contain
+    # 'confirmation' + 'type'" which paired with a longer opaque
+    # message — swapped for the more direct "did not match / Type
+    # SIREN / send the alert" phrasing.
     detail = (body.get("detail") or "").lower()
-    assert "confirmation" in detail
-    assert "type" in detail
+    assert "type siren" in detail, detail
+    assert "send the alert" in detail, detail
+    assert "did not match" in detail, detail
     assert "401" not in detail
     assert "unauthorised" not in detail
     assert "unauthorized" not in detail
@@ -87,14 +92,26 @@ def test_preview_endpoint_returns_phrase_and_counts():
 
 
 def test_phrase_never_leaked_in_400_response():
-    """The dashboard is responsible for showing the phrase in the
-    confirm dialog. The API must not spill it in the error, so an
-    unauthenticated / mistaken caller cannot fish it out of a 400."""
+    """#267 (Neo, 2026-08-20 — Paul): this invariant was INTENTIONALLY
+    reversed. The pre-#267 rule ("the API must not spill the phrase in
+    the error") was inherited from a longer phrase design where the
+    phrase carried some ambient concealment value. The new rule is the
+    opposite: the mismatch message NAMES the phrase, so a mistyped
+    attempt is never a silent flash on the dashboard.
+
+    The phrase now (SIREN) is a plain-English safety word that
+    describes what the action does; there is no attempt to conceal
+    it. This test is retained to make the reversal explicit — grep
+    for #267 to see the full rationale.
+    """
     r = client.post("/api/trigger-alert", headers=HDR, json={
         "confirmation_phrase": "wrong",
     })
     assert r.status_code == 400
     body_txt = r.text.upper()
-    # Only the CATEGORY of the phrase (e.g. "EARTHQUAKE") is safe;
-    # the FULL phrase must not appear.
-    assert TRIGGER_ALERT_CONFIRMATION not in body_txt
+    # New invariant: the phrase MUST appear in the mismatch detail so
+    # the operator knows what to type. Also verifies the action verb
+    # ("send the alert") is there so a stressed operator learns
+    # BOTH the word AND what it will do.
+    assert TRIGGER_ALERT_CONFIRMATION in body_txt, body_txt
+    assert "SEND THE ALERT" in body_txt, body_txt

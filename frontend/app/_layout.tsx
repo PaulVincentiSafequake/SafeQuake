@@ -1,11 +1,11 @@
-import { Stack, useRouter } from "expo-router";
+import { Stack, useRouter, usePathname } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
 import * as Notifications from "expo-notifications";
 import * as TaskManager from "expo-task-manager";
 import * as Linking from "expo-linking";
 import { setAudioModeAsync } from "expo-audio";
-import { useEffect } from "react";
-import { LogBox, Platform } from "react-native";
+import { useEffect, useRef } from "react";
+import { AppState, type AppStateStatus, LogBox, Platform } from "react-native";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
@@ -13,7 +13,12 @@ import { useIconFonts } from "@/src/hooks/use-icon-fonts";
 import { registerForPushNotifications } from "@/src/utils/push";
 import { getDeviceId } from "@/src/utils/checkin";
 import { flushRecheckQueue, submitRecheckAnswer } from "@/src/utils/recheck";
-import { clearActiveAlert, markAlertActive } from "@/src/utils/activeAlert";
+import {
+  clearActiveAlert,
+  markAlertActive,
+  shouldRedirectToAlert,
+  toAlertQuery,
+} from "@/src/utils/activeAlert";
 import { isAlertScreenMounted, publishAlert } from "@/src/utils/alertBus";
 import {
   cancelCheckInReminders,
@@ -175,12 +180,109 @@ if (Platform.OS !== "web") {
 export default function RootLayout() {
   const [loaded, error] = useIconFonts();
   const router = useRouter();
+  const pathname = usePathname();
 
   useEffect(() => {
     if (loaded || error) {
       SplashScreen.hideAsync();
     }
   }, [loaded, error]);
+
+  // ─────────────────────────────────────────────────────────────────
+  // #208 (Neo, 2026-08-20 — Paul):
+  //   "Locked my iPhone with the app already open on Diagnostics.
+  //    Triggered a real earthquake alert from the dashboard. The alert
+  //    arrived correctly on the locked phone; I tapped it; it took me
+  //    straight back to the Diagnostics screen I had been on — NOT the
+  //    check-in screen. The check-in screen must take over in every
+  //    resume case, on ANY screen, not just Home."
+  //
+  // Root cause (Neo audit): `shouldRedirectToAlert()` was called from
+  // ONE place only — `app/index.tsx` (Home). Every other screen was a
+  // dead end for a live unanswered alert. The notification tap handler
+  // in this file DOES call `router.push("/alert")`, but on a phone
+  // resuming from lock+background that push can race the router's
+  // ready state (iOS suspends JS while locked; on unlock the response
+  // fires before the router has finished mounting) and silently no-op.
+  // Home compensated because its own mount check fired again; every
+  // other screen has no such compensator.
+  //
+  // Fix: a SINGLE global watcher, in the root layout (which wraps
+  // every route), that reads `shouldRedirectToAlert()` and force-
+  // navigates to /alert whenever:
+  //   1. The layout mounts (covers cold start on any deep-link).
+  //   2. AppState transitions to "active" (covers every resume:
+  //      background→foreground, lock→unlock, phone-call return,
+  //      Control Center dismiss).
+  //   3. The pathname changes to anything except /alert or /recheck.
+  //      (Belt: catches the case where the tap handler pushed us
+  //       somewhere else because the payload lacked the critical
+  //       marker, and the persisted `activeAlert` record is the
+  //       authoritative "someone still owes an answer" signal.)
+  //
+  // Exemptions — we do NOT redirect if the user is already on:
+  //   - /alert   (they're on the check-in screen)
+  //   - /recheck (they're on the follow-up "still ok?" screen — a
+  //              different but equally valid answer path)
+  //   - /onboarding (first-launch flow; the alert would jump them
+  //                 into the middle of it with no permissions).
+  //
+  // Landing after answer: /alert already navigates to Home on submit
+  // (via router.replace("/") on the "sent" transition). We use
+  // `router.replace` here too — never `router.push` — so the back
+  // stack does not accumulate a Diagnostics screen underneath /alert,
+  // which would let the user swipe-back into the very screen they
+  // were rescued from.
+  const lastRedirectedAt = useRef<number>(0);
+  useEffect(() => {
+    if (Platform.OS === "web") return;
+    let cancelled = false;
+
+    const checkAndRedirect = () => {
+      // Don't stack a redirect on top of a redirect we just did — the
+      // AppState listener and the pathname effect can both fire within
+      // a few ms during a lock→unlock transition. 750ms is longer than
+      // any legitimate navigation and short enough that a fresh alert
+      // 1s later still gets picked up.
+      if (Date.now() - lastRedirectedAt.current < 750) return;
+      const currentPath = pathname ?? "";
+      // Already on a check-in screen — leave alone.
+      if (
+        currentPath === "/alert" ||
+        currentPath.startsWith("/alert?") ||
+        currentPath === "/recheck" ||
+        currentPath.startsWith("/recheck?") ||
+        currentPath === "/onboarding"
+      ) return;
+      shouldRedirectToAlert()
+        .then((a) => {
+          if (cancelled || !a) return;
+          lastRedirectedAt.current = Date.now();
+          router.replace(("/alert" + toAlertQuery(a)) as any);
+        })
+        .catch(() => { /* non-fatal: home screen still checks on its own path */ });
+    };
+
+    // (1) mount + every pathname change fires this effect.
+    checkAndRedirect();
+
+    // (2) resume-from-background — the specific case Paul screenshotted.
+    const sub = AppState.addEventListener("change", (next: AppStateStatus) => {
+      if (next === "active") {
+        // A tiny delay lets the router settle after iOS wakes JS —
+        // without it the very first replace() after unlock is
+        // occasionally a no-op (the same race that made the original
+        // tap handler's router.push land nowhere).
+        setTimeout(checkAndRedirect, 150);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+      sub.remove();
+    };
+  }, [router, pathname]);
+  // ─────────────────────────────────────────────────────────────────
 
   // Register push token on cold start (retries on every app open).
   //

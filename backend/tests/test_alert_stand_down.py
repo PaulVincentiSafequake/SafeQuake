@@ -46,7 +46,11 @@ def test_missing_phrase_is_refused_with_plain_language():
     })
     assert r.status_code == 400, r.text
     detail = (r.json().get("detail") or "").lower()
-    assert "confirmation" in detail and "type" in detail
+    # #267 (Neo, 2026-08-20 — Paul): plain-English mismatch that
+    # names both the phrase and the action.
+    assert "type standdown" in detail, detail
+    assert "recall this alert" in detail, detail
+    assert "did not match" in detail, detail
     assert "401" not in detail
     assert "unauthorised" not in detail
     assert "unauthorized" not in detail
@@ -69,9 +73,19 @@ def test_stand_down_phrase_is_distinct_from_trigger_phrase():
         STAND_DOWN_CONFIRMATION.strip().upper()
         != TRIGGER_ALERT_CONFIRMATION.strip().upper()
     )
+    # #267: the words must also be letter-distinct so muscle memory
+    # from one can't slide into the other. No 3-letter substring
+    # shared between them.
+    a = STAND_DOWN_CONFIRMATION.upper()
+    b = TRIGGER_ALERT_CONFIRMATION.upper()
+    for k in range(max(0, len(a) - 2)):
+        assert a[k:k + 3] not in b, (
+            f"muscle-memory collision: '{a[k:k+3]}' in both {a} and {b}"
+        )
 
 
 def test_stand_down_phrase_names_the_action():
-    """The phrase itself must describe what typing it does, in words
-    the operator recognises from the confirm dialog."""
-    assert "STAND DOWN" in STAND_DOWN_CONFIRMATION.upper()
+    """The phrase itself must describe what typing it does. #267
+    condensed it from "STAND DOWN THIS ALERT" to "STANDDOWN" — one
+    word, no space, still names the consequence."""
+    assert "STANDDOWN" == STAND_DOWN_CONFIRMATION.upper().strip()
