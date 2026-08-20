@@ -2372,6 +2372,62 @@ async def device_registry(
     }
 
 
+# #262 follow-up (2026-08-20 — Paul, pre-pilot cleanup): "clear all
+# current entries... these are all Paul's own repeated test installs...
+# only new registrations from real testers should appear going forward."
+#
+# Deliberately a HARD delete_many({}), unlike _prune_dead_devices in
+# apns.py. That soft-mark exists because IT runs automatically from an
+# unattended background job with no human per call — hard-deleting there
+# risked silently destroying a real device. THIS is the opposite shape:
+# one explicit, admin-only, human-typed-confirmation action, run once,
+# by a human who has already confirmed by hand that every current row
+# is his own test data. There is nothing to preserve.
+#
+# admin-only (not "admin","operator" like the read/preview endpoints) —
+# wiping the whole registry is a materially bigger blast radius than
+# viewing it or triggering one alert.
+DEVICE_PURGE_CONFIRMATION = "CLEAR ALL DEVICES"
+
+
+class DevicePurgeBody(BaseModel):
+    confirmation_phrase: Optional[str] = None
+
+
+@api_router.post("/admin/device-registry/purge-all")
+async def purge_all_devices(
+    body: DevicePurgeBody,
+    request: Request = None,
+    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
+):
+    principal = await resolve_principal(request, x_admin_token, ADMIN_TRIGGER_PASSWORD, db)
+    require_role(principal, "admin")
+
+    typed = (body.confirmation_phrase or "").strip().upper()
+    if typed != DEVICE_PURGE_CONFIRMATION:
+        raise HTTPException(
+            400,
+            f"Type the confirmation phrase exactly: \"{DEVICE_PURGE_CONFIRMATION}\".",
+        )
+
+    before = await db.push_devices.count_documents({})
+    res = await db.push_devices.delete_many({})
+    after = await db.push_devices.count_documents({})
+
+    logging.info(
+        f"[admin] #262 pre-pilot purge-all-devices by "
+        f"{audit_attribution(principal)}: {before} -> {after} "
+        f"({res.deleted_count} deleted)"
+    )
+    return {
+        "before": before,
+        "deleted": res.deleted_count,
+        "after": after,
+        "purged_at": _iso(datetime.now(timezone.utc)),
+        "purged_by": audit_attribution(principal),
+    }
+
+
 @api_router.post("/trigger-alert")
 async def trigger_alert(
     body: TriggerAlertBody,

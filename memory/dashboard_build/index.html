@@ -4359,8 +4359,10 @@ window.QuakeAngelRescue = (function () {
     count shown in the trigger confirmation, listed out. Read-only.
   </div>
   <div id="qg-devices-summary" style="font-size:13px; color:var(--text); margin-bottom:10px">Loading…</div>
-  <div style="margin-bottom:10px">
+  <div style="margin-bottom:10px; display:flex; gap:8px; align-items:center">
     <button type="button" id="qg-devices-refresh" class="qg-export-btn">Refresh</button>
+    <button type="button" id="qg-devices-purge-all" class="qg-export-btn"
+      style="display:none; color:#8a0f0f; border-color:#8a0f0f">Clear all devices</button>
   </div>
   <div id="qg-devices-body" style="max-height:360px; overflow:auto"></div>
 </details>
@@ -6401,10 +6403,15 @@ window.QuakeAngelRescue = (function () {
   var _devSummary = document.getElementById("qg-devices-summary");
   var _devBody    = document.getElementById("qg-devices-body");
   var _devRefresh = document.getElementById("qg-devices-refresh");
+  var _devPurgeBtn = document.getElementById("qg-devices-purge-all");
+
+  function _devRole() {
+    var u = window.qaAuth && window.qaAuth.user && window.qaAuth.user();
+    return (u && typeof u.role === "string") ? u.role.toLowerCase() : null;
+  }
 
   function _devSignedIn() {
-    var u = window.qaAuth && window.qaAuth.user && window.qaAuth.user();
-    var role = (u && typeof u.role === "string") ? u.role.toLowerCase() : null;
+    var role = _devRole();
     return role === "admin" || role === "operator";
   }
 
@@ -6459,6 +6466,9 @@ window.QuakeAngelRescue = (function () {
       return;
     }
     _devPanel.style.display = "";
+    if (_devPurgeBtn) {
+      _devPurgeBtn.style.display = (_devRole() === "admin") ? "" : "none";
+    }
     _devSummary.textContent = "Loading…";
     try {
       var r = await window.qaApi("/api/admin/device-registry", { cache: "no-store" });
@@ -6480,6 +6490,66 @@ window.QuakeAngelRescue = (function () {
     }
   }
 
+  // #262 pre-pilot cleanup: "clear all current entries... only new
+  // registrations from real testers should appear going forward."
+  // admin-only button (hidden entirely for operators, see _refreshDevices
+  // above), gated behind the same typed-confirmation pattern already used
+  // for the real trigger-alert send — a full wipe of the registry
+  // deserves the same friction as sending a real siren, not a plain
+  // confirm() dialog someone can reflex-click through.
+  var DEVICE_PURGE_PHRASE = "CLEAR ALL DEVICES";
+
+  async function _onPurgeAllDevices() {
+    if (!window.confirmTyping) {
+      window.alert("Confirmation dialog isn't available right now — reload and try again.");
+      return;
+    }
+    var ok = false;
+    try {
+      ok = await window.confirmTyping(
+        "Clear all registered devices?",
+        "This permanently deletes every row in the device registry — every " +
+        "phone that would receive a real siren alert. Only do this to wipe " +
+        "out your own test installs before real pilot testers start. " +
+        "Type the phrase exactly to continue.",
+        DEVICE_PURGE_PHRASE,
+      );
+    } catch (err) {
+      try { console.error("confirmTyping threw:", err); } catch (_) {}
+      return;
+    }
+    if (!ok) return;
+
+    _devPurgeBtn.disabled = true;
+    _devSummary.textContent = "Clearing…";
+    try {
+      var r = await window.qaApi("/api/admin/device-registry/purge-all", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirmation_phrase: DEVICE_PURGE_PHRASE }),
+      });
+      var body = await r.json().catch(function () { return {}; });
+      if (!r.ok) {
+        _devSummary.innerHTML = '<span style="color:#5a0f13">' +
+          window.qgFriendlyError(new Error(body.detail || ("HTTP " + r.status)), {
+            fallback: "The clear failed — nothing was deleted.",
+          }) + '</span>';
+        return;
+      }
+      _devSummary.innerHTML =
+        '<span style="color:#1a7a35; font-weight:600">Cleared: ' +
+        window.qgEsc(String(body.before)) + ' → ' + window.qgEsc(String(body.after)) +
+        ' rows (' + window.qgEsc(String(body.deleted)) + ' deleted).</span>';
+    } catch (e) {
+      _devSummary.innerHTML = '<span style="color:#5a0f13">' +
+        window.qgFriendlyError(e, { fallback: "The clear failed — nothing was deleted." }) +
+        '</span>';
+    } finally {
+      _devPurgeBtn.disabled = false;
+      await _refreshDevices();
+    }
+  }
+
   if (_devPanel) {
     _refreshDevices();
     if (window.qaAuth && window.qaAuth.onChange) {
@@ -6487,6 +6557,9 @@ window.QuakeAngelRescue = (function () {
     }
     if (_devRefresh) {
       _devRefresh.addEventListener("click", _refreshDevices);
+    }
+    if (_devPurgeBtn) {
+      _devPurgeBtn.addEventListener("click", _onPurgeAllDevices);
     }
   }
 })();
