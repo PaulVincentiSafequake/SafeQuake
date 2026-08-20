@@ -2388,6 +2388,16 @@
       setTimeout(function () { modalInput.focus(); }, 50);
     });
   }
+  // Batch 7 R5 hotfix (2026-08-19): expose the type-to-confirm modal
+  // on `window` so cross-IIFE callers (trigger-alert, stand-down)
+  // can use the SAME dialog as delete-user and change-role.
+  // Previously the trigger button's handler called bare
+  // `confirmTyping(...)` — which throws `ReferenceError` outside
+  // this IIFE — and the try/catch around it swallowed the error,
+  // producing zero visible feedback on the most safety-critical
+  // click in the product. Same shape as #219; also blocked Paul's
+  // Round 3 verification for #208, #205, #253, #250 and #245.
+  window.confirmTyping = confirmTyping;
   function chooseDatetime(title, body, defaultIsoDays) {
     return new Promise(function (resolve) {
       modalTitle.textContent = title; modalBody.textContent = body;
@@ -5933,6 +5943,35 @@ window.QuakeAngelRescue = (function () {
   }
 
   btn.addEventListener("click", async function onTriggerClick() {
+    // Batch 7 R5 hotfix (2026-08-19): silence-safety belt. A click on
+    // a life-safety button must NEVER produce no visible reaction.
+    // We latch a banner immediately, before any await; if any path
+    // below returns without showing its own message, the operator
+    // still sees this one and knows the click landed.
+    showBanner("ok", "Preparing confirmation…", 0);
+
+    // Guardrail: the confirm modal lives in a sibling IIFE that
+    // exposes itself on window. Missing means a truncated build or
+    // a script-order regression; either way the click must NOT die
+    // silently on that path (previously it did — hidden by the
+    // try/catch around confirmTyping — and that's exactly what
+    // blocked Paul's Round 3 verification).
+    if (typeof window.confirmTyping !== "function") {
+      showBanner("err",
+        "Confirmation dialog isn't loaded yet — reload the page and try again. Alert NOT sent.",
+        0);
+      return;
+    }
+    if (!window.qaApi) {
+      showBanner("err", "Auth not loaded — reload the page. Alert NOT sent.", 0);
+      return;
+    }
+    if (!window.qaAuth || !window.qaAuth.jwt()) {
+      showBanner("err", "Please sign in before triggering an alert. Alert NOT sent.", 6000);
+      if (window.qaAuth) window.qaAuth.signIn();
+      return;
+    }
+
     // #245 (Batch 7 R4): two-step confirmation. First we fetch the
     // live recipient count so the operator sees, in the dialog, how
     // many phones will siren. Then the operator must TYPE the phrase
@@ -5959,7 +5998,7 @@ window.QuakeAngelRescue = (function () {
     var total = Number(preview && preview.total) || 0;
     var phrase = (preview && preview.confirmation_phrase) || "SEND EARTHQUAKE ALERT TO ALL PHONES";
     if (total === 0) {
-      window.alert("No phones are registered on this system. There is nothing to broadcast to.");
+      showBanner("err", "No phones are registered on this system. There is nothing to broadcast to.", 8000);
       return;
     }
 
@@ -5972,9 +6011,26 @@ window.QuakeAngelRescue = (function () {
       "Type this phrase exactly to confirm:";
     var ok;
     try {
-      ok = await confirmTyping("Send a real earthquake alert?", body, phrase);
-    } catch (_) { ok = false; }
-    if (!ok) return;
+      // Batch 7 R5 hotfix: was a BARE `confirmTyping(...)` call, which
+      // threw `ReferenceError: confirmTyping is not defined` outside
+      // the UM IIFE. The catch below swallowed it, producing zero UI
+      // feedback — the "silence" symptom. Now via window.confirmTyping.
+      ok = await window.confirmTyping("Send a real earthquake alert?", body, phrase);
+    } catch (err) {
+      // If confirmTyping itself throws (unexpected DOM state), never
+      // fall through silently — tell the operator exactly what
+      // happened and that no alert was sent.
+      showBanner("err",
+        "Couldn't open the confirmation dialog. Alert NOT sent. Reload the page and try again.",
+        0);
+      try { console.error("confirmTyping threw:", err); } catch (_) {}
+      return;
+    }
+    if (!ok) {
+      // User cancelled or dismissed. Explicit cancel feedback.
+      showBanner("ok", "Cancelled — no alert was sent.", 4000);
+      return;
+    }
     // confirmTyping only resolves true when typed matches expected, so
     // we can send the phrase itself — it's what the operator typed.
     sendTriggerAlert(phrase);
@@ -6011,7 +6067,13 @@ window.QuakeAngelRescue = (function () {
     var total = Number(preview && preview.total) || 0;
     var phrase = (preview && preview.confirmation_phrase) || "STAND DOWN THIS ALERT";
     if (total === 0) {
-      window.alert("No phones are registered on this system. There is nothing to stand down.");
+      showBanner("err", "No phones are registered on this system. There is nothing to stand down.", 8000);
+      return;
+    }
+    if (typeof window.confirmTyping !== "function") {
+      showBanner("err",
+        "Confirmation dialog isn't loaded yet — reload the page and try again. Stand-down NOT sent.",
+        0);
       return;
     }
     var body =
@@ -6022,9 +6084,20 @@ window.QuakeAngelRescue = (function () {
       "Type this phrase exactly to confirm:";
     var ok;
     try {
-      ok = await confirmTyping("Call the alert off?", body, phrase);
-    } catch (_) { ok = false; }
-    if (!ok) return;
+      // Batch 7 R5 hotfix (2026-08-19): via window.confirmTyping. See
+      // the trigger-button handler above for the full explanation.
+      ok = await window.confirmTyping("Call the alert off?", body, phrase);
+    } catch (err) {
+      showBanner("err",
+        "Couldn't open the confirmation dialog. Stand-down NOT sent. Reload the page and try again.",
+        0);
+      try { console.error("confirmTyping threw:", err); } catch (_) {}
+      return;
+    }
+    if (!ok) {
+      showBanner("ok", "Cancelled — the alert was NOT called off.", 4000);
+      return;
+    }
 
     standDownBtn.disabled = true;
     showBanner("ok", "Standing down…", 0);
