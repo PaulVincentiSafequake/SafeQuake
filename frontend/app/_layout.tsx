@@ -25,6 +25,7 @@ import {
   ensureNotificationSetup,
   scheduleCheckInReminders,
 } from "@/src/utils/reminders";
+import { recordTap, buildLogFields, type TapSource } from "@/src/utils/tapProbe";
 
 const ONBOARDING_DONE_KEY = "quakeguard_onboarding_done";
 
@@ -342,7 +343,26 @@ export default function RootLayout() {
   useEffect(() => {
     if (Platform.OS === "web") return;
 
-    const handleTap = (data: Record<string, any>) => {
+    const handleTap = (
+      data: Record<string, any>,
+      tapCtx?: { source: TapSource; actionIdentifier: string | null },
+    ) => {
+      // #208 probe (v1.0.40): additive-only logger. Records the router
+      // decision made below for the last N taps so we can see, on the
+      // user's own phone, which routing key was (or wasn't) present in
+      // the payload iOS actually delivered. Does NOT alter routing.
+      const logChoice = (chosenRoute: string) => {
+        if (!tapCtx) return;
+        recordTap({
+          ts: new Date().toISOString(),
+          source: tapCtx.source,
+          actionIdentifier: tapCtx.actionIdentifier,
+          rawPayload: data,
+          ...buildLogFields(data),
+          chosenRoute,
+        }).catch(() => {});
+      };
+
       // #208 defence-in-depth. `kind` is the primary router key, but for the
       // re-check path — where the tap comes from someone who reported they
       // are trapped — we treat ANY of the following as a positive signal
@@ -375,7 +395,9 @@ export default function RootLayout() {
       if (looksLikeRecheck) {
         const params = new URLSearchParams();
         if (data.check_id != null) params.set("check_id", String(data.check_id));
-        router.push(("/recheck" + (params.toString() ? "?" + params.toString() : "")) as any);
+        const route = "/recheck" + (params.toString() ? "?" + params.toString() : "");
+        logChoice(route);
+        router.push(route as any);
         return;
       }
 
@@ -418,7 +440,9 @@ export default function RootLayout() {
         if (data.depth_km != null)    params.set("depth_km", String(data.depth_km));
         if (data.region != null)      params.set("region", String(data.region));
         if (data.unid != null)        params.set("unid", String(data.unid));
-        router.push(("/alert?" + params.toString()) as any);
+        const route = "/alert?" + params.toString();
+        logChoice(route);
+        router.push(route as any);
         return;
       }
 
@@ -433,7 +457,9 @@ export default function RootLayout() {
           magnitude: null, distance_km: null, intensity: null,
           region: null, unid: null,
         }).catch(() => {});
-        router.push("/alert?siren=0&reminder=1" as any);
+        const route = "/alert?siren=0&reminder=1";
+        logChoice(route);
+        router.push(route as any);
         return;
       }
 
@@ -462,6 +488,7 @@ export default function RootLayout() {
           stood_down_reason:
             typeof data.reason === "string" ? data.reason : "false_alarm",
         } as any);
+        logChoice("/");
         router.replace("/" as any);
         return;
       }
@@ -469,6 +496,7 @@ export default function RootLayout() {
       // External web links still open in the browser.
       const explicit = data.action_url || data.deeplink;
       if (explicit && typeof explicit === "string" && explicit.startsWith("http")) {
+        logChoice(`external:${explicit}`);
         Linking.openURL(explicit).catch(() => {});
         return;
       }
@@ -495,7 +523,9 @@ export default function RootLayout() {
         : typeof explicit === "string" && explicit !== "/alert"
           ? explicit
           : "/quake/unknown";
-      router.push((path + (qs ? "?" + qs : "")) as any);
+      const fallbackRoute = path + (qs ? "?" + qs : "");
+      logChoice(fallbackRoute);
+      router.push(fallbackRoute as any);
     };
 
     const tapSub = Notifications.addNotificationResponseReceivedListener(
@@ -517,7 +547,10 @@ export default function RootLayout() {
           return;
         }
 
-        handleTap(data);
+        handleTap(data, {
+          source: "response",
+          actionIdentifier: response.actionIdentifier ?? null,
+        });
       },
     );
 
@@ -610,7 +643,10 @@ export default function RootLayout() {
           .catch(() => {});
         return;
       }
-      handleTap(data);
+      handleTap(data, {
+        source: "lastResponse",
+        actionIdentifier: response.actionIdentifier ?? null,
+      });
     });
 
     return () => {

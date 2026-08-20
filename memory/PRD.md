@@ -1538,3 +1538,75 @@ Preview panel now cross-references each enrolled `device_id` against
     "That did not match. Type WIPE to erase every registered device."
   - "siren" / "  SIREN " / "SirEn" all accepted (case + trim).
   - 23 pytest cases pass across the three test files edited/added.
+
+---
+
+## v1.0.40 (build 40) — 2026-08-20 — #208 diagnostic probe
+
+Strict directive from Paul (Neo round): stop feature work; add ONLY
+the diagnostic probe requested. Do NOT alter routing logic, payload
+fallbacks, or the /quake/[unid] UI. Root cause of the wrong-screen
+lock-tap is currently unknown — probe existence is what makes the
+next fix evidence-based instead of another guess.
+
+### What ships in v1.0.40
+1. `src/utils/tapProbe.ts` — AsyncStorage-backed ring buffer, last
+   5 entries under key `diag.tapLog`. Fields per entry: ts,
+   source (`response` | `lastResponse`), actionIdentifier, rawPayload
+   (verbatim from `notification.request.content.data`), extracted
+   discriminators (kind, action_url, hasCheckId, hasMagnitude,
+   hasUnid), and the exact `chosenRoute` string handed to
+   router.push / router.replace.
+2. `app/_layout.tsx` — `handleTap()` gained an optional `tapCtx`
+   arg; each of its five router navigation branches (recheck /
+   critical / reminder / stand-down / external / informational
+   fallback) now calls a local `logChoice(route)` immediately
+   BEFORE the router call. Wiring points: the
+   `addNotificationResponseReceivedListener` callback tags entries
+   with source="response"; the cold-start
+   `getLastNotificationResponseAsync().then(...)` tags entries with
+   source="lastResponse". The foreground-receive path
+   (`addNotificationReceivedListener` for critical_alert while app
+   is open) intentionally does NOT log — it isn't a tap.
+3. `app/diag.tsx` — new visible section "For support — last 5
+   notification taps". Renders each entry as: `#idx · source · ts`
+   header, then `action:`, `kind + action_url`, `magnitude/unid/
+   check_id ✓/✗`, `chosenRoute:`, then the raw payload as
+   pretty-printed JSON. Two buttons: **Copy tap log** (uses
+   `expo-clipboard`, falls back to Share on error; prefixes the
+   text with a header identifying app version + build + entry
+   count + capture timestamp) and **Clear log** (disabled when
+   empty). Loaded via `getTapLog()` in the same `load()` promise
+   that already drives the screen, so pull-to-refresh updates it.
+
+### What v1.0.40 does NOT do
+- No changes to routing decisions in `_layout.tsx`.
+- No changes to the payload builder in `backend/apns.py`.
+- No changes to the /quake/[unid] UI (Magnitude/Location "—" issue
+  is intentionally deferred until the probe tells us which layer
+  is at fault).
+
+### How Paul verifies
+1. Build v1.0.40 build 40 to the phone.
+2. Trigger a critical alert from the dashboard. Lock the phone.
+3. Tap the notification from the lock screen (reproduces the #208
+   failure).
+4. Open the app → Diagnostics → scroll to "For support — last 5
+   notification taps" → Copy tap log → paste back to support.
+5. Log fields tell us definitively whether the payload delivered
+   to the device carried `kind: "critical_alert"` /
+   `action_url: "/alert"` / `magnitude`, and which of the five
+   router branches actually fired. That is the evidence needed to
+   fix the correct layer in v1.0.41.
+
+### Lint / type-check
+- ESLint clean on _layout.tsx, diag.tsx, tapProbe.ts.
+- `tsc --noEmit` produced only three pre-existing errors
+  (alert.tsx AudioPlayer.stop, index.tsx `Alert` name,
+  eventReadings.ts LocalSearchParams) — none introduced by this
+  probe.
+
+### Package added
+- `expo-clipboard@8.0.8` via `yarn expo install expo-clipboard`
+  (needed for the Copy button; the existing Share-based flow is
+  kept as fallback).

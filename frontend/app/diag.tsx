@@ -25,6 +25,12 @@ import {
 } from "@/src/utils/push";
 import { AppleWatchNote } from "@/src/components/AppleWatchNote";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import * as Clipboard from "expo-clipboard";
+import {
+  getTapLog,
+  clearTapLog,
+  type TapEntry,
+} from "@/src/utils/tapProbe";
 
 // Local siren assets — used only to verify that the audio files are correctly
 // bundled inside the native IPA/APK. `siren.caf` is the file APNs references
@@ -59,6 +65,11 @@ export default function DiagScreen() {
   // screen. New default: show a human "Is this working?" summary and
   // hide all technical rows behind an explicit reveal.
   const [showTech, setShowTech] = useState(false);
+  // #208 probe (v1.0.40, build 40): last 5 notification taps recorded
+  // by the layout's tap listener + cold-start lastResponse probe.
+  // Read-only for the user; they copy the whole log and paste it back
+  // to us so we can see the actual APNs payload iOS delivered.
+  const [tapLog, setTapLog] = useState<TapEntry[]>([]);
 
   // Test-siren players. We keep two independent players so the user can
   // validate BOTH bundled audio assets (the .caf used by APNs Critical
@@ -129,9 +140,10 @@ export default function DiagScreen() {
   }, [cafPlayer, mp3Player]);
 
   const load = useCallback(async () => {
-    const [i, p] = await Promise.all([
+    const [i, p, taps] = await Promise.all([
       getDiagInfo(),
       Notifications.getPermissionsAsync(),
+      getTapLog(),
     ]);
     setInfo(i);
     setPerm({
@@ -140,6 +152,7 @@ export default function DiagScreen() {
       canAskAgain: p.canAskAgain,
       ios: (p as any).ios ?? null,
     });
+    setTapLog(taps);
   }, []);
 
   useEffect(() => {
@@ -199,6 +212,38 @@ export default function DiagScreen() {
     await load();
     setRefreshing(false);
   }, [load]);
+
+  // #208 probe (v1.0.40): copy the entire tap log to the clipboard as
+  // pretty-printed JSON, with a short header so the user knows what
+  // they are pasting back. Falls back to Share on failure so the log
+  // is still recoverable.
+  const onCopyTapLog = useCallback(async () => {
+    const header = `Quake Angel v${info?.app_version ?? "?"} — #208 tap probe\n` +
+      `Device: ${info?.platform ?? "?"} build ${info?.build_number ?? "?"}\n` +
+      `Entries: ${tapLog.length} (newest first)\n` +
+      `Captured: ${new Date().toISOString()}\n\n`;
+    const body = tapLog.length
+      ? JSON.stringify(tapLog, null, 2)
+      : "(no notification taps recorded on this device yet)";
+    const text = header + body;
+    try {
+      await Clipboard.setStringAsync(text);
+      setMsg("Tap log copied to clipboard — paste it back to support.");
+    } catch {
+      try {
+        await Share.share({ message: text });
+        setMsg("Tap log opened in Share — send it back to support.");
+      } catch {
+        setMsg("Couldn't copy the tap log. Try again.");
+      }
+    }
+  }, [info?.app_version, info?.platform, info?.build_number, tapLog]);
+
+  const onClearTapLog = useCallback(async () => {
+    await clearTapLog();
+    setTapLog([]);
+    setMsg("Tap log cleared.");
+  }, []);
 
   return (
     <SafeAreaView style={styles.safe} edges={["top", "bottom"]}>
@@ -334,7 +379,7 @@ export default function DiagScreen() {
             label="What's fixed in it"
             value={
               (info?.app_version ?? "?") +
-              " — #208 unanswered-alert redirect now takes over from ANY screen on lock/unlock (moved into the app-wide layout, tracks AppState transitions), #266/#260 truthful registration status (single row driven by a server read-back, never local state), #208 R4 primary alert routes to check-in, #245 type-to-confirm on trigger, #199 clear-on-stand-down, #247 saved place no longer points at wrong city, #249 saved places on the map, #211 recency-ramp map key, #243 zoom in to epicentre, #250 not-responding wording, #252 human-first diagnostics, #244 honest test-button wording."
+              " — #208 mobile probe: last 5 notification taps are now recorded to Diagnostics (Copy button below sends the raw APNs payload back to support so we can see which routing key iOS actually delivered). No routing changes in this build. Earlier: #208 unanswered-alert redirect takes over from ANY screen on lock/unlock, #266/#260 truthful registration status, #245 type-to-confirm on trigger, #199 clear-on-stand-down, #247 saved place, #249 saved places on the map, #211 recency-ramp map key, #243 zoom in to epicentre, #250 not-responding wording, #252 human-first diagnostics, #244 honest test-button wording."
             }
           />
         </Section>
@@ -599,6 +644,87 @@ export default function DiagScreen() {
           <Text style={styles.btnGhostText}>Back</Text>
         </TouchableOpacity>
 
+        {/* #208 probe (v1.0.40, build 40): the last 5 notification taps
+            this device received, recorded by the tap listener in
+            _layout.tsx. Purpose: on a locked-iPhone critical-alert
+            tap that lands on the wrong screen, this shows the raw
+            payload iOS delivered + the route the app chose, so we can
+            fix the correct layer (server payload vs. tap routing) with
+            evidence instead of guesses. Copy pastes it as JSON back to
+            support. */}
+        <Section title="For support — last 5 notification taps">
+          <Text style={styles.help}>
+            Newest first. Each entry shows when the tap happened, which
+            listener saw it, the raw notification data delivered to this
+            phone, and the route the app chose. Tap Copy, then paste it
+            in your reply to support.
+          </Text>
+        </Section>
+
+        {tapLog.length === 0 ? (
+          <View style={styles.emptyBox}>
+            <Text style={styles.emptyText}>
+              No notification taps recorded on this device yet.
+              {"\n"}
+              Reproduce the bug (tap a critical alert), then pull down to
+              refresh and hit Copy.
+            </Text>
+          </View>
+        ) : (
+          tapLog.map((entry, idx) => (
+            <View key={`${entry.ts}-${idx}`} style={styles.tapEntry}>
+              <Text style={styles.tapEntryHeader}>
+                #{idx + 1} · {entry.source} · {entry.ts}
+              </Text>
+              <Text style={styles.tapEntryLine}>
+                action: {entry.actionIdentifier ?? "(body tap / null)"}
+              </Text>
+              <Text style={styles.tapEntryLine}>
+                kind: {entry.kind || "(empty)"} · action_url:{" "}
+                {entry.action_url ?? "(none)"}
+              </Text>
+              <Text style={styles.tapEntryLine}>
+                magnitude:{entry.hasMagnitude ? "✓" : "✗"} · unid:
+                {entry.hasUnid ? "✓" : "✗"} · check_id:
+                {entry.hasCheckId ? "✓" : "✗"}
+              </Text>
+              <Text style={styles.tapEntryLine}>
+                chosenRoute: {entry.chosenRoute}
+              </Text>
+              <Text style={styles.tapEntryPayload} selectable>
+                {JSON.stringify(entry.rawPayload, null, 2)}
+              </Text>
+            </View>
+          ))
+        )}
+
+        <View style={styles.tapBtnRow}>
+          <TouchableOpacity
+            style={[styles.tapBtn, styles.tapBtnCopy]}
+            onPress={onCopyTapLog}
+            testID="diag-copy-tap-log"
+            accessibilityRole="button"
+          >
+            <Text style={styles.tapBtnText}>Copy tap log</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.tapBtn, styles.tapBtnClear]}
+            onPress={onClearTapLog}
+            disabled={tapLog.length === 0}
+            testID="diag-clear-tap-log"
+            accessibilityRole="button"
+          >
+            <Text
+              style={[
+                styles.tapBtnText,
+                tapLog.length === 0 && styles.tapBtnTextDisabled,
+              ]}
+            >
+              Clear log
+            </Text>
+          </TouchableOpacity>
+        </View>
+
         <Text style={styles.footer}>
           Pull down to refresh. Long-press a code to share it with support.
         </Text>
@@ -806,6 +932,67 @@ const styles = StyleSheet.create({
     borderColor: "#2a303b",
   },
   btnGhostText: { color: "#8a94a6", fontSize: 14, fontWeight: "600" },
+  emptyBox: {
+    backgroundColor: "#1b1f27",
+    borderRadius: 12,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: "#242a34",
+    marginBottom: 12,
+  },
+  emptyText: { color: "#8a94a6", fontSize: 13, lineHeight: 18 },
+  tapEntry: {
+    backgroundColor: "#1b1f27",
+    borderRadius: 12,
+    padding: 12,
+    borderWidth: 1,
+    borderColor: "#242a34",
+    marginBottom: 10,
+  },
+  tapEntryHeader: {
+    color: "#e6e8ec",
+    fontSize: 13,
+    fontWeight: "700",
+    marginBottom: 6,
+  },
+  tapEntryLine: {
+    color: "#8a94a6",
+    fontSize: 12,
+    lineHeight: 17,
+    fontFamily: Platform.select({ ios: "Menlo", android: "monospace", default: "monospace" }),
+  },
+  tapEntryPayload: {
+    color: "#c8cfda",
+    fontSize: 11,
+    lineHeight: 15,
+    marginTop: 8,
+    padding: 8,
+    backgroundColor: "#0e1116",
+    borderRadius: 8,
+    fontFamily: Platform.select({ ios: "Menlo", android: "monospace", default: "monospace" }),
+  },
+  tapBtnRow: {
+    flexDirection: "row",
+    gap: 10,
+    marginBottom: 12,
+  },
+  tapBtn: {
+    flex: 1,
+    borderRadius: 12,
+    paddingVertical: 14,
+    alignItems: "center",
+    borderWidth: 1,
+  },
+  tapBtnCopy: {
+    backgroundColor: "#1a2a3a",
+    borderColor: "#2f6feb",
+  },
+  tapBtnClear: {
+    backgroundColor: "#2a1f1f",
+    borderColor: "#3a4051",
+  },
+  tapBtnText: { color: "#fff", fontSize: 14, fontWeight: "700" },
+  tapBtnTextDisabled: { color: "#5b6472" },
   footer: {
     color: "#5b6472",
     fontSize: 11,
