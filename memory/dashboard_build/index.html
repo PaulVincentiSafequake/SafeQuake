@@ -5977,7 +5977,13 @@ window.QuakeAngelRescue = (function () {
     // many phones will siren. Then the operator must TYPE the phrase
     // — not just click — matching the standard already used for
     // delete-user and change-role on this dashboard.
-    var preview;
+    // Neo 2026-08-20 (Rule 9.5 worse-but-working): if the preview
+    // fetch fails or times out, the button STILL WORKS — the dialog
+    // just tells the operator plainly that the count is unknown.
+    // Absent or dead is the one outcome that must never happen when
+    // this button is pressed during an incident.
+    var preview = null;
+    var previewFailed = false;
     try {
       var r = await window.qaApi("/api/admin/trigger-alert/preview", { method: "GET" });
       if (r.status === 401) {
@@ -5986,29 +5992,39 @@ window.QuakeAngelRescue = (function () {
         return;
       }
       if (!r.ok) {
-        showBanner("err", "Could not check how many phones are on the system. Alert NOT sent.", 8000);
-        return;
+        previewFailed = true;
+      } else {
+        preview = await r.json();
       }
-      preview = await r.json();
     } catch (e) {
-      showBanner("err", "Network error preparing confirmation. Alert NOT sent.", 8000);
-      return;
+      previewFailed = true;
+      try { console.warn("trigger-alert preview failed:", e); } catch (_) {}
     }
 
     var total = Number(preview && preview.total) || 0;
     var phrase = (preview && preview.confirmation_phrase) || "SEND EARTHQUAKE ALERT TO ALL PHONES";
-    if (total === 0) {
-      showBanner("err", "No phones are registered on this system. There is nothing to broadcast to.", 8000);
-      return;
-    }
 
     // Use the same type-to-confirm modal the delete-user flow uses so
     // an operator recognises the pattern from other high-stakes actions.
-    var body =
-      "This will siren " + total + " " + (total === 1 ? "phone" : "phones") +
-      " right now, including phones on silent, and mark everyone as " +
-      "'not answered yet' until they check in.\n\n" +
-      "Type this phrase exactly to confirm:";
+    var body;
+    if (previewFailed) {
+      body =
+        "We could not check how many phones will be alerted. The alert " +
+        "will still be sent to everyone registered on this system.\n\n" +
+        "Type this phrase exactly to confirm:";
+    } else if (total === 0) {
+      body =
+        "There are no phones registered on this system right now. If you " +
+        "send this, nothing will happen. If new phones register in the next " +
+        "few seconds they will still get it.\n\n" +
+        "Type this phrase exactly to confirm:";
+    } else {
+      body =
+        "This will siren " + total + " " + (total === 1 ? "phone" : "phones") +
+        " right now, including phones on silent, and mark everyone as " +
+        "'not answered yet' until they check in.\n\n" +
+        "Type this phrase exactly to confirm:";
+    }
     var ok;
     try {
       // Batch 7 R5 hotfix: was a BARE `confirmTyping(...)` call, which
@@ -6017,9 +6033,6 @@ window.QuakeAngelRescue = (function () {
       // feedback — the "silence" symptom. Now via window.confirmTyping.
       ok = await window.confirmTyping("Send a real earthquake alert?", body, phrase);
     } catch (err) {
-      // If confirmTyping itself throws (unexpected DOM state), never
-      // fall through silently — tell the operator exactly what
-      // happened and that no alert was sent.
       showBanner("err",
         "Couldn't open the confirmation dialog. Alert NOT sent. Reload the page and try again.",
         0);
@@ -6027,7 +6040,6 @@ window.QuakeAngelRescue = (function () {
       return;
     }
     if (!ok) {
-      // User cancelled or dismissed. Explicit cancel feedback.
       showBanner("ok", "Cancelled — no alert was sent.", 4000);
       return;
     }

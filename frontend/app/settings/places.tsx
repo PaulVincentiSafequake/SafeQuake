@@ -48,10 +48,40 @@ type Place = {
   longitude: number;
 };
 
+/** #247 §3b/§3c (Neo 2026-08-20): each stored place enriched with the
+ *  reverse-geocoded description of its coordinates, so the list can
+ *  show the actual place name (not raw degrees) and detect the label-
+ *  vs-coordinates mismatch that caused the "Athens → Catania" bug in
+ *  records saved before the invalidate-on-edit fix landed. */
+type EnrichedPlace = Place & {
+  /** "Catania, Metropolitan City of Catania, Italy" — the OS's own
+   *  answer for what these coords are. null if reverse-geocode was
+   *  offline or failed; the row falls back to raw coords in that case
+   *  (rule 9.5 — worse-but-working). */
+  resolvedAddress: string | null;
+  /** The city component of the resolved address alone ("Catania"),
+   *  used for the label-vs-coordinates mismatch check. null if the
+   *  reverse-geocode did not include a city. */
+  resolvedCity: string | null;
+  /** True when the stored label doesn't contain the resolved city and
+   *  vice versa. Records saved before the #247 fix commonly hit this
+   *  ("Athens" stored at Catania's coords). */
+  looksWrong: boolean;
+};
+
+function normaliseForCompare(s: string | null | undefined): string {
+  return String(s ?? "").trim().toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+}
+
 export default function PlacesScreen() {
   const router = useRouter();
   const [loading, setLoading] = useState(true);
   const [places, setPlaces] = useState<Place[]>([]);
+  /** #247 §3b: reverse-geocoded copy of `places`, computed after every
+   *  load. Renders in the list so users see "Athens — Catania, Italy"
+   *  instead of two degree numbers they can't check. */
+  const [enriched, setEnriched] = useState<EnrichedPlace[]>([]);
   const [maxPlaces, setMaxPlaces] = useState(5);
   const [enabled, setEnabled] = useState(true);
 
@@ -91,6 +121,45 @@ export default function PlacesScreen() {
   useEffect(() => {
     load();
   }, [load]);
+
+  /** #247 §3b/§3c: reverse-geocode every stored place after load, so
+   *  the list shows the real address and mismatches surface. Runs
+   *  best-effort: if reverse-geocode is offline or fails, the row
+   *  falls back to raw coords (rule 9.5 worse-but-working). */
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const results: EnrichedPlace[] = [];
+      for (const p of places) {
+        let resolvedAddress: string | null = null;
+        let resolvedCity: string | null = null;
+        try {
+          const parts = await Location.reverseGeocodeAsync({
+            latitude: p.latitude, longitude: p.longitude,
+          });
+          if (parts.length) {
+            const first = parts[0];
+            resolvedCity = first.city ?? first.subregion ?? null;
+            resolvedAddress = [resolvedCity, first.region, first.country]
+              .filter((s) => !!s).join(", ") || null;
+          }
+        } catch { /* offline — leave both null */ }
+        const nName = normaliseForCompare(p.name);
+        const nCity = normaliseForCompare(resolvedCity);
+        // A record "looks wrong" when we HAVE a resolved city and it
+        // shares no substring with the stored label. This catches
+        // "Athens" at Catania's coords cleanly; it deliberately
+        // tolerates personal labels like "Mum's house" (nCity="Msida"
+        // but label contains no city substring — flagged; the user
+        // can dismiss with Keep on the migration prompt).
+        const looksWrong = !!resolvedCity && nName !== "" && nCity !== ""
+          && !nName.includes(nCity) && !nCity.includes(nName);
+        results.push({ ...p, resolvedAddress, resolvedCity, looksWrong });
+      }
+      if (!cancelled) setEnriched(results);
+    })();
+    return () => { cancelled = true; };
+  }, [places]);
 
   const findLocation = async () => {
     const query = search.trim();
@@ -290,14 +359,74 @@ export default function PlacesScreen() {
                 </Text>
               ) : (
                 <View style={styles.list}>
-                  {places.map((p) => (
-                    <View key={p.place_id} style={styles.placeRow} testID={`place-${p.place_id}`}>
-                      <Ionicons name="location" size={20} color="#5DB1FF" />
+                  {enriched.map((p) => (
+                    <View
+                      key={p.place_id}
+                      style={[
+                        styles.placeRow,
+                        p.looksWrong && styles.placeRowWarning,
+                      ]}
+                      testID={`place-${p.place_id}`}
+                    >
+                      <Ionicons
+                        name={p.looksWrong ? "warning" : "location"}
+                        size={20}
+                        color={p.looksWrong ? "#F4C842" : "#5DB1FF"}
+                      />
                       <View style={{ flex: 1 }}>
                         <Text style={styles.placeName}>{p.name}</Text>
-                        <Text style={styles.placeCoords}>
-                          {p.latitude.toFixed(3)}°, {p.longitude.toFixed(3)}°
-                        </Text>
+                        {/* #247 §3b (Neo 2026-08-20): resolved place name
+                            replaces raw coordinates in the list, so the
+                            "Athens at Catania" bug is visible in one
+                            glance. Coordinates only shown as a fallback
+                            when reverse-geocode couldn't answer. */}
+                        {p.resolvedAddress ? (
+                          <Text style={styles.placeCoords}>
+                            {p.resolvedAddress}
+                          </Text>
+                        ) : (
+                          <Text style={styles.placeCoords}>
+                            {p.latitude.toFixed(3)}°, {p.longitude.toFixed(3)}°
+                            <Text style={styles.placeCoordsHint}>
+                              {" "}(couldn&apos;t look up the place name — offline?)
+                            </Text>
+                          </Text>
+                        )}
+                        {/* #247 §3a (Neo 2026-08-20): migration prompt
+                            for records saved before the invalidate-on-
+                            edit fix. Shows the mismatch, names both
+                            places, and offers Keep or Remove — never
+                            silently corrects, never silently deletes. */}
+                        {p.looksWrong && (
+                          <View style={styles.mismatchNotice}>
+                            <Text style={styles.mismatchText}>
+                              &ldquo;{p.name}&rdquo; is saved with a location in{" "}
+                              <Text style={styles.mismatchTextBold}>
+                                {p.resolvedAddress}
+                              </Text>
+                              . That looks wrong.
+                            </Text>
+                            <View style={styles.mismatchActions}>
+                              <Pressable
+                                style={styles.mismatchBtnKeep}
+                                onPress={() => Alert.alert(
+                                  "Kept as-is",
+                                  `"${p.name}" will keep pointing at ${p.resolvedAddress}. If this was intentional (e.g. a nickname), that's fine.`,
+                                )}
+                                testID={`place-${p.place_id}-keep`}
+                              >
+                                <Text style={styles.mismatchBtnKeepText}>Keep</Text>
+                              </Pressable>
+                              <Pressable
+                                style={styles.mismatchBtnRemove}
+                                onPress={() => removePlace(p)}
+                                testID={`place-${p.place_id}-remove-wrong`}
+                              >
+                                <Text style={styles.mismatchBtnRemoveText}>Remove</Text>
+                              </Pressable>
+                            </View>
+                          </View>
+                        )}
                       </View>
                       <Pressable
                         onPress={() => removePlace(p)}
@@ -364,25 +493,56 @@ export default function PlacesScreen() {
 
                   {resolved && (
                     <>
-                      <View style={styles.resolvedCard} testID="place-resolved-card">
-                        <Ionicons name="location" size={16} color="#B3E5C4" />
-                        <View style={{ flex: 1 }}>
-                          <Text style={styles.resolvedHeader}>Found this place</Text>
-                          {resolved.address ? (
-                            <Text style={styles.resolvedAddress}>
-                              {resolved.address}
-                            </Text>
-                          ) : null}
-                          <Text style={styles.resolvedText}>
-                            {resolved.latitude.toFixed(3)}°,{" "}
-                            {resolved.longitude.toFixed(3)}°
-                          </Text>
-                          <Text style={styles.resolvedHint}>
-                            Not the right place? Change the search above and
-                            tap Find again.
-                          </Text>
-                        </View>
-                      </View>
+                      {(() => {
+                        // §3c #247 (Neo 2026-08-20): if the resolved
+                        // address doesn't contain the searched term
+                        // (e.g. "Paphos" → "Polemi, Paphos, Cyprus" —
+                        // a village near Paphos, not Paphos itself),
+                        // frame it as a question rather than a flat
+                        // statement, so the user can catch the miss.
+                        const searchLower = resolved.searchedAs.toLowerCase();
+                        const addressLower = String(resolved.address ?? "").toLowerCase();
+                        const looksApproximate =
+                          !!resolved.address &&
+                          !addressLower.includes(searchLower) &&
+                          !searchLower.includes(addressLower.split(",")[0].trim());
+                        return (
+                          <View
+                            style={[
+                              styles.resolvedCard,
+                              looksApproximate && styles.resolvedCardWarning,
+                            ]}
+                            testID="place-resolved-card"
+                          >
+                            <Ionicons
+                              name={looksApproximate ? "help-circle" : "location"}
+                              size={16}
+                              color={looksApproximate ? "#F4C842" : "#B3E5C4"}
+                            />
+                            <View style={{ flex: 1 }}>
+                              <Text style={styles.resolvedHeader}>
+                                {looksApproximate
+                                  ? `You searched for ${resolved.searchedAs}. The closest match we found is:`
+                                  : "Found this place"}
+                              </Text>
+                              {resolved.address ? (
+                                <Text style={styles.resolvedAddress}>
+                                  {resolved.address}
+                                </Text>
+                              ) : null}
+                              <Text style={styles.resolvedText}>
+                                {resolved.latitude.toFixed(3)}°,{" "}
+                                {resolved.longitude.toFixed(3)}°
+                              </Text>
+                              <Text style={styles.resolvedHint}>
+                                {looksApproximate
+                                  ? "Is that the place you meant? If not, refine the search above and tap Find again."
+                                  : "Not the right place? Change the search above and tap Find again."}
+                              </Text>
+                            </View>
+                          </View>
+                        );
+                      })()}
                       <Text style={styles.inputLabel}>Call it</Text>
                       <TextInput
                         value={name}
@@ -416,8 +576,9 @@ export default function PlacesScreen() {
 
               <Text style={styles.footer}>
                 Notices for a saved place always name the place, so you know
-                straight away it isn&apos;t about you. Places use the same
-                intensity judgement as your own location — not a distance dial.
+                straight away it isn&apos;t about you. We use the same rule
+                for a saved place as we do for where you are — how strongly
+                it would be felt there, not how far away it is.
               </Text>
             </>
           )}
@@ -457,12 +618,36 @@ const styles = StyleSheet.create({
   empty: { color: "#8FA0BC", fontSize: 13, lineHeight: 19, marginBottom: 8 },
   list: { gap: 10, marginBottom: 8 },
   placeRow: {
-    flexDirection: "row", alignItems: "center", gap: 12,
+    flexDirection: "row", alignItems: "flex-start", gap: 12,
     backgroundColor: "#151E2F", borderRadius: 12, padding: 14,
     borderWidth: 1, borderColor: "#25324A",
   },
+  placeRowWarning: {
+    borderColor: "#F4C842",
+    borderWidth: 1.5,
+    backgroundColor: "#241C08",
+  },
   placeName: { color: "#E7EDF5", fontSize: 16, fontWeight: "700" },
-  placeCoords: { color: "#8FA0BC", fontSize: 12, marginTop: 2 },
+  placeCoords: { color: "#8FA0BC", fontSize: 13, marginTop: 2, lineHeight: 18 },
+  placeCoordsHint: { color: "#61708A", fontSize: 12, fontStyle: "italic" },
+  mismatchNotice: {
+    marginTop: 10, padding: 10, borderRadius: 8,
+    backgroundColor: "rgba(244,200,66,0.08)",
+    borderWidth: 1, borderColor: "rgba(244,200,66,0.35)",
+  },
+  mismatchText: { color: "#E7EDF5", fontSize: 14, lineHeight: 20 },
+  mismatchTextBold: { color: "#F4C842", fontWeight: "700" },
+  mismatchActions: { flexDirection: "row", gap: 8, marginTop: 10 },
+  mismatchBtnKeep: {
+    flex: 1, paddingVertical: 10, borderRadius: 6,
+    backgroundColor: "#25324A", alignItems: "center",
+  },
+  mismatchBtnKeepText: { color: "#E7EDF5", fontSize: 14, fontWeight: "700" },
+  mismatchBtnRemove: {
+    flex: 1, paddingVertical: 10, borderRadius: 6,
+    backgroundColor: "#5A1414", alignItems: "center",
+  },
+  mismatchBtnRemoveText: { color: "#FFD4D4", fontSize: 14, fontWeight: "700" },
   removeBtn: { minWidth: 44, minHeight: 44, alignItems: "center", justifyContent: "center" },
 
   sectionTitle: {
@@ -490,6 +675,11 @@ const styles = StyleSheet.create({
     flexDirection: "row", gap: 10, alignItems: "flex-start",
     backgroundColor: "#0F2818", borderColor: "#1F8A3A", borderWidth: 1,
     borderRadius: 10, padding: 12, marginVertical: 4,
+  },
+  resolvedCardWarning: {
+    backgroundColor: "#241C08",
+    borderColor: "#F4C842",
+    borderWidth: 1.5,
   },
   resolvedHeader: {
     color: "#B3E5C4", fontSize: 11, fontWeight: "800",

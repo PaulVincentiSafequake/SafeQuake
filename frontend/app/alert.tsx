@@ -48,6 +48,7 @@ import {
   scheduleCheckInReminders,
 } from "@/src/utils/reminders";
 import { clearActiveAlert } from "@/src/utils/activeAlert";
+import { resolveEventReadings } from "@/src/utils/eventReadings";
 
 const SIREN_SOURCE = require("../assets/audio/siren.mp3");
 
@@ -366,25 +367,24 @@ export default function AlertScreen() {
   // What this fixes (Paul's screenshot, build 130): the amber banner
   // read "M5.1" while the panel below it read MAGNITUDE — because
   // banner and panel had different sources. Both now share this one.
+  // #205 (Batch 7 R3) + §1 #174 (Neo 2026-08-20): the single resolver
+  // used by /alert AND /quake/[unid]. Was previously an inline object
+  // here that /quake/[unid] didn't share, so when the #205 fix landed
+  // on the banner it left the informational detail screen showing
+  // dashes. Now both surfaces call resolveEventReadings — pattern #1
+  // enforced by shape, not by discipline.
+  //
+  // What this fixes (Paul's screenshot, build 130): the amber banner
+  // read "M5.1" while the panel below it read MAGNITUDE — because
+  // banner and panel had different sources. Both now share this one.
+  const readings = resolveEventReadings(params, aftershock ?? undefined);
   const eventReadings = {
-    magnitude:
-      aftershock?.magnitude ??
-      (params.magnitude ? String(params.magnitude) : null),
-    distance_km:
-      aftershock?.distance_km ??
-      (params.distance_km ? String(params.distance_km) : null),
-    intensity:
-      aftershock?.intensity ??
-      (params.intensity ? String(params.intensity) : null),
-    depth_km:
-      aftershock?.depth_km ??
-      (params.depth_km ? String(params.depth_km) : null),
-    region:
-      aftershock?.region ??
-      (params.region ? String(params.region) : null),
-    unid:
-      aftershock?.unid ??
-      (params.unid ? String(params.unid) : null),
+    magnitude: readings.magnitude,
+    distance_km: readings.distance_km != null ? String(readings.distance_km) : null,
+    intensity: readings.intensity,
+    depth_km: readings.depth_km != null ? String(readings.depth_km) : null,
+    region: readings.region,
+    unid: readings.unid,
   };
   const aftershockMagnitude = aftershock?.magnitude ?? null;
 

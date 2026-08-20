@@ -112,12 +112,22 @@ function magnitudeColor(m: number | null): string {
 // "red" pin at 7d means the last day and a bit; at 1h it means the
 // last fifteen minutes. The visible legend at the bottom of the map
 // spells this out with the window's actual name.
-const RECENCY_STOPS = [
+//
+// §5c #211 (Neo 2026-08-20): explicitly named the SEISMIC_ palette.
+// Red on THIS map means recent-in-window. Red on the TRIAGE map (an
+// entirely different feature elsewhere in the product) means an
+// immediate-injury person. The two must never share code — a future
+// palette change to one must not silently alter the other. If you
+// need a red on the triage map, define TRIAGE_IMMEDIATE separately.
+// Rule 9.11: use the world's convention (red-for-recent is USGS).
+const SEISMIC_RECENCY_STOPS = [
   { color: "#D9251C", label: "Just now" },        // top ~25% of the window
   { color: "#F08A2E", label: "Recent" },          // 25–50%
   { color: "#F4C842", label: "A while back" },    // 50–75%
   { color: "#2E7D32", label: "Oldest in view" },  // 75–100%
 ];
+// Alias kept for the earlier callers.
+const RECENCY_STOPS = SEISMIC_RECENCY_STOPS;
 
 function recencyColor(observedIso: string, windowHours: number): string {
   const then = parseUtc(observedIso)?.getTime();
@@ -392,10 +402,16 @@ export default function SeismicMapScreen() {
     <View
       style={styles.legend}
       accessibilityRole="summary"
-      accessibilityLabel={`Map key: bigger circles are stronger, redder circles are more recent, within ${windowLabel(windowHours)}`}
+      accessibilityLabel={`Map key: bigger circles are stronger, redder circles are more recent, within ${windowLabel(windowHours)}. Colour shows how recent, not how dangerous.`}
     >
       <Text style={styles.legendHeadline}>
         Bigger = stronger. Redder = more recent, within {windowLabel(windowHours)}.
+      </Text>
+      {/* §5b #211 (Neo 2026-08-20): red on this map means recent, NOT
+          dangerous. Red also means "immediate injury" on the triage
+          map elsewhere in the product; the two must not be confused. */}
+      <Text style={styles.legendDisclaimer}>
+        Colour shows how recent, not how dangerous.
       </Text>
       <View style={styles.legendRow}>
         <Text style={styles.legendCaption}>Size (magnitude):</Text>
@@ -467,7 +483,7 @@ export default function SeismicMapScreen() {
               >
                 <View style={[styles.magBadge, {backgroundColor: magnitudeColor(ev.magnitude)}]}>
                   <Text style={styles.magBadgeText}>
-                    {ev.magnitude != null ? ev.magnitude.toFixed(1) : "—"}
+                    {ev.magnitude != null ? ev.magnitude.toFixed(1) : "?"}
                   </Text>
                 </View>
                 <View style={{flex: 1}}>
@@ -475,7 +491,7 @@ export default function SeismicMapScreen() {
                     {ev.region ?? "Unknown region"}
                   </Text>
                   <Text style={styles.listMeta} numberOfLines={1}>
-                    {timeAgo(ev.observed_at)} · depth {ev.depth_km != null ? `${Math.round(ev.depth_km)} km` : "—"} · {(ev.providers ?? [ev.provider]).join("+")}
+                    {timeAgo(ev.observed_at)} · depth {ev.depth_km != null ? `${Math.round(ev.depth_km)} km` : "unknown"} · {(ev.providers ?? [ev.provider]).join("+")}
                   </Text>
                 </View>
                 <Ionicons name="chevron-forward" size={18} color="#8FA0BC" />
@@ -662,17 +678,24 @@ const styles = StyleSheet.create({
     borderTopWidth: 1, borderTopColor: "#25324A",
     paddingHorizontal: 12, paddingTop: 8, paddingBottom: 8, gap: 6,
   },
+  // §5a #211 (Neo 2026-08-20): legend text at body size (was 12/11/10).
+  // Also #257 sweep: any explanatory/supporting text must match body
+  // size — a key you cannot read comfortably is not a key.
   legendHeadline: {
-    color: "#E7EDF5", fontSize: 12, fontWeight: "700", lineHeight: 16,
+    color: "#E7EDF5", fontSize: 15, fontWeight: "700", lineHeight: 20,
+  },
+  legendDisclaimer: {
+    color: "#B3E5C4", fontSize: 13, fontStyle: "italic",
+    lineHeight: 18, marginTop: -2,
   },
   legendRow: {
     flexDirection: "row", alignItems: "center", gap: 8,
   },
   legendCaption: {
-    color: "#8FA0BC", fontSize: 10, fontWeight: "600",
+    color: "#B0BED9", fontSize: 13, fontWeight: "600",
   },
   legendCaptionRight: {
-    color: "#8FA0BC", fontSize: 10, marginLeft: "auto",
+    color: "#B0BED9", fontSize: 13, marginLeft: "auto",
   },
   legendSizeSwatch: {
     flexDirection: "row", alignItems: "center", gap: 6,
@@ -684,12 +707,12 @@ const styles = StyleSheet.create({
     flexDirection: "row", gap: 6, marginTop: 2,
   },
   legendRampCell: {
-    flex: 1, alignItems: "center", gap: 2,
+    flex: 1, alignItems: "center", gap: 3,
   },
   legendRampSwatch: {
-    width: "100%", height: 8, borderRadius: 2,
+    width: "100%", height: 12, borderRadius: 3,
   },
   legendRampLabel: {
-    color: "#8FA0BC", fontSize: 9, textAlign: "center",
+    color: "#B0BED9", fontSize: 12, textAlign: "center", lineHeight: 15,
   },
 });

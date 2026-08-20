@@ -712,6 +712,46 @@ async def dispatch_place_notices(
             depth_km=emsc_event.get("depth_km"),
         )
         user_preset = dev.get("notification_preset") or _DEFAULT_PRESET
+
+        # §4 #255 (Neo 2026-08-20) — HONEST FLOOR for saved-place notices.
+        #
+        # Rule stated in one line, for the record: a saved-place notice
+        # fires iff `mmi_at_place >= PRESET_MMI_THRESHOLD[preset]`, where
+        # mmi_at_place is Faenza-Michelini 2010 (magnitude, distance,
+        # depth). This uses the SAME numeric thresholds as own-location
+        # (both read `PRESET_MMI_THRESHOLD`) — so "noticeable" means
+        # MMI III+ in either path — but the FUNCTION that produces the
+        # MMI differs: own-location reads the event's own USGS/GMPE
+        # intensity_estimates at the country centre, saved-place
+        # computes locally with Faenza-Michelini. Numerically consistent;
+        # code paths are not the same call. Left explicit here so a
+        # future change to one path is visibly not a change to the
+        # other.
+        #
+        # The floor: even for a device with preset='everything' (fires
+        # on any MMI ≥ 0), we refuse to send a saved-place notice below
+        # MMI 2.0. The Notifications screen promises "tremors strong
+        # enough that most people indoors would notice" — anything
+        # below MMI 2 is not felt by anyone and violates that promise.
+        # 'Everything' is now honestly "everything you might feel there",
+        # not "every earthquake with the right latitude". This is what
+        # #255 came from: a M2.9 at 504 km was sent as a saved-place
+        # notice — MMI 1.15 at that distance, felt by nobody.
+        if mmi_at_place is not None and mmi_at_place < 2.0:
+            await db.emsc_preview_notifications.insert_one({
+                "sent_at": now,
+                "device_id": place["device_id"],
+                "place_id": place.get("place_id"),
+                "place_name": place.get("name"),
+                "delivered": False,
+                "skipped_reason": (
+                    f"below_perceptibility_floor "
+                    f"({mmi_at_place:.2f} < 2.0)"
+                ),
+                "country_code": country_config.get("country_code"),
+            })
+            continue
+
         fires, skip_reason = preset_would_fire(user_preset, mmi_at_place)
         if not fires:
             continue
@@ -747,12 +787,17 @@ async def dispatch_place_notices(
         # looking Sicily notice and thinks the app is broken. Naming
         # the place, plus "you added this — turn off in Settings",
         # closes that loop without turning the body into an essay.
+        # #255 (Neo 2026-08-20): the body used to say "Modica: M2.9
+        # tremor — 504km SSE of Modica" — naming the place twice reads
+        # oddly and wastes lock-screen line length. Now: place named
+        # ONCE, in the leading colon, then the compass/distance without
+        # the tautology. Depth stays where it is.
         name = place.get("name") or "your saved place"
         bearing = bearing_deg(p_lat, p_lon, e_lat, e_lon)
         title = f"PREVIEW · Seismic activity near {name}"
         body = (
-            f"{name}: M{magnitude:g} tremor — {int(round(distance_km))}km "
-            f"{compass_16(bearing)} of {name}"
+            f"{name}: M{magnitude:g} tremor — "
+            f"{int(round(distance_km))}km {compass_16(bearing)}"
             + (f", depth {int(round(emsc_event.get('depth_km')))}km"
                if emsc_event.get("depth_km") is not None else "")
             + f". You get this because you added {name} to your saved places."

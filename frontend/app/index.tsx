@@ -1111,12 +1111,13 @@ const styles = StyleSheet.create({
     fontWeight: "700",
   },
   statusSubText: {
+    // §7 #257 (Neo 2026-08-20): body-size (was 12).
     color: colors.onSurfaceSecondary,
-    fontSize: 12,
+    fontSize: 14,
     letterSpacing: 0.2,
     fontWeight: "500",
-    marginTop: 2,
-    lineHeight: 16,
+    marginTop: 4,
+    lineHeight: 20,
   },
   brand: {
     color: colors.onSurface,
@@ -1240,12 +1241,13 @@ const styles = StyleSheet.create({
     letterSpacing: 2,
   },
   // #244 (Batch 7 D): honest disclaimer under the test button.
+  // §7 #257 (Neo 2026-08-20): 11 → 13 for readability under stress.
   triggerHonestyNote: {
     color: colors.onSurfaceTertiary,
-    fontSize: 11,
-    lineHeight: 15,
+    fontSize: 13,
+    lineHeight: 18,
     textAlign: "center",
-    marginTop: 6,
+    marginTop: 8,
     paddingHorizontal: spacing.md,
     fontStyle: "italic",
   },

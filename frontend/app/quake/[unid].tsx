@@ -33,6 +33,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import * as Location from "expo-location";
 import { parseUtc } from "@/src/utils/time";
+import { resolveEventReadings } from "@/src/utils/eventReadings";
 
 // Fallback reference point when we have no user location: the Malta/Gozo
 // archipelago centre (same coordinates as the MT country_config on the
@@ -96,12 +97,16 @@ export default function QuakeDetailScreen() {
     return `${Math.floor(s / 86400)} days ago`;
   })();
 
-  const magnitude = params.magnitude ?? null;
-  const distanceKm = params.distance_km ?? null;
-  const depthKm = params.depth_km ?? null;
-  const region = params.region ?? null;
-  const lat = params.latitude ?? null;
-  const lon = params.longitude ?? null;
+  // §1 #174 (Neo 2026-08-20): read from the SAME resolver /alert uses.
+  // Before this, /alert had the single-source fix from #205 but this
+  // screen didn't — so a tapped preview notification showed dashes even
+  // though the payload had the values. Pattern #1 recurrence, now closed.
+  const readings = resolveEventReadings(params);
+  const magnitude = readings.magnitude;
+  const depthKm = readings.depth_km;
+  const region = readings.region;
+  const lat = readings.latitude;
+  const lon = readings.longitude;
 
   // ── Distance (batch 5, B3) ───────────────────────────────────────────
   // Was rendering "—" whenever the screen was opened from the in-app
@@ -128,8 +133,8 @@ export default function QuakeDetailScreen() {
       if (!Number.isFinite(eLat) || !Number.isFinite(eLon)) {
         // No epicentre coords — fall back to whatever the notification
         // payload carried (that value is measured from Malta).
-        const fromPayload = distanceKm != null ? Number(distanceKm) : NaN;
-        if (Number.isFinite(fromPayload) && !cancelled) {
+        const fromPayload = readings.distance_km;
+        if (fromPayload != null && !cancelled) {
           setDistance({ km: fromPayload, from: MALTA_LABEL });
         }
         return;
@@ -168,7 +173,7 @@ export default function QuakeDetailScreen() {
     return () => {
       cancelled = true;
     };
-  }, [lat, lon, distanceKm]);
+  }, [lat, lon, readings.distance_km]);
 
   const distanceLabel = distance
     ? `${Math.round(distance.km)} km from ${distance.from}`
@@ -179,9 +184,12 @@ export default function QuakeDetailScreen() {
   const backLabel =
     params.from === "map" ? "Map" : router.canGoBack() ? "Back" : "Close";
 
-  const hasCoords =
-    lat != null && lon != null &&
-    Number.isFinite(Number(lat)) && Number.isFinite(Number(lon));
+  // §2 #256 (Neo 2026-08-20): map button visibility depends ONLY on
+  // whether we have usable coordinates for this event. It MUST NOT be
+  // hidden because magnitude/depth/distance failed to arrive — those
+  // are separate concerns and the operator/user reaches for the map
+  // exactly when the numbers didn't help. Rule 9.5 (worse-but-working).
+  const hasCoords = readings.hasCoords;
 
   // B5 — see this event on the map. Pushes the map ON TOP of this screen, so
   // backing out returns here rather than looping: notification → detail →
@@ -239,8 +247,27 @@ export default function QuakeDetailScreen() {
 
         {/* Title — deliberately non-alarming */}
         <Text style={styles.title}>Seismic activity</Text>
-        {region && <Text style={styles.subtitle}>{region}</Text>}
+        {region ? (
+          <Text style={styles.subtitle}>{region}</Text>
+        ) : (
+          // §1 #174 (Neo 2026-08-20): never render an empty subtitle
+          // that looks like data. If the notification didn't carry a
+          // place name, say so plainly rather than showing a bare "—".
+          <Text style={styles.subtitleMissing}>Location not given by the report</Text>
+        )}
         <Text style={styles.timeAgo}>{timeAgo}</Text>
+
+        {/* §1 #174: if the notification arrived without the readings, say
+            so with a full sentence rather than a screenful of dashes. */}
+        {readings.hasMissingFields && (
+          <View style={styles.missingNotice}>
+            <Ionicons name="information-circle-outline" size={16} color={colors.textDim} />
+            <Text style={styles.missingNoticeText}>
+              Some details didn't arrive with this notification. Anything
+              below marked &ldquo;Unknown&rdquo; is missing, not zero.
+            </Text>
+          </View>
+        )}
 
         {/* Preview explainer */}
         {isPreview && (
@@ -253,17 +280,18 @@ export default function QuakeDetailScreen() {
           </View>
         )}
 
-        {/* Details grid */}
+        {/* Details grid — every missing value reads &ldquo;Unknown&rdquo;
+            in plain words, never a bare dash (rule 9.4). */}
         <View style={styles.card}>
-          <Row label="Magnitude" value={magnitude ?? "—"} />
-          {distanceLabel && <Row label="Distance" value={distanceLabel} />}
-          <Row label="Depth" value={depthKm != null ? `${depthKm} km` : "—"} />
+          <Row label="Magnitude" value={magnitude ?? "Unknown"} />
+          <Row label="Distance" value={distanceLabel ?? "Unknown"} />
+          <Row label="Depth" value={depthKm != null ? `${depthKm} km` : "Unknown"} />
           <Row
             label="Location"
             value={
-              lat != null && lon != null
-                ? `${Number(lat).toFixed(3)}°, ${Number(lon).toFixed(3)}°`
-                : "—"
+              hasCoords
+                ? `${(lat as number).toFixed(3)}°, ${(lon as number).toFixed(3)}°`
+                : "Unknown"
             }
           />
           {observedAtValid && (
@@ -274,14 +302,12 @@ export default function QuakeDetailScreen() {
           )}
         </View>
 
-        {/* Plain-language explanation. The distance clause is either fully
-            present or fully absent — it must never render as a gap
-            ("...was approximately  from your location"), which is what
-            happened when distance_km was missing (batch 5, B3). */}
-        {/* B5 — the map already existed and was good; the two simply
-            weren't connected. Only offered when we actually have
-            coordinates to centre on. */}
-        {hasCoords && (
+        {/* §2 #256 (Neo 2026-08-20): map button visibility now depends
+            ONLY on hasCoords. Missing magnitude/depth/distance must
+            never take away the map button too. If we don't have
+            coordinates, we say so instead of quietly dropping the
+            control. */}
+        {hasCoords ? (
           <TouchableOpacity
             style={styles.mapBtn}
             onPress={openOnMap}
@@ -293,6 +319,14 @@ export default function QuakeDetailScreen() {
             <Text style={styles.mapBtnText}>Zoom in to where it happened (epicentre)</Text>
             <Ionicons name="chevron-forward" size={18} color={colors.textDim} />
           </TouchableOpacity>
+        ) : (
+          <View style={styles.noCoordsNotice}>
+            <Ionicons name="map-outline" size={18} color={colors.textDim} />
+            <Text style={styles.noCoordsText}>
+              The notification didn't include an epicentre location, so
+              there's nothing to show on the map.
+            </Text>
+          </View>
         )}
 
         <Text style={styles.section}>What this means</Text>
@@ -387,6 +421,46 @@ const styles = StyleSheet.create({
     color: colors.textDim,
     fontSize: 16,
     marginTop: 4,
+  },
+  subtitleMissing: {
+    color: colors.textDim,
+    fontSize: 15,
+    marginTop: 4,
+    fontStyle: "italic",
+  },
+  missingNotice: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 8,
+    padding: 10,
+    marginTop: 12,
+    borderRadius: 8,
+    backgroundColor: "rgba(143,160,188,0.12)",
+    borderWidth: 1,
+    borderColor: "rgba(143,160,188,0.25)",
+  },
+  missingNoticeText: {
+    color: colors.text,
+    fontSize: 13,
+    lineHeight: 18,
+    flex: 1,
+  },
+  noCoordsNotice: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    marginTop: 12,
+    padding: 12,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.card,
+  },
+  noCoordsText: {
+    color: colors.textDim,
+    fontSize: 14,
+    lineHeight: 20,
+    flex: 1,
   },
   timeAgo: {
     color: colors.textDim,
