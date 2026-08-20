@@ -84,8 +84,38 @@ function serveStatic(req, res, pathname) {
     // broken during verification. `no-cache` forces revalidation on every
     // load; the content-hash ETag makes that revalidation a cheap 304
     // when nothing actually changed.
+    //
+    // #57 / #265 (Neo, 2026-08-20 — Paul): "your fix is live and works,
+    // but only after a hard refresh." `no-cache` alone permits the
+    // browser to reuse a copy while it revalidates; on a slow revalidation
+    // path (or a CDN that answered 304 based on a stale upstream), the
+    // operator sees the OLD content for one full page load. Adding
+    // `no-store` for HTML forces every load to be a full round-trip so
+    // there is no window in which a stale copy is even eligible for use.
+    // Static assets (images, favicon) keep the lighter `no-cache` — the
+    // performance cost of no-store on the 316KB HTML is one round-trip
+    // per page load and the safety cost of a stale HTML is a mistyped
+    // confirmation phrase or a missed sign-out. Not close.
     const etag = '"' + crypto.createHash("md5").update(content).digest("hex") + '"';
-    const cacheHeaders = { "Cache-Control": "no-cache, must-revalidate", ETag: etag };
+    const isHtml = ext === ".html" || ext === "";
+    const cacheHeaders = {
+      "Cache-Control": isHtml
+        ? "no-cache, no-store, must-revalidate, max-age=0"
+        : "no-cache, must-revalidate",
+      // A stale copy indicator that a proxy CANNOT rewrite: the
+      // filename's content-hash ETag AND a Last-Modified anchored to
+      // the file's mtime. Belt-and-braces for the belt-and-braces.
+      ETag: etag,
+      Pragma: "no-cache",
+      Expires: "0",
+      // Anti-frame + strict referrer are unrelated to caching but
+      // belong in the same "operator-visible controls the server
+      // owns" bucket. Adding them here means the operator's browser
+      // won't leak the dashboard URL through a Referer to an EMSC
+      // link they click, and no third party can iframe the panel.
+      "X-Content-Type-Options": "nosniff",
+      "Referrer-Policy": "no-referrer",
+    };
     // Render's CDN rewrites our ETag to a weak validator (W/"...") on the
     // way out, so browsers echo back the W/ prefix. Strip it before
     // comparing or the 304 path never fires.
