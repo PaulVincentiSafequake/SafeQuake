@@ -1350,3 +1350,63 @@ overwrite would have reverted names on pins):
 **Lesson for next time: never push the staged copy over the live file without
 diffing first.** The staged copy in `memory/dashboard_build/` is only as current
 as the last hand-edit made directly in the repo.
+
+## v1.0.38 — Neo round (2026-08-20)
+
+### #266 / #260 — Truthful "on the alert list" registration status
+Root cause proven live on preview backend:
+1. Old `/register-push` wrote to Mongo BEFORE calling relay, and on relay 401
+   raised `HTTPException(500)`. Row survived, dashboard counted it, but the
+   phone had no way to receive pushes — the false promise Paul flagged.
+2. Old "Is this working?" screen had two rows:
+     - "signed up" → local `token_length > 0` (no server check)
+     - "server confirmed" → last-response 2xx
+   Both were local-only. They could disagree with the server (green tick
+   while dashboard shows 0).
+
+Fix (v1.0.38, build 38):
+- **Backend `/register-push` reorder**: call relay first. 2xx → upsert + 201.
+  4xx (except 429) → NO upsert, return 502 with plain-English detail.
+  5xx or network → best-effort upsert + 502 with retry message. Always
+  log to `push_registrations_log`.
+- **New `GET /api/register-push/status/{user_id}`**: phone asks server
+  "do you actually hold my registration?". No auth (phone asks about its
+  own uid). Returns registered/platform/last_seen/dead_token/last_attempt/
+  relay_healthy.
+- **New `GET /api/admin/relay-health`**: admin+operator. Returns healthy
+  + plain-English reason ("EMERGENT_PUSH_KEY appears missing…" etc.) so
+  the dashboard can show "any 0 count below is misleading".
+- **Mobile Diag**: replaced the two rows with ONE row driven by the
+  server round-trip. Red states have plain-English server-side detail.
+- **Dashboard**: amber banner above Registered devices count when relay
+  is refusing (or grey info banner when no attempts yet).
+
+### #265 — Dashboard sign-in unresponsive until browser restart
+Same class as em-dash statusText: one silently broken call kills sign-in.
+- Root cause: `renderSignInButton()` was called from ~5 code paths. Each
+  did `container.innerHTML = ""` + re-ran `google.accounts.id.initialize()`.
+  Google's docs say initialize is one-shot; repeated calls leave the
+  rendered button click a no-op. Rebuilding the DOM orphans Google's
+  internal handlers.
+- Fix (three parts): idempotency (return early if banner + iframe are
+  already visible); `_googleInitialized` guard so initialize runs exactly
+  once per page load; stuck-button watchdog that shows a plain-English
+  "sign-in didn't respond, reload the page" hint 8s after a click if no
+  credential callback fires. Also `use_fedcm_for_prompt: false` to bypass
+  Google's `g_state` FedCM cooldown cookie (the exact mechanism that made
+  "restart the browser" the only workaround).
+
+### What Paul needs to do to ship v1.0.38
+1. Publish (Emergent button) to redeploy backend so the new endpoints and
+   ordered `/register-push` are live in prod.
+2. Push dashboard `index.html` to `PaulVincentiSafequake/SafeQuake`
+   (agent needs a fresh short-lived PAT).
+3. Rebuild native iOS app (1.0.38 build 38) so the Diag screen change
+   ships.
+
+Verified live on preview backend per rule 4a: I registered a device,
+read back what the server actually holds, and confirmed:
+- register-push returned 502 with plain-English detail (not "HTTP 500").
+- push_devices had 0 rows (no phantom persist).
+- status endpoint returned registered:false with truthful last_attempt.
+- admin/relay-health returned healthy:false with the credentials reason.

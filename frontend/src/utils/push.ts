@@ -21,9 +21,41 @@ export interface DiagInfo {
   token_fingerprint: string | null;
   last_registered_at: string | null;
   last_register_status: string | null;
+  last_register_detail: string | null;
   backend_url: string;
   app_version: string | null;
   build_number: string | null;
+  // #266 / #260 (Neo, 2026-08-20 — Paul): a server-side read-back so
+  // the "Is this working?" screen never claims "signed up" from local
+  // state alone. Populated by getServerRegistrationStatus() which
+  // calls GET /api/register-push/status/{user_id}. Any of these can
+  // be null if the read-back hasn't completed (no network, backend
+  // down) — the diag screen treats null as "not yet confirmed" (red)
+  // rather than showing a stale green from a previous session.
+  server_has_device: boolean | null;
+  server_last_seen_at: string | null;
+  server_dead_token: boolean;
+  server_last_attempt_error: string | null;
+  server_last_attempt_status: number | null;
+  relay_healthy: boolean | null;
+}
+
+// #266 / #260: the shape returned by /api/register-push/status/{user_id}.
+// Kept exactly parallel to the FastAPI response so a schema change on
+// the backend surfaces as a TS error, not a silent wrong-shape read.
+export interface ServerRegistrationStatus {
+  registered: boolean;
+  platform: string | null;
+  last_seen_at: string | null;
+  dead_token: boolean;
+  dead_token_reason: string | null;
+  last_attempt: {
+    at: string | null;
+    relay_status: number | null;
+    relay_error: string | null;
+    persisted: boolean;
+  } | null;
+  relay_healthy: boolean | null;
 }
 
 function fingerprint(token: string | null): string | null {
@@ -32,19 +64,52 @@ function fingerprint(token: string | null): string | null {
   return `${token.slice(0, 8)}…${token.slice(-8)}`;
 }
 
+export async function getServerRegistrationStatus(
+  user_id: string,
+): Promise<ServerRegistrationStatus | null> {
+  // #266 / #260 (Neo, 2026-08-20 — Paul): the "Is this working?"
+  // screen uses this read-back — NOT the local token length — as
+  // the source of truth for "your phone is on the server's alert
+  // list". Returning null means "we couldn't ask the server"; the
+  // caller treats that as red (not-yet-confirmed) rather than
+  // painting a stale green from local state.
+  if (Platform.OS === "web") return null;
+  if (!BACKEND_URL) return null;
+  try {
+    const resp = await fetch(
+      `${BACKEND_URL}/api/register-push/status/${encodeURIComponent(user_id)}`,
+      { method: "GET", headers: { "Content-Type": "application/json" } },
+    );
+    if (!resp.ok) return null;
+    const data = (await resp.json()) as ServerRegistrationStatus;
+    return data;
+  } catch {
+    return null;
+  }
+}
+
 export async function getDiagInfo(): Promise<DiagInfo> {
   const user_id = await getDeviceId();
   const device_token = await AsyncStorage.getItem(LAST_TOKEN_KEY);
   const meta = await AsyncStorage.getItem(LAST_REGISTER_KEY);
   let last_registered_at: string | null = null;
   let last_register_status: string | null = null;
+  let last_register_detail: string | null = null;
   if (meta) {
     try {
       const parsed = JSON.parse(meta);
       last_registered_at = parsed.at ?? null;
       last_register_status = parsed.status ?? null;
+      last_register_detail = parsed.detail ?? null;
     } catch {}
   }
+
+  // #266 / #260 (Neo, 2026-08-20 — Paul): read the server-side
+  // truth alongside local state. If the network call fails we
+  // leave `server_*` fields at null so the diag row stays honestly
+  // red instead of showing a stale positive from a previous run.
+  const serverStatus = await getServerRegistrationStatus(user_id);
+
   return {
     user_id,
     platform: Platform.OS,
@@ -53,6 +118,7 @@ export async function getDiagInfo(): Promise<DiagInfo> {
     token_fingerprint: fingerprint(device_token),
     last_registered_at,
     last_register_status,
+    last_register_detail,
     backend_url: BACKEND_URL ?? "(not set)",
     // Read from the INSTALLED BINARY, not from app.json (#169 aftermath).
     // Constants.expoConfig.ios.buildNumber is null here because the build
@@ -73,6 +139,12 @@ export async function getDiagInfo(): Promise<DiagInfo> {
       (Constants.expoConfig?.ios?.buildNumber as string) ??
       (Constants.expoConfig?.android?.versionCode as unknown as string) ??
       null,
+    server_has_device: serverStatus ? serverStatus.registered : null,
+    server_last_seen_at: serverStatus?.last_seen_at ?? null,
+    server_dead_token: !!serverStatus?.dead_token,
+    server_last_attempt_error: serverStatus?.last_attempt?.relay_error ?? null,
+    server_last_attempt_status: serverStatus?.last_attempt?.relay_status ?? null,
+    relay_healthy: serverStatus?.relay_healthy ?? null,
   };
 }
 
@@ -123,6 +195,7 @@ export async function registerForPushNotifications(): Promise<void> {
     await AsyncStorage.setItem(LAST_TOKEN_KEY, device_token);
 
     let statusLabel = "unknown";
+    let statusDetail: string | null = null;
     try {
       const resp = await fetch(`${BACKEND_URL}/api/register-push`, {
         method: "POST",
@@ -134,12 +207,30 @@ export async function registerForPushNotifications(): Promise<void> {
         }),
       });
       statusLabel = `HTTP ${resp.status}`;
+      // #266 / #260 (Neo, 2026-08-20 — Paul): if the server refused us
+      // (any non-2xx), read the plain-English `detail` back so we can
+      // show it verbatim on the Diag screen. Without this we'd have
+      // "HTTP 502" on screen for a user who has no idea what that
+      // means; with this they see "Registrations are being refused by
+      // our push provider…" from the server itself.
+      if (!resp.ok) {
+        try {
+          const data = await resp.json();
+          if (data && typeof data.detail === "string") {
+            statusDetail = data.detail;
+          }
+        } catch {}
+      }
     } catch (e) {
       statusLabel = `network error: ${(e as Error)?.message ?? "unknown"}`;
     }
     await AsyncStorage.setItem(
       LAST_REGISTER_KEY,
-      JSON.stringify({ at: new Date().toISOString(), status: statusLabel }),
+      JSON.stringify({
+        at: new Date().toISOString(),
+        status: statusLabel,
+        detail: statusDetail,
+      }),
     );
     console.log("[QuakeGuard] push token registered for", user_id, statusLabel);
   } catch (e) {

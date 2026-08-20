@@ -1754,38 +1754,47 @@ async def register_push(body: RegisterPushBody, request: Request = None):
     """Register a device's native push token with the Emergent push relay,
     and remember it locally so we can broadcast alerts to every device.
 
-    #262 (Neo, 2026-08-20): this is the one write endpoint in the app with
-    no login in front of it (a phone must be able to register before it
-    has signed in anywhere), so it gets its own narrow safeguards instead:
-    reject anything that doesn't look like a real push token, and rate-
-    limit by IP so a script can't mass-create rows. Both run BEFORE
-    anything is written — a rejected/rate-limited call touches no
-    collection at all.
+    #266 / #260 (Neo, 2026-08-20 — Paul): "Please make sure that when
+    registration is refused for that reason, the app says so in plain
+    English on the Is this working? screen, and the dashboard's
+    Registered devices panel makes it obvious that registrations are
+    being refused rather than just showing an empty list that looks
+    normal."
+
+    Ordering (this is the fix — previously Mongo was written FIRST and
+    then the relay call could 500, leaving a row nobody could actually
+    push to):
+
+      1. Validate token format → 400 if bad.
+      2. Rate-limit by IP → 429 if exceeded.
+      3. Call the Emergent push relay:
+         - 2xx: relay accepted → upsert into push_devices and return 201.
+         - 4xx (except 429): relay refused the token/creds → DO NOT
+           write into push_devices (a row here would be a lie: the
+           relay wouldn't deliver to this device). Return 502 with a
+           plain-English detail so the mobile app can say so.
+         - 5xx: relay is transient-down → still upsert into
+           push_devices (best-effort: better to have the device on
+           file for when the relay comes back than lose it), return
+           502 with a "will retry" message.
+      4. Always log the attempt to push_registrations_log — that log is
+         the source of truth the dashboard's relay-health panel and
+         /admin/relay-health read to tell an operator that "any 0 count
+         below is misleading, registrations are being refused".
     """
     _validate_register_push_body(body)
     await _enforce_register_rate_limit(request)
     now = datetime.now(timezone.utc).isoformat()
-    await db.push_devices.update_one(
-        {"user_id": body.user_id},
-        {"$set": {
-            "user_id": body.user_id,
-            "platform": body.platform,
-            "device_token": body.device_token,
-            "updated_at": now,
-        },
-         "$setOnInsert": {"created_at": now},
-         # #262 follow-up: a device that successfully registers again is
-         # proof it's alive — clear any earlier dead_token mark from
-         # _prune_dead_devices so it isn't stuck excluded from counts and
-         # future sends forever.
-         "$unset": {
-             "dead_token": "", "dead_token_reason": "", "dead_token_at": "",
-         }},
-        upsert=True,
-    )
+
     relay_status: Optional[int] = None
     relay_body = None
     relay_error: Optional[str] = None
+    # Human-readable reason surfaced in the error detail. This string is
+    # displayed to the user by the mobile app (Is this working? screen)
+    # and by the dashboard (Registered devices panel), so it must be
+    # plain English — no "HTTP", no code numbers.
+    friendly_reason: Optional[str] = None
+
     try:
         resp = await _push_client.post(
             "/api/v1/push/users/register",
@@ -1796,45 +1805,316 @@ async def register_push(body: RegisterPushBody, request: Request = None):
             relay_body = resp.json()
         except Exception:
             relay_body = resp.text[:2000]
-        if resp.status_code == 401:
-            relay_error = "EMERGENT_PUSH_KEY missing or invalid"
-            raise HTTPException(500, relay_error)
-        if resp.status_code >= 500:
-            relay_error = f"Push provider {resp.status_code}"
-            raise HTTPException(502, "Push provider unavailable")
-        if not (200 <= resp.status_code < 300):
-            relay_error = f"Relay HTTP {resp.status_code}"
-            logging.warning(
-                f"Push register relay {resp.status_code}: {str(relay_body)[:500]}"
-            )
     except HTTPException:
         raise
     except Exception as e:
-        relay_error = str(e)
-        logging.warning(f"Push register failed (non-blocking): {e}")
-    finally:
-        # Persist a diagnostic row regardless of outcome, so we can see what
-        # SuprSend actually said when a specific device tried to register.
-        try:
-            token_len = len(body.device_token or "")
-            fingerprint = None
-            if token_len > 0:
-                head = body.device_token[:8]
-                tail = body.device_token[-8:] if token_len > 16 else ""
-                fingerprint = f"{head}…{tail}" if tail else head
-            await db.push_registrations_log.insert_one({
-                "user_id": body.user_id,
-                "platform": body.platform,
-                "token_length": token_len,
-                "token_fingerprint": fingerprint,
-                "created_at": now,
-                "relay_status": relay_status,
-                "relay_body": relay_body,
-                "relay_error": relay_error,
-            })
-        except Exception as e:
-            logging.warning(f"Failed to persist push_registrations_log: {e}")
+        # Network error reaching the relay. Treat as transient — same
+        # bucket as 5xx: keep the row so a retry can push through.
+        relay_error = f"network: {e}"
+        friendly_reason = (
+            "We couldn't reach the push provider right now. Your phone "
+            "will try again automatically."
+        )
+        logging.warning(f"Push register relay unreachable: {e}")
+
+    # Decide the outcome based on relay_status.
+    persisted = False
+    try:
+        if relay_status is not None and 200 <= relay_status < 300:
+            # Happy path — relay accepted the device.
+            await db.push_devices.update_one(
+                {"user_id": body.user_id},
+                {"$set": {
+                    "user_id": body.user_id,
+                    "platform": body.platform,
+                    "device_token": body.device_token,
+                    "updated_at": now,
+                },
+                 "$setOnInsert": {"created_at": now},
+                 # A successful re-register clears any earlier dead-token
+                 # mark from _prune_dead_devices — the phone is alive again.
+                 "$unset": {
+                     "dead_token": "", "dead_token_reason": "", "dead_token_at": "",
+                 }},
+                upsert=True,
+            )
+            persisted = True
+        elif relay_status is None:
+            # Network-error path: best-effort persist so retries work.
+            await db.push_devices.update_one(
+                {"user_id": body.user_id},
+                {"$set": {
+                    "user_id": body.user_id,
+                    "platform": body.platform,
+                    "device_token": body.device_token,
+                    "updated_at": now,
+                },
+                 "$setOnInsert": {"created_at": now}},
+                upsert=True,
+            )
+            persisted = True
+        elif relay_status >= 500:
+            # Transient relay failure — same bucket as network error.
+            relay_error = f"Push provider {relay_status}"
+            friendly_reason = (
+                "The push provider is having trouble right now. Your phone "
+                "will try again automatically."
+            )
+            await db.push_devices.update_one(
+                {"user_id": body.user_id},
+                {"$set": {
+                    "user_id": body.user_id,
+                    "platform": body.platform,
+                    "device_token": body.device_token,
+                    "updated_at": now,
+                },
+                 "$setOnInsert": {"created_at": now}},
+                upsert=True,
+            )
+            persisted = True
+        else:
+            # 4xx from the relay — auth or bad token. DO NOT persist.
+            # This is the single change that stops the "row on file but
+            # push undeliverable" false promise from #266.
+            if relay_status == 401:
+                relay_error = "EMERGENT_PUSH_KEY missing or invalid"
+                friendly_reason = (
+                    "Registrations are being refused by our push provider "
+                    "(server credentials issue). Your phone will register "
+                    "automatically once this is fixed on the server."
+                )
+            else:
+                relay_error = f"Relay HTTP {relay_status}"
+                friendly_reason = (
+                    "The push provider refused this device's registration. "
+                    "Try again in a moment; if that doesn't work, contact "
+                    "support."
+                )
+            logging.warning(
+                f"Push register relay {relay_status}: {str(relay_body)[:500]}"
+            )
+    except Exception as e:
+        # Mongo write itself failed — treat as 5xx.
+        relay_error = f"db: {e}"
+        friendly_reason = (
+            "The server couldn't save this device's registration. Try "
+            "again in a moment."
+        )
+        logging.warning(f"Push register DB write failed: {e}")
+
+    # Always persist a diagnostic row — this is what /admin/relay-health
+    # and the dashboard's relay-health banner read to decide whether to
+    # tell the operator "the 0 count is misleading, registrations are
+    # being refused".
+    try:
+        token_len = len(body.device_token or "")
+        fingerprint = None
+        if token_len > 0:
+            head = body.device_token[:8]
+            tail = body.device_token[-8:] if token_len > 16 else ""
+            fingerprint = f"{head}…{tail}" if tail else head
+        await db.push_registrations_log.insert_one({
+            "user_id": body.user_id,
+            "platform": body.platform,
+            "token_length": token_len,
+            "token_fingerprint": fingerprint,
+            "created_at": now,
+            "relay_status": relay_status,
+            "relay_body": relay_body,
+            "relay_error": relay_error,
+            "persisted": persisted,
+        })
+    except Exception as e:
+        logging.warning(f"Failed to persist push_registrations_log: {e}")
+
+    # If we didn't persist to push_devices, tell the caller — the mobile
+    # app uses this signal to keep the "on the alert list" row red and
+    # show the friendly_reason to the operator.
+    if not persisted:
+        raise HTTPException(
+            502,
+            friendly_reason
+            or "The server couldn't complete this device's registration.",
+        )
+    if relay_status is not None and relay_status >= 500 or relay_status is None:
+        # Persisted best-effort, but still tell the client the relay
+        # didn't confirm. This keeps the app honest about "the server
+        # can't currently reach your phone" without losing the row.
+        raise HTTPException(
+            502,
+            friendly_reason
+            or "The push provider is having trouble right now.",
+        )
     return {"status": "registered"}
+
+
+@api_router.get("/register-push/status/{user_id}")
+async def register_push_status(user_id: str):
+    """#266 / #260 (Neo, 2026-08-20 — Paul): a phone can ask the server
+    "do you actually hold my registration?" without an admin token.
+
+    This is the read-back the "Is this working?" screen uses to compute
+    a single, truthful "Your phone is on the server's alert list" row —
+    replacing two separate local-only checks (has-a-token + last-status-
+    was-2xx) that could disagree with the server. The row goes green
+    only when this endpoint returns `registered: true` and `dead_token:
+    false`.
+
+    No auth: the phone only asks about ITS OWN id (which it generated
+    itself and is not a secret — same value already exposed under
+    /admin/emsc/preview/candidates). Returns nothing that could be
+    exploited if guessed — a boolean plus timestamps plus the relay's
+    recent health.
+    """
+    uid = (user_id or "").strip()
+    if not uid:
+        raise HTTPException(400, "user_id is required.")
+
+    row = await db.push_devices.find_one(
+        {"user_id": uid},
+        {"_id": 0, "platform": 1, "device_token": 1, "created_at": 1,
+         "updated_at": 1, "dead_token": 1, "dead_token_reason": 1,
+         "dead_token_at": 1},
+    )
+
+    # Read the last registration attempt (successful OR refused) so the
+    # phone can show a plain-English reason line.
+    last_attempt = await db.push_registrations_log.find_one(
+        {"user_id": uid},
+        {"_id": 0, "created_at": 1, "relay_status": 1, "relay_error": 1,
+         "persisted": 1},
+        sort=[("created_at", -1)],
+    )
+
+    # Relay health across the entire population (not just this device):
+    # if none of the last 5 attempts across all devices persisted, the
+    # relay is refusing registrations globally and this phone's failure
+    # is not user-fixable. This is the same signal the dashboard's
+    # relay-health banner uses.
+    relay_healthy = await _relay_recent_healthy()
+
+    return {
+        "registered": bool(row and row.get("device_token") and not row.get("dead_token")),
+        "platform": (row or {}).get("platform"),
+        "last_seen_at": _iso((row or {}).get("updated_at")) if row else None,
+        "dead_token": bool((row or {}).get("dead_token")),
+        "dead_token_reason": (row or {}).get("dead_token_reason"),
+        "last_attempt": ({
+            "at": _iso(last_attempt.get("created_at")),
+            "relay_status": last_attempt.get("relay_status"),
+            "relay_error": last_attempt.get("relay_error"),
+            "persisted": bool(last_attempt.get("persisted")),
+        } if last_attempt else None),
+        "relay_healthy": relay_healthy,
+    }
+
+
+async def _relay_recent_healthy() -> Optional[bool]:
+    """Global signal: is the Emergent push relay currently accepting
+    registrations at all? Reads the last 5 push_registrations_log rows
+    (across all devices, most-recent-first) and returns:
+      True  — at least one relay 2xx in the sample.
+      False — sample non-empty AND every relay_status is None or non-2xx.
+      None  — no sample (fresh install, nobody has tried yet).
+
+    Kept small on purpose — a bigger window would need a "recent" bound
+    and wouldn't reflect the CURRENT state, which is exactly what the
+    banner needs to say."""
+    try:
+        rows = await db.push_registrations_log.find(
+            {}, {"_id": 0, "relay_status": 1},
+        ).sort("created_at", -1).to_list(5)
+    except Exception:
+        return None
+    if not rows:
+        return None
+    for r in rows:
+        rs = r.get("relay_status")
+        if rs is not None and 200 <= int(rs) < 300:
+            return True
+    return False
+
+
+@api_router.get("/admin/relay-health")
+async def admin_relay_health(
+    request: Request,
+    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
+):
+    """#266 / #260 (Neo, 2026-08-20 — Paul): dashboard-visible signal
+    that "registrations are being refused" so an empty Registered
+    Devices panel doesn't LOOK LIKE "no devices yet, all is well".
+
+    Returns the same `healthy` boolean as the per-device status endpoint
+    plus the last 5 attempts (status codes + reasons) so an operator can
+    see WHY at a glance without opening a database console.
+
+    Same auth as the read-only /admin/device-registry endpoint (admin
+    OR operator) — this is diagnostic information for the same audience.
+    """
+    principal = await resolve_principal(request, x_admin_token, ADMIN_TRIGGER_PASSWORD, db)
+    require_role(principal, "admin", "operator")
+
+    healthy = await _relay_recent_healthy()
+    rows = await db.push_registrations_log.find(
+        {}, {"_id": 0, "created_at": 1, "relay_status": 1,
+             "relay_error": 1, "persisted": 1, "user_id": 1,
+             "platform": 1, "token_fingerprint": 1},
+    ).sort("created_at", -1).to_list(5)
+
+    reason: Optional[str] = None
+    if healthy is False:
+        # Find the most-recent explicit relay_error to name the cause.
+        for r in rows:
+            err = r.get("relay_error")
+            if err:
+                if "EMERGENT_PUSH_KEY" in err:
+                    reason = (
+                        "The push provider is rejecting our credentials "
+                        "(EMERGENT_PUSH_KEY appears to be missing or "
+                        "invalid on this deployment). Any 0 count in "
+                        "Registered devices below is misleading."
+                    )
+                elif "network" in err:
+                    reason = (
+                        "We couldn't reach the push provider on the last "
+                        "few attempts. Any 0 count below may be misleading."
+                    )
+                else:
+                    reason = (
+                        f"The push provider refused the last few "
+                        f"registrations ({err}). Any 0 count below may "
+                        f"be misleading."
+                    )
+                break
+        if not reason:
+            reason = (
+                "The last few registration attempts were refused. Any 0 "
+                "count in Registered devices below may be misleading."
+            )
+    elif healthy is None:
+        reason = (
+            "No registration attempts have been recorded yet on this "
+            "deployment. The 0 count below is expected until a phone "
+            "registers."
+        )
+
+    return {
+        "healthy": healthy,
+        "reason": reason,
+        "recent_attempts": [
+            {
+                "at": _iso(r.get("created_at")),
+                "user_id": r.get("user_id"),
+                "platform": r.get("platform"),
+                "token_fingerprint": r.get("token_fingerprint"),
+                "relay_status": r.get("relay_status"),
+                "relay_error": r.get("relay_error"),
+                "persisted": bool(r.get("persisted")),
+            }
+            for r in rows
+        ],
+        "generated_at": _iso(datetime.now(timezone.utc)),
+    }
 
 @api_router.post("/mark-rescued")
 async def mark_rescued(

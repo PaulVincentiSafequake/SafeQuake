@@ -228,23 +228,64 @@ export default function DiagScreen() {
           </Text>
         </View>
 
-        {/* #252 (Batch 7 D): the top of the screen is now a human
-            "yes/no" health summary. Every line reads as an answer the
-            person could give out loud on the phone — no tokens, no
-            HTTP codes, no "bundled in the IPA". */}
+        {/* #266 / #260 (Neo, 2026-08-20 — Paul): the top of the screen
+            is a human "yes/no" health summary. What was previously two
+            separate rows ("signed up" from local state + "server
+            confirmed" from HTTP 2xx) is ONE truthful row driven by a
+            server round-trip — /api/register-push/status/{user_id}.
+            The green tick appears if AND ONLY IF the server actually
+            holds this device's registration and hasn't marked its
+            token dead. When it's red, we render the server's own
+            plain-English reason verbatim, so the app never says
+            "you're signed up" when the dashboard says "0 devices". */}
         <Section title="Health check">
           {(() => {
             const critical = perm?.ios?.allowsCriticalAlerts ?? null;
             const alertsOn = !!(perm?.granted && perm?.ios?.allowsAlert !== false);
             const soundOn = !!perm?.ios?.allowsSound;
-            const registered = !!info?.token_length && info.token_length > 0;
+
+            // Single source of truth: does the server hold us?
+            const onList = info?.server_has_device === true;
+
+            // If not, compose a plain-English reason. Priority is:
+            //  1. Relay explicitly refused (relay_healthy === false)
+            //  2. Rate-limited (429)
+            //  3. Other client-side refusal (4xx)
+            //  4. Network / haven't reached the server yet
+            //  5. Fresh install, nothing tried yet
+            const relayHealthy = info?.relay_healthy;
             const lastStatus = String(info?.last_register_status ?? "");
-            // Ok if the last registration reached the server — the
-            // backend confirms with a 2xx (usually 201). We check the
-            // FIRST digit rather than the exact code so a switch from
-            // 201 to 200 doesn't silently break the summary.
-            const serverOk = /^2\d\d/.test(lastStatus);
-            const overallReady = alertsOn && registered && serverOk;
+            const serverDetail = info?.last_register_detail ?? null;
+            let notOnListMessage =
+              "Your phone isn't on the alert list yet. Tap Try again below.";
+            if (info?.server_dead_token) {
+              notOnListMessage =
+                "This phone was marked unreachable on a previous attempt. Tap Try again to re-register.";
+            } else if (relayHealthy === false) {
+              notOnListMessage =
+                serverDetail ??
+                "Registrations are being refused by our push provider (server credentials issue). Your phone will register automatically once this is fixed on the server.";
+            } else if (/HTTP 429/.test(lastStatus)) {
+              notOnListMessage =
+                "Too many registration attempts from this network. Wait a few minutes, then pull down to refresh.";
+            } else if (/HTTP 4/.test(lastStatus)) {
+              notOnListMessage =
+                serverDetail ??
+                "Registration was refused. Tap Try again — if that doesn't work, contact support.";
+            } else if (/network error|HTTP 5/.test(lastStatus)) {
+              notOnListMessage =
+                serverDetail ??
+                "We couldn't reach the server. Check your connection and pull down to refresh.";
+            } else if (info?.server_has_device === null) {
+              // Read-back itself failed (no network / backend down).
+              notOnListMessage =
+                "Couldn't confirm with the server right now. Pull down to refresh, or tap Try again below.";
+            }
+
+            // "Overall ready" only claims yes when EVERY signal agrees:
+            // permissions on, sound on, and the SERVER says we're on
+            // its list. This is the honest version of the promise.
+            const overallReady = alertsOn && onList;
             return (
               <>
                 <HealthRow
@@ -269,15 +310,13 @@ export default function DiagScreen() {
                   yes="This app can make sound"
                   no="Sound for this app is off — the siren can't play. Turn it on in Settings."
                 />
+                {/* #266 / #260: the ONE truthful row that replaces the
+                    old two-row split. Green only when the server
+                    confirms — never from local state. */}
                 <HealthRow
-                  ok={registered}
-                  yes="Your phone is signed up to receive alerts"
-                  no="Your phone hasn't finished signing up. Tap Try again below."
-                />
-                <HealthRow
-                  ok={serverOk}
-                  yes="The server has confirmed it can reach your phone"
-                  no="The server hasn't confirmed reach yet. Pull down to refresh, or tap Try again below."
+                  ok={onList}
+                  yes="Your phone is on the server's alert list"
+                  no={notOnListMessage}
                 />
               </>
             );
@@ -295,7 +334,7 @@ export default function DiagScreen() {
             label="What's fixed in it"
             value={
               (info?.app_version ?? "?") +
-              " — #208 R4 primary alert routes to check-in, #245 type-to-confirm on trigger, #199 clear-on-stand-down, #247 saved place no longer points at wrong city, #249 saved places on the map, #211 recency-ramp map key, #243 zoom in to epicentre, #250 not-responding wording, #252 human-first diagnostics, #244 honest test-button wording."
+              " — #266/#260 truthful registration status (single row driven by a server read-back, never local state), #208 R4 primary alert routes to check-in, #245 type-to-confirm on trigger, #199 clear-on-stand-down, #247 saved place no longer points at wrong city, #249 saved places on the map, #211 recency-ramp map key, #243 zoom in to epicentre, #250 not-responding wording, #252 human-first diagnostics, #244 honest test-button wording."
             }
           />
         </Section>
@@ -354,7 +393,7 @@ export default function DiagScreen() {
             {"\n\n"}
             This uses the same internal path a real second alert uses. The
             one thing it cannot test is Apple&apos;s delivery of the second
-            notification — that's a network round-trip, and this rehearsal
+            notification — that&apos;s a network round-trip, and this rehearsal
             runs entirely on your phone.
           </Text>
         </Section>
@@ -500,11 +539,44 @@ export default function DiagScreen() {
                 value={(() => {
                   const s = String(info?.last_register_status ?? "");
                   if (!s || s === "—") return "—";
-                  if (/^2\d\d/.test(s)) return "OK — server confirmed";
-                  if (/^4\d\d/.test(s)) return "Not accepted — try Re-register above";
-                  if (/^5\d\d/.test(s)) return "Server had trouble — will retry";
+                  if (/^HTTP 2\d\d/.test(s)) return "OK — server confirmed";
+                  if (/^HTTP 4\d\d/.test(s)) return "Not accepted — try Re-register above";
+                  if (/^HTTP 5\d\d/.test(s)) return "Server had trouble — will retry";
                   return s;
                 })()}
+              />
+              {/* #266 / #260: the server's own plain-English reason
+                  (verbatim from /register-push detail), so support can
+                  read what the phone actually saw without deciphering
+                  status codes. */}
+              {info?.last_register_detail ? (
+                <Row label="Server said" value={info.last_register_detail} />
+              ) : null}
+              <Row
+                label="On server's list"
+                value={
+                  info?.server_has_device === true ? "yes" :
+                  info?.server_has_device === false ? "no" : "unknown"
+                }
+                valueColor={
+                  info?.server_has_device === true ? "#1F8A3A" :
+                  info?.server_has_device === false ? "#c21818" : undefined
+                }
+              />
+              {info?.server_last_seen_at ? (
+                <Row label="Server last saw" value={info.server_last_seen_at} />
+              ) : null}
+              <Row
+                label="Provider status"
+                value={
+                  info?.relay_healthy === true ? "healthy" :
+                  info?.relay_healthy === false ? "refusing registrations" :
+                  "unknown"
+                }
+                valueColor={
+                  info?.relay_healthy === true ? "#1F8A3A" :
+                  info?.relay_healthy === false ? "#c21818" : undefined
+                }
               />
               <Row
                 label="Siren asset"
