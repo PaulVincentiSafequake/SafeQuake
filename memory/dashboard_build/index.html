@@ -6412,19 +6412,27 @@ window.QuakeAngelRescue = (function () {
     var esc = window.qgEsc;
     var reg = d.registered_at ? new Date(d.registered_at).toLocaleString() : "—";
     var seen = d.last_seen_at ? new Date(d.last_seen_at).toLocaleString() : "—";
-    return '<tr>' +
+    var isDead = d.status === "dead_token";
+    var statusCell = isDead
+      ? '<span style="color:#8a5a00; font-weight:600" title="' +
+        esc(d.dead_token_reason || "") + '">Dead (excluded)</span>'
+      : '<span style="color:#1a7a35">Active</span>';
+    return '<tr' + (isDead ? ' style="opacity:.6"' : '') + '>' +
       '<td style="padding:4px 8px; font-family:ui-monospace,monospace; font-size:11px">' + esc(d.device_id || "") + '</td>' +
       '<td style="padding:4px 8px">' + esc((d.platform || "").toUpperCase()) + '</td>' +
       '<td style="padding:4px 8px; white-space:nowrap; font-size:12px">' + esc(reg) + '</td>' +
       '<td style="padding:4px 8px; white-space:nowrap; font-size:12px">' + esc(seen) + '</td>' +
+      '<td style="padding:4px 8px; font-size:12px">' + statusCell + '</td>' +
       '</tr>';
   }
 
   function _renderDevices(d) {
     var esc = window.qgEsc;
+    var deadCount = (d.devices || []).filter(function (x) { return x.status === "dead_token"; }).length;
     _devSummary.innerHTML =
-      '<b>' + esc(String(d.total || 0)) + ' total</b> · ' +
+      '<b>' + esc(String(d.total || 0)) + ' total (will actually siren)</b> · ' +
       esc(String(d.ios || 0)) + ' iOS · ' + esc(String(d.android || 0)) + ' Android' +
+      (deadCount ? ' · <span style="color:#8a5a00">' + esc(String(deadCount)) + ' dead, excluded from that count</span>' : '') +
       ' <span style="color:var(--text-muted); font-size:11px">' +
       '(same count as the trigger confirmation) · fetched ' +
       esc(d.generated_at ? new Date(d.generated_at).toLocaleTimeString() : "now") + '</span>';
@@ -6439,6 +6447,7 @@ window.QuakeAngelRescue = (function () {
         '<th style="padding:6px 8px">Platform</th>' +
         '<th style="padding:6px 8px">Registered</th>' +
         '<th style="padding:6px 8px">Last seen</th>' +
+        '<th style="padding:6px 8px">Status</th>' +
       '</tr></thead><tbody>' +
       d.devices.map(_devFmtRow).join("") +
       '</tbody></table>';

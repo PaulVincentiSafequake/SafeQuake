@@ -203,6 +203,77 @@ def _fingerprint(token: str) -> str:
 TREMOR_CATEGORY_ID = "TREMOR_INFO"
 
 
+# ---------- #262 cleanup half (Neo, 2026-08-20 — Paul) ----------------
+# "Automatically remove dead/uninstalled devices." Apple's APNs response
+# is the one place in this system that gives a DEFINITIVE, first-party
+# signal that a token is dead:
+#   - "Unregistered"   (usually HTTP 410) — the app was uninstalled, or
+#                        the OS invalidated the token. Permanent.
+#   - "BadDeviceToken"  (HTTP 400) — malformed/wrong-environment token
+#                        that ALSO failed the sandbox fallback in
+#                        _send_one (see below) — i.e. bad in both
+#                        environments, not just a prod/sandbox mismatch.
+#
+# Deliberately narrow: a timeout, a 5xx, or any other transient failure
+# leaves the row alone. Losing a real, working device over a network
+# blip would be a far worse outcome than a stale row sitting in a count
+# for a while longer.
+#
+# SCOPE: this covers the direct-APNs (iOS) path only — every send_*
+# function below routes through _send_one and gets pruning "for free".
+# Android goes through the third-party Emergent/SuprSend relay
+# (push_relay.py), which does not currently surface a per-recipient
+# "this token is dead" signal in a way this code can trust — the relay
+# reports chunk-level HTTP status, not confirmed per-token invalidity, so
+# guessing at that risks deleting a live Android device on a
+# misread response. Not fixed here; flagged, not silently skipped.
+DEAD_TOKEN_REASONS = {"Unregistered", "BadDeviceToken"}
+
+
+async def _prune_dead_devices(
+    db: AsyncIOMotorDatabase, results: list["ApnsResult"],
+) -> int:
+    """SOFT-mark, never hard-delete. A prior version of this function did
+    `delete_many` here, which a deployment scan correctly flagged: this
+    runs from the always-on background re-check sweeper (recheckin.py),
+    which has no admin toggle and no human in the loop per call — an
+    automatic background job permanently destroying a real person's
+    device-registration row, possibly one still marked `trapped`, on a
+    single APNs response, with no way back, is too risky. Marking instead
+    of deleting:
+      - still satisfies "automatically remove dead/uninstalled devices"
+        from the counts Paul reads (see the `dead_token` filters added to
+        every device-selection query alongside this function), and
+      - keeps the row recoverable/auditable — nothing about a real
+        person's registration history is ever silently, permanently gone.
+    """
+    dead: dict[str, str] = {
+        r.user_id: r.reason for r in results
+        if r.reason in DEAD_TOKEN_REASONS and r.user_id
+    }
+    if not dead:
+        return 0
+    from datetime import datetime, timezone
+    now_iso = datetime.now(timezone.utc).isoformat()
+    marked = 0
+    for user_id, reason in dead.items():
+        res = await db.push_devices.update_one(
+            {"user_id": user_id, "dead_token": {"$ne": True}},
+            {"$set": {
+                "dead_token": True,
+                "dead_token_reason": reason,
+                "dead_token_at": now_iso,
+            }},
+        )
+        marked += res.modified_count
+    if marked:
+        logging.info(
+            f"[apns] #262 auto-marked {marked} dead device(s) "
+            f"(reason in {sorted(DEAD_TOKEN_REASONS)}): {sorted(dead)}"
+        )
+    return marked
+
+
 def _build_critical_payload(
     title: str,
     body: str,
@@ -584,9 +655,11 @@ async def send_critical_alerts(
             )
 
     results = await asyncio.gather(*(_guarded(d) for d in devices))
+    pruned = await _prune_dead_devices(db, results)
     return {
         "payload": payload,
         "events": [r.as_dict() for r in results],
+        "pruned_dead_devices": pruned,
     }
 
 
@@ -671,9 +744,11 @@ async def send_preview_alerts(
             )
 
     results = await asyncio.gather(*(_guarded(d) for d in devices))
+    pruned = await _prune_dead_devices(db, results)
     return {
         "payload": payload,
         "events": [r.as_dict() for r in results],
+        "pruned_dead_devices": pruned,
     }
 
 
@@ -754,11 +829,13 @@ async def send_recheck_prompts(
         return d, res
 
     pairs = await asyncio.gather(*(_guarded(d) for d in devices))
+    pruned = await _prune_dead_devices(db, [res for _d, res in pairs])
     return {
         "payload": last_payload,
         "events": [
             {**res.as_dict(), "check_id": d.get("check_id")} for d, res in pairs
         ],
+        "pruned_dead_devices": pruned,
     }
 
 
@@ -835,9 +912,11 @@ async def send_silent_cancel_reminders(
             )
 
     results = await asyncio.gather(*(_guarded(d) for d in devices))
+    pruned = await _prune_dead_devices(db, results)
     return {
         "payload": payload,
         "events": [r.as_dict() for r in results],
+        "pruned_dead_devices": pruned,
     }
 
 
@@ -908,7 +987,9 @@ async def send_stand_down(
             )
 
     results = await asyncio.gather(*(_guarded(d) for d in devices))
+    pruned = await _prune_dead_devices(db, results)
     return {
         "payload": payload,
         "events": [r.as_dict() for r in results],
+        "pruned_dead_devices": pruned,
     }

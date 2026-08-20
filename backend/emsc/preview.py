@@ -343,6 +343,7 @@ async def dispatch_preview_if_needed(
             "user_id": {"$in": device_ids},
             "platform": {"$in": ["ios", "iOS"]},
             "device_token": {"$exists": True, "$ne": None},
+            "dead_token": {"$ne": True},  # #262 follow-up
         },
         {"_id": 0, "user_id": 1, "device_token": 1, "notification_preset": 1},
     ).to_list(50)
@@ -662,6 +663,7 @@ async def dispatch_place_notices(
             "user_id": {"$in": device_ids},
             "platform": {"$in": ["ios", "iOS"]},
             "device_token": {"$exists": True, "$ne": None},
+            "dead_token": {"$ne": True},  # #262 follow-up
         },
         {"_id": 0, "user_id": 1, "device_token": 1, "notification_preset": 1,
          "places_enabled": 1},

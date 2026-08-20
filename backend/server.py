@@ -3,6 +3,7 @@ from fastapi.responses import HTMLResponse, Response
 from dotenv import load_dotenv, dotenv_values
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo import ReturnDocument
 import os
 import logging
 import httpx
@@ -994,6 +995,100 @@ class RegisterPushBody(BaseModel):
     platform: str          # "android" | "ios"
     device_token: str
 
+
+# #262 (Neo, 2026-08-20 — Paul): "reject invalid device tokens, rate-limit
+# registrations per IP." Two independent, narrow safeguards on
+# /register-push — the one endpoint in this app with no login in front
+# of it (by necessity: a phone must be able to register before anyone
+# has signed in anywhere).
+#
+# 1. Format validation — rejects garbage BEFORE it ever reaches
+#    push_devices, so it never inflates the count Paul reads on the
+#    trigger confirm dialog or the device registry. Deliberately loose
+#    on Android: FCM/native token length and charset aren't a single
+#    fixed spec the way APNs' is, and rejecting a real device over an
+#    over-strict guess would be worse than letting a little garbage
+#    through. iOS tokens ARE a fixed, well-documented format (raw APNs
+#    device tokens are hex), so that check is tight.
+_IOS_TOKEN_RE = _re.compile(r"^[0-9a-fA-F]{32,200}$")
+_ANDROID_TOKEN_MIN_LEN = 32
+_ANDROID_TOKEN_RE = _re.compile(r"^[A-Za-z0-9_\-:.]+$")
+
+def _validate_register_push_body(body: "RegisterPushBody") -> None:
+    platform = (body.platform or "").strip().lower()
+    if platform not in ("ios", "android"):
+        raise HTTPException(
+            400, "platform must be 'ios' or 'android'.",
+        )
+    token = (body.device_token or "").strip()
+    if not token:
+        raise HTTPException(400, "device_token is required.")
+    if platform == "ios" and not _IOS_TOKEN_RE.match(token):
+        raise HTTPException(
+            400,
+            "That doesn't look like a real iOS push token "
+            "(expected a hex string). Registration refused.",
+        )
+    if platform == "android" and (
+        len(token) < _ANDROID_TOKEN_MIN_LEN or not _ANDROID_TOKEN_RE.match(token)
+    ):
+        raise HTTPException(
+            400,
+            "That doesn't look like a real Android push token "
+            "(too short or contains unexpected characters). Registration refused.",
+        )
+
+
+# 2. Per-IP rate limit — a real phone registers once per install / token
+# refresh; a script trying to inflate the device count would not.
+# Generous on purpose (a household or a day of test-device reinstalls
+# behind one NAT'd IP must never be the thing that trips this) — this
+# is aimed at scripted abuse, not normal use. Bucketed by hour in Mongo
+# so it survives a backend restart and works the same across however
+# many backend replicas are running; a TTL index (see bootstrap_users_
+# and_indexes) expires old buckets automatically.
+REGISTER_RATE_LIMIT_PER_HOUR = 20
+
+def _client_ip(request: Optional[Request]) -> Optional[str]:
+    if request is None:
+        return None
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.client.host if request.client else None
+
+async def _enforce_register_rate_limit(request: Optional[Request]) -> None:
+    ip = _client_ip(request)
+    if not ip:
+        # Can't identify the caller — fail OPEN rather than block a real
+        # device because of a proxy/test-client quirk that hides the IP.
+        return
+    now = datetime.now(timezone.utc)
+    bucket = now.strftime("%Y-%m-%dT%H")
+    doc = await db.push_register_rate_limit.find_one_and_update(
+        {"_id": f"{ip}:{bucket}"},
+        {
+            "$inc": {"count": 1},
+            "$setOnInsert": {
+                "ip": ip,
+                "bucket": bucket,
+                "created_at": now,
+                "expires_at": now + timedelta(hours=2),
+            },
+        },
+        upsert=True,
+        return_document=ReturnDocument.AFTER,
+    )
+    count = (doc or {}).get("count", 1)
+    if count > REGISTER_RATE_LIMIT_PER_HOUR:
+        raise HTTPException(
+            429,
+            "Too many device registrations from this network in the last "
+            "hour. If this is a real device having trouble, wait a bit "
+            "and it will register automatically on next launch.",
+        )
+
+
 class TriggerAlertBody(BaseModel):
     triggeredBy: Optional[str] = None
     magnitude: Optional[float] = None
@@ -1655,9 +1750,20 @@ async def seismic_map_events(
 
 
 @api_router.post("/register-push", status_code=201)
-async def register_push(body: RegisterPushBody):
+async def register_push(body: RegisterPushBody, request: Request = None):
     """Register a device's native push token with the Emergent push relay,
-    and remember it locally so we can broadcast alerts to every device."""
+    and remember it locally so we can broadcast alerts to every device.
+
+    #262 (Neo, 2026-08-20): this is the one write endpoint in the app with
+    no login in front of it (a phone must be able to register before it
+    has signed in anywhere), so it gets its own narrow safeguards instead:
+    reject anything that doesn't look like a real push token, and rate-
+    limit by IP so a script can't mass-create rows. Both run BEFORE
+    anything is written — a rejected/rate-limited call touches no
+    collection at all.
+    """
+    _validate_register_push_body(body)
+    await _enforce_register_rate_limit(request)
     now = datetime.now(timezone.utc).isoformat()
     await db.push_devices.update_one(
         {"user_id": body.user_id},
@@ -1667,7 +1773,14 @@ async def register_push(body: RegisterPushBody):
             "device_token": body.device_token,
             "updated_at": now,
         },
-         "$setOnInsert": {"created_at": now}},
+         "$setOnInsert": {"created_at": now},
+         # #262 follow-up: a device that successfully registers again is
+         # proof it's alive — clear any earlier dead_token mark from
+         # _prune_dead_devices so it isn't stuck excluded from counts and
+         # future sends forever.
+         "$unset": {
+             "dead_token": "", "dead_token_reason": "", "dead_token_at": "",
+         }},
         upsert=True,
     )
     relay_status: Optional[int] = None
@@ -2087,7 +2200,8 @@ async def alert_stand_down(
         )
 
     devices = await db.push_devices.find(
-        {}, {"_id": 0, "user_id": 1, "device_token": 1, "platform": 1},
+        {"dead_token": {"$ne": True}},
+        {"_id": 0, "user_id": 1, "device_token": 1, "platform": 1},
     ).to_list(20000)
     ios = [
         {"user_id": d.get("user_id") or "", "device_token": d.get("device_token") or ""}
@@ -2162,7 +2276,8 @@ async def trigger_alert_preview(
     principal = await resolve_principal(request, x_admin_token, ADMIN_TRIGGER_PASSWORD, db)
     require_role(principal, "admin", "operator")
     devices = await db.push_devices.find(
-        {}, {"_id": 0, "user_id": 1, "platform": 1, "device_token": 1},
+        {"dead_token": {"$ne": True}},
+        {"_id": 0, "user_id": 1, "platform": 1, "device_token": 1},
     ).to_list(20000)
     ios = sum(
         1 for d in devices
@@ -2212,7 +2327,8 @@ async def device_registry(
 
     rows = await db.push_devices.find(
         {}, {"_id": 0, "user_id": 1, "platform": 1, "device_token": 1,
-             "created_at": 1, "updated_at": 1},
+             "created_at": 1, "updated_at": 1, "dead_token": 1,
+             "dead_token_reason": 1, "dead_token_at": 1},
     ).sort("updated_at", -1).to_list(5000)
 
     def _fingerprint(tok: Optional[str]) -> Optional[str]:
@@ -2221,17 +2337,25 @@ async def device_registry(
             return None
         return f"{tok[:8]}…{tok[-8:]}" if len(tok) > 16 else tok
 
+    # Counts here MUST match /admin/trigger-alert/preview exactly — both
+    # now exclude dead_token rows (#262 follow-up), since a dead-marked
+    # device is not actually a phone that would siren.
+    active = [r for r in rows if not r.get("dead_token")]
     ios = sum(
-        1 for d in rows
+        1 for d in active
         if (d.get("platform") or "").lower() == "ios" and d.get("device_token")
     )
-    android = sum(1 for d in rows if (d.get("platform") or "").lower() != "ios")
+    android = sum(1 for d in active if (d.get("platform") or "").lower() != "ios")
 
     return {
-        "total": len(rows),
+        "total": ios + android,
         "ios": ios,
         "android": android,
         "generated_at": _iso(datetime.now(timezone.utc)),
+        # Every row is still listed — including dead-marked ones — for
+        # full transparency (that was the whole point of #262). The
+        # `status` field is what distinguishes "counts toward a real
+        # trigger" from "known-dead, excluded from the count above".
         "devices": [
             {
                 "device_id": r.get("user_id"),
@@ -2239,6 +2363,9 @@ async def device_registry(
                 "registered_at": _iso(r.get("created_at")),
                 "last_seen_at": _iso(r.get("updated_at")),
                 "device_token_fingerprint": _fingerprint(r.get("device_token")),
+                "status": "dead_token" if r.get("dead_token") else "active",
+                "dead_token_reason": r.get("dead_token_reason"),
+                "dead_token_at": _iso(r.get("dead_token_at")),
             }
             for r in rows
         ],
@@ -2289,9 +2416,9 @@ async def trigger_alert(
             ),
         )
 
-    query = {}
+    query = {"dead_token": {"$ne": True}}
     if body.triggeredBy:
-        query = {"user_id": {"$ne": body.triggeredBy}}
+        query["user_id"] = {"$ne": body.triggeredBy}
     devices = await db.push_devices.find(
         query,
         {"_id": 0, "user_id": 1, "platform": 1, "device_token": 1},
@@ -2775,6 +2902,20 @@ async def bootstrap_users_and_indexes():
         await db.users.create_index("email_normalized", unique=True)
     except Exception as e:
         logger.warning("users index creation failed: %s", e)
+
+    # #262 (Neo, 2026-08-20): TTL index so hourly rate-limit buckets for
+    # /register-push clean themselves up — no cron, no unbounded growth.
+    # expireAfterSeconds=0 means "expire at the time stored in
+    # expires_at" (already set 2h in the future when the bucket is
+    # created), giving each bucket a generous grace window past its
+    # actual 1h rate-limit relevance before Mongo reaps it.
+    try:
+        await db.push_register_rate_limit.create_index(
+            "expires_at", expireAfterSeconds=0, name="ttl_expires_at",
+        )
+    except Exception as e:
+        logger.warning("push_register_rate_limit TTL index creation failed: %s", e)
+
 
     bootstrap_email = os.environ.get("BOOTSTRAP_ADMIN_EMAIL", "pmvincenti@gmail.com").strip().lower()
     if not bootstrap_email:

@@ -218,7 +218,10 @@ async def _dispatch_rechecks(
     tokens = {
         d["user_id"]: d.get("device_token")
         for d in await db.push_devices.find(
-            {"user_id": {"$in": ids}, "platform": "ios"},
+            {
+                "user_id": {"$in": ids}, "platform": "ios",
+                "dead_token": {"$ne": True},  # #262 follow-up
+            },
             {"_id": 0, "user_id": 1, "device_token": 1},
         ).to_list(2000)
     }

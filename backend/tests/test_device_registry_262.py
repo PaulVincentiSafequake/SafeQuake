@@ -55,6 +55,8 @@ def test_valid_admin_token_returns_expected_shape():
         assert set(row.keys()) == {
             "device_id", "platform", "registered_at",
             "last_seen_at", "device_token_fingerprint",
+            "status", "dead_token_reason", "dead_token_at",
         }
+        assert row["status"] in ("active", "dead_token")
         # The raw push token must never leave this endpoint.
         assert "device_token" not in row
