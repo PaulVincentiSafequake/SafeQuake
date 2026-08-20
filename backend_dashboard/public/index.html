@@ -909,7 +909,7 @@
      is bumped by hand every time we push the dashboard, and read by the
      stale-copy watchdog to decide whether the operator is looking at a
      cached-and-outdated tab. Format: YYYY-MM-DD-hhmmZ-feature-slug. -->
-<script>window.DASHBOARD_BUILD_STAMP = "2026-08-20-1615Z-neo-135-208-267";</script>
+<script>window.DASHBOARD_BUILD_STAMP = "2026-08-20-1650Z-neo-265v2";</script>
 
 <div id="qa-auth-container"></div>
 
@@ -1105,35 +1105,40 @@
   }
 
   function renderSignInButton() {
-    // #265 (Neo, 2026-08-20 — Paul): "the sign-in button often does
-    // not respond at all when clicked, and I have to fully restart
-    // the browser before sign-in works." Same class of failure as
-    // the em-dash statusText bug (#238 aftermath) — one silently
-    // broken call kills all sign-in.
+    // #265 v2 (Neo, 2026-08-20 — Paul, reopened):
+    //   "Sign in, then sign out, then click Sign in again on the red
+    //    banner. The button does nothing at all. Only Cmd+Option+R
+    //    recovers. Verified live on production after a hard refresh —
+    //    so this is not caching, it's the sign-out → sign-in-again
+    //    path inside one page session."
     //
-    // Root cause: renderSignInButton() was called from multiple paths
-    // (initial boot, sign-out reactor, session-expired banner, panel
-    // signin buttons). Each call did `container.innerHTML = ""` and
-    // re-ran `google.accounts.id.initialize()`. Google's docs say
-    // initialize is one-shot per page — repeated calls leave the
-    // rendered button in a state where click doesn't open the OAuth
-    // popup. Rebuilding the DOM node also orphans Google's internal
-    // handlers pointing at the previous node, so subsequent clicks
-    // fall through as no-ops.
-    //
-    // Fix (three parts):
-    //   1. Idempotent: if the sign-in banner is already visible, leave
-    //      it alone — don't rebuild DOM or reinitialize GSI.
-    //   2. initialize() runs exactly once per page load, tracked in
-    //      the module-level `_googleInitialized` flag.
-    //   3. Watchdog: if the user clicks and no credential callback
-    //      fires within 8s (Google is in the "silently broken" state),
-    //      show a plain-English "sign-in appears blocked" hint with a
-    //      Reload button — no more mystery unresponsive buttons.
-    if (_signInVisible()) {
-      return;
-    }
-
+    // What was wrong with v1 of this fix:
+    //   1. `_googleInitialized` guard: I made `initialize()` one-shot
+    //      per page load. WRONG. After a successful credential arrives,
+    //      GSI's internal state moves to "credential already delivered
+    //      for this session"; a re-`renderButton` on a fresh DOM node
+    //      shows the button visually but clicking it fires no callback
+    //      because GSI is not in "waiting for a credential" state.
+    //      Fix: re-`initialize()` on EVERY renderSignInButton call.
+    //      Google's docs explicitly say this is supported ("You can
+    //      call it multiple times to change the configuration.").
+    //   2. `_signInVisible()` idempotency: skipped rebuilds when a
+    //      banner + iframe already existed. Combined with (1), this
+    //      meant a sign-out re-render was silently dropped — the
+    //      iframe from the pre-sign-in session was preserved, and
+    //      that iframe is the dead one.
+    //      Fix: always rebuild. The cost is one iframe destroy/create
+    //      per sign-out event; the benefit is a button that actually
+    //      accepts a click.
+    //   3. `_wrappedGoogleCredential` still wired, so its watchdog
+    //      cancel still runs.
+    //   4. Watchdog wired to `pointerdown` on the parent wrapper.
+    //      WRONG. Google's iframe absorbs its own pointer events;
+    //      the parent's pointerdown never fires. That's why Paul
+    //      never saw the stuck-button hint.
+    //      Fix: time-based watchdog — armed the moment the banner
+    //      renders, cleared on a credential arrival. If 20s pass with
+    //      the banner visible and no credential, show the hint.
     container.innerHTML = "";
     const wrap = document.createElement("div");
     wrap.className = "qa-signed-out";
@@ -1146,29 +1151,37 @@
       '<div id="qa-google-button"></div>';
     container.appendChild(wrap);
 
+    // #265 v2: reset any GSI state left over from a previous sign-in.
+    // disableAutoSelect() records that the user just signed out so
+    // One Tap won't auto-pick the same account; cancel() dismisses
+    // any prompt in flight. Both are safe if GSI isn't loaded yet —
+    // the try/catch keeps this a best-effort reset.
+    try {
+      if (window.google && window.google.accounts && window.google.accounts.id) {
+        try { window.google.accounts.id.cancel(); } catch (_) {}
+        try { window.google.accounts.id.disableAutoSelect(); } catch (_) {}
+      }
+    } catch (_) {}
+
     const tryInit = () => {
       if (!window.google || !window.google.accounts || !window.google.accounts.id) {
         return setTimeout(tryInit, 100);
       }
-      // #265 fix (2): initialize exactly ONCE per page load.
-      if (!_googleInitialized) {
-        try {
-          window.google.accounts.id.initialize({
-            client_id: CONFIG.GOOGLE_CLIENT_ID,
-            callback: _wrappedGoogleCredential,
-            auto_select: false,
-            cancel_on_tap_outside: true,
-            // #265: opt out of FedCM for the button flow. FedCM's
-            // exponential cooldown cookie (`g_state`) is the exact
-            // mechanism that made "restart the browser" the only
-            // workaround. Standard OAuth popup does not have this
-            // failure mode.
-            use_fedcm_for_prompt: false,
-          });
-          _googleInitialized = true;
-        } catch (e) {
-          try { console.warn("[qa-auth] GSI initialize failed:", e); } catch (_) {}
-        }
+      // #265 v2: re-initialize EVERY render. The previous "one-shot"
+      // guard was the bug.
+      try {
+        window.google.accounts.id.initialize({
+          client_id: CONFIG.GOOGLE_CLIENT_ID,
+          callback: _wrappedGoogleCredential,
+          auto_select: false,
+          cancel_on_tap_outside: true,
+          // Standard OAuth popup — bypass FedCM cooldown (`g_state`
+          // cookie) which was the mechanism behind "restart the
+          // browser" recovery in earlier reports.
+          use_fedcm_for_prompt: false,
+        });
+      } catch (e) {
+        try { console.warn("[qa-auth] GSI initialize failed:", e); } catch (_) {}
       }
       try {
         window.google.accounts.id.renderButton(
@@ -1185,34 +1198,15 @@
       } catch (e) {
         try { console.warn("[qa-auth] GSI renderButton failed:", e); } catch (_) {}
       }
-      // #265 fix (3): watch the rendered button for clicks that
-      // produce no credential callback. Google renders inside an
-      // iframe so we can't listen to the actual click, but we CAN
-      // detect "button was visible and the tab was active but no
-      // credential arrived" by starting a watchdog on first user
-      // interaction with the container.
       _armStuckWatchdog();
     };
     tryInit();
   }
 
-  // #265 (Neo, 2026-08-20): idempotency helper — is the sign-in banner
-  // already on screen with a rendered Google button? Prevents multiple
-  // renderSignInButton() calls from destroying and rebuilding the DOM
-  // (which orphans Google's internal click handlers).
-  function _signInVisible() {
-    const wrap = container.querySelector(".qa-signed-out");
-    if (!wrap) return false;
-    const btnHost = wrap.querySelector("#qa-google-button");
-    // Google injects an iframe on successful renderButton — no iframe
-    // means the button never finished rendering and we should re-run.
-    return !!(btnHost && btnHost.querySelector("iframe, div[role='button']"));
-  }
-
-  // #265: wrap the credential callback so we can cancel the stuck-
-  // click watchdog the moment Google fires either a credential or
-  // an error. Also swallows any exception the underlying handler
-  // throws so it can't kill the auth flow silently (Pattern 5).
+  // #265 v2: wrap the credential callback so we cancel the stuck
+  // watchdog the moment a credential OR error arrives. Also
+  // swallows any exception the underlying handler throws so it
+  // can't kill the auth flow silently (Pattern 5).
   async function _wrappedGoogleCredential(response) {
     _cancelStuckWatchdog();
     try {
@@ -1223,46 +1217,41 @@
     }
   }
 
+  // #265 v2: time-based watchdog — the pointer-based one couldn't fire
+  // because Google's iframe absorbs its own events. This one starts
+  // the moment the banner renders and cancels on credential arrival.
+  // If 20s pass with the banner still visible, we surface a plain-
+  // English hint below the button so the operator is never left
+  // guessing whether the button is broken.
   var _stuckWatchdogTimer = null;
-  var _stuckWatchdogArmed = false;
   function _armStuckWatchdog() {
-    if (_stuckWatchdogArmed) return;
-    _stuckWatchdogArmed = true;
-    const wrap = container.querySelector(".qa-signed-out");
-    if (!wrap) return;
-    // First pointerdown inside the sign-in area starts an 8s timer.
-    // If no credential/error fires in that window, we assume Google's
-    // popup is being blocked (cooldown, popup blocker, etc.) and
-    // surface a plain-English hint.
-    const onFirstClick = function () {
-      wrap.removeEventListener("pointerdown", onFirstClick, true);
-      if (_stuckWatchdogTimer) clearTimeout(_stuckWatchdogTimer);
-      _stuckWatchdogTimer = setTimeout(function () {
-        // If we're already signed in, obviously not stuck.
-        if (getStoredJwt()) return;
-        _renderStuckHint();
-      }, 8000);
-    };
-    wrap.addEventListener("pointerdown", onFirstClick, true);
+    _cancelStuckWatchdog();
+    _stuckWatchdogTimer = setTimeout(function () {
+      if (getStoredJwt()) return; // signed in already — never mind.
+      _renderStuckHint();
+    }, 20000);
   }
   function _cancelStuckWatchdog() {
     if (_stuckWatchdogTimer) { clearTimeout(_stuckWatchdogTimer); _stuckWatchdogTimer = null; }
-    _stuckWatchdogArmed = false;
+    // Remove any hint that's currently showing.
+    var existing = document.getElementById("qa-stuck-hint");
+    if (existing) existing.remove();
   }
   function _renderStuckHint() {
     const wrap = container.querySelector(".qa-signed-out");
     if (!wrap) return;
-    if (wrap.querySelector(".qa-stuck-hint")) return;
+    if (document.getElementById("qa-stuck-hint")) return;
     const hint = document.createElement("div");
-    hint.className = "qa-stuck-hint";
-    hint.setAttribute("role", "alert");
+    hint.id = "qa-stuck-hint";
+    hint.setAttribute("role", "status");
     hint.style.cssText = [
       "flex-basis:100%", "margin-top:8px", "padding:10px 12px",
       "background:#fff", "color:#5a0f13", "border-radius:6px",
       "font-size:13px", "line-height:1.4",
     ].join(";");
     hint.innerHTML =
-      '<b>Sign-in didn\'t respond.</b> This can happen when a browser blocks the Google popup. ' +
+      '<b>Trouble signing in?</b> If the Google button does not respond, ' +
+      'reload the page to reset the sign-in flow. ' +
       '<button type="button" id="qa-stuck-reload" style="margin-left:8px; padding:4px 10px;' +
       ' background:#B0141A; color:#fff; border:0; border-radius:4px; font-weight:700; cursor:pointer">' +
       'Reload page</button>';
@@ -1270,10 +1259,6 @@
     const btn = document.getElementById("qa-stuck-reload");
     if (btn) btn.addEventListener("click", function () { window.location.reload(); });
   }
-  // Module-level guard so `google.accounts.id.initialize()` runs
-  // exactly ONCE per page load, regardless of how many times
-  // renderSignInButton() is called.
-  var _googleInitialized = false;
 
   // ── Global helpers exposed for use OUTSIDE this IIFE ─────────────────
   // A single HTML escaper accessible from every script tag on the page.
@@ -1451,6 +1436,24 @@
       // Signed back in — drop the greyed-out class. Panels rebuild
       // themselves on the next refresh tick.
       try { document.body.classList.remove("qg-signed-out"); } catch (_) {}
+      // #265 v2 (Neo, 2026-08-20 — Paul): also remove the session-
+      // expired red banner from the top of the page. Without this
+      // it stayed forever after a successful sign-back-in — a fixed-
+      // position element with z-index 99999 sitting on top of the
+      // dashboard. Same "post-transition state never cleaned up"
+      // shape as the sign-out→sign-in-again button bug itself.
+      try {
+        var b = document.getElementById("qg-session-expired-banner");
+        if (b && b.parentNode) b.parentNode.removeChild(b);
+      } catch (_) {}
+      // Same-tab post-signout "what was NOT saved" banner: it's still
+      // relevant after a sign-back-in only if the operator hasn't seen
+      // it yet. Since they're already signed in, they've moved on —
+      // clear it to avoid confusion.
+      try {
+        var loss = document.getElementById("qa-inflight-lost");
+        if (loss && loss.parentNode) loss.parentNode.removeChild(loss);
+      } catch (_) {}
     }
   });
 
