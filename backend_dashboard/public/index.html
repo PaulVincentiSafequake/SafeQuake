@@ -909,7 +909,7 @@
      is bumped by hand every time we push the dashboard, and read by the
      stale-copy watchdog to decide whether the operator is looking at a
      cached-and-outdated tab. Format: YYYY-MM-DD-hhmmZ-feature-slug. -->
-<script>window.DASHBOARD_BUILD_STAMP = "2026-08-20-1650Z-neo-265v2";</script>
+<script>window.DASHBOARD_BUILD_STAMP = "2026-08-20-1720Z-neo-265v3";</script>
 
 <div id="qa-auth-container"></div>
 
@@ -1105,80 +1105,67 @@
   }
 
   function renderSignInButton() {
-    // #265 v2 (Neo, 2026-08-20 — Paul, reopened):
-    //   "Sign in, then sign out, then click Sign in again on the red
-    //    banner. The button does nothing at all. Only Cmd+Option+R
-    //    recovers. Verified live on production after a hard refresh —
-    //    so this is not caching, it's the sign-out → sign-in-again
-    //    path inside one page session."
+    // #265 v3 (Neo, 2026-08-20 — Paul, third attempt):
+    //   Root cause was NEVER JavaScript. It was a fixed-position red
+    //   banner (qg-session-expired-banner) covering this banner's
+    //   Google button. Removed the covering banner; this function is
+    //   now close to the original pre-v1 behaviour.
     //
-    // What was wrong with v1 of this fix:
-    //   1. `_googleInitialized` guard: I made `initialize()` one-shot
-    //      per page load. WRONG. After a successful credential arrives,
-    //      GSI's internal state moves to "credential already delivered
-    //      for this session"; a re-`renderButton` on a fresh DOM node
-    //      shows the button visually but clicking it fires no callback
-    //      because GSI is not in "waiting for a credential" state.
-    //      Fix: re-`initialize()` on EVERY renderSignInButton call.
-    //      Google's docs explicitly say this is supported ("You can
-    //      call it multiple times to change the configuration.").
-    //   2. `_signInVisible()` idempotency: skipped rebuilds when a
-    //      banner + iframe already existed. Combined with (1), this
-    //      meant a sign-out re-render was silently dropped — the
-    //      iframe from the pre-sign-in session was preserved, and
-    //      that iframe is the dead one.
-    //      Fix: always rebuild. The cost is one iframe destroy/create
-    //      per sign-out event; the benefit is a button that actually
-    //      accepts a click.
-    //   3. `_wrappedGoogleCredential` still wired, so its watchdog
-    //      cancel still runs.
-    //   4. Watchdog wired to `pointerdown` on the parent wrapper.
-    //      WRONG. Google's iframe absorbs its own pointer events;
-    //      the parent's pointerdown never fires. That's why Paul
-    //      never saw the stuck-button hint.
-    //      Fix: time-based watchdog — armed the moment the banner
-    //      renders, cleared on a credential arrival. If 20s pass with
-    //      the banner visible and no credential, show the hint.
+    // What was reverted from v1 (commit e217603, later da31be8):
+    //   - `_googleInitialized` guard: back to just calling initialize()
+    //     each render. Google's docs support this.
+    //   - `_signInVisible()` idempotency skip: no longer needed — there
+    //     is no other control fighting to render into this container.
+    //   - Speculative reset sequence (cancel + disableAutoSelect +
+    //     use_fedcm_for_prompt:false): removed. Never proven necessary.
+    //     If a future GSI cooldown bug appears, it will need its OWN
+    //     evidence, not the same speculative shotgun.
+    //
+    // What we kept:
+    //   - `_wrappedGoogleCredential` wrapper — one-line safety net that
+    //     stops a handler exception from silently killing the auth
+    //     flow. Zero cost, small benefit.
+    //   - Time-based stuck-button watchdog — Paul's rule: "keep it as a
+    //     last-resort safety net if you like, but it must never be the
+    //     normal way a user signs in. Once the covering banner is
+    //     fixed, I should never see that hint at all." Timeout raised
+    //     from 20s to 45s so a normal Google popup interaction never
+    //     races it.
     container.innerHTML = "";
     const wrap = document.createElement("div");
     wrap.className = "qa-signed-out";
+    // #265 v3: aria-live so a screen reader announces this the moment
+    // we render — replaces the assistive-tech signal previously
+    // carried by the covering banner. Cleared on sign-back-in via
+    // clearSessionExpiredFlag() below.
+    wrap.setAttribute("role", "status");
+    wrap.setAttribute("aria-live", "polite");
+    const sessionExpired = !!window.__qgSessionJustExpired;
+    const heading = sessionExpired
+      ? "Your session ended — sign in again to keep working"
+      : "You are signed out — sign in to use the dashboard";
+    const subhead = sessionExpired
+      ? "The numbers on this page have stopped updating. Sign in to resume."
+      : "Live triage detail, map markers, the activity feed and report downloads unlock after sign-in. The signed-out view shows overall numbers only.";
     wrap.innerHTML =
       '<span class="qa-so-icon" aria-hidden="true">🔒</span>' +
       '<div class="qa-so-text">' +
-        '<h3>You are signed out — sign in to use the dashboard</h3>' +
-        '<p>Live triage detail, map markers, the activity feed and report downloads unlock after sign-in. The signed-out view shows overall numbers only.</p>' +
+        '<h3>' + heading + '</h3>' +
+        '<p>' + subhead + '</p>' +
       '</div>' +
       '<div id="qa-google-button"></div>';
     container.appendChild(wrap);
-
-    // #265 v2: reset any GSI state left over from a previous sign-in.
-    // disableAutoSelect() records that the user just signed out so
-    // One Tap won't auto-pick the same account; cancel() dismisses
-    // any prompt in flight. Both are safe if GSI isn't loaded yet —
-    // the try/catch keeps this a best-effort reset.
-    try {
-      if (window.google && window.google.accounts && window.google.accounts.id) {
-        try { window.google.accounts.id.cancel(); } catch (_) {}
-        try { window.google.accounts.id.disableAutoSelect(); } catch (_) {}
-      }
-    } catch (_) {}
 
     const tryInit = () => {
       if (!window.google || !window.google.accounts || !window.google.accounts.id) {
         return setTimeout(tryInit, 100);
       }
-      // #265 v2: re-initialize EVERY render. The previous "one-shot"
-      // guard was the bug.
       try {
         window.google.accounts.id.initialize({
           client_id: CONFIG.GOOGLE_CLIENT_ID,
           callback: _wrappedGoogleCredential,
           auto_select: false,
           cancel_on_tap_outside: true,
-          // Standard OAuth popup — bypass FedCM cooldown (`g_state`
-          // cookie) which was the mechanism behind "restart the
-          // browser" recovery in earlier reports.
-          use_fedcm_for_prompt: false,
         });
       } catch (e) {
         try { console.warn("[qa-auth] GSI initialize failed:", e); } catch (_) {}
@@ -1203,12 +1190,15 @@
     tryInit();
   }
 
-  // #265 v2: wrap the credential callback so we cancel the stuck
-  // watchdog the moment a credential OR error arrives. Also
-  // swallows any exception the underlying handler throws so it
-  // can't kill the auth flow silently (Pattern 5).
+  // #265 v3: small safety wrapper. Cancels the watchdog immediately
+  // on a credential arrival AND catches an unlikely handler exception
+  // so it can't take the auth flow with it. Zero cost, small benefit.
   async function _wrappedGoogleCredential(response) {
     _cancelStuckWatchdog();
+    // Clear the "session just expired" flag now that the operator is
+    // signing back in — next render (if any) will read the neutral
+    // heading, not the alarm one.
+    try { window.__qgSessionJustExpired = false; } catch (_) {}
     try {
       await onGoogleCredential(response);
     } catch (e) {
@@ -1217,23 +1207,21 @@
     }
   }
 
-  // #265 v2: time-based watchdog — the pointer-based one couldn't fire
-  // because Google's iframe absorbs its own events. This one starts
-  // the moment the banner renders and cancels on credential arrival.
-  // If 20s pass with the banner still visible, we surface a plain-
-  // English hint below the button so the operator is never left
-  // guessing whether the button is broken.
+  // #265 v3: time-based stuck-button watchdog. Last-resort safety net,
+  // NOT the intended UX. If the covering-banner layout bug ever
+  // regresses (or a new one appears), this eventually surfaces a
+  // plain-English hint after 45s. Once the layout is correct the
+  // operator should never see this hint at all.
   var _stuckWatchdogTimer = null;
   function _armStuckWatchdog() {
     _cancelStuckWatchdog();
     _stuckWatchdogTimer = setTimeout(function () {
-      if (getStoredJwt()) return; // signed in already — never mind.
+      if (getStoredJwt()) return; // signed in — irrelevant.
       _renderStuckHint();
-    }, 20000);
+    }, 45000);
   }
   function _cancelStuckWatchdog() {
     if (_stuckWatchdogTimer) { clearTimeout(_stuckWatchdogTimer); _stuckWatchdogTimer = null; }
-    // Remove any hint that's currently showing.
     var existing = document.getElementById("qa-stuck-hint");
     if (existing) existing.remove();
   }
@@ -1346,46 +1334,46 @@
   // this app "no longer updating" can be a life-safety fact — the
   // trapped-count on screen may look calm because it isn't moving. The
   // only correct dismissal is signing back in, which the banner links
-  // to via a "Sign in again" button.
+  // #265 v3 (Neo, 2026-08-20 — Paul, third attempt):
+  //   "There are TWO sign-in controls, and the wrong one is on top.
+  //    After signing out, the red 'You've been signed out' banner
+  //    appears with its own 'Sign in again' button. That button does
+  //    nothing. The real Google sign-in button sits UNDERNEATH the
+  //    banner and is almost entirely covered by it. All three previous
+  //    attempts fixed code that was never broken."
+  //
+  // Recurring pattern #4 (content hidden behind fixed elements). The
+  // qgShowSessionExpiredBanner used to render a red bar at
+  // position:fixed;top:0;z-index:99999 that overlapped the .qa-signed-out
+  // banner. The overlapped banner IS the working sign-in control; the
+  // top-most banner's own "Sign in again" button was a dead control
+  // (called qaAuth.signIn(), which in turn called renderSignInButton()
+  // to rebuild the exact same covered banner — no visible change).
+  //
+  // Fix: don't render this as a fixed banner at all. The .qa-signed-out
+  // banner (which lives inside #qa-auth-container in normal document
+  // flow, before all other content) already communicates "you are
+  // signed out". If we need to distinguish "session expired mid-work"
+  // from "fresh page load, never signed in", we prepend a one-line
+  // note INSIDE that banner. No overlay, no cover, no dead controls.
+  //
+  // Signal preservation:
+  //   - Screen-reader announcement: the .qa-signed-out banner's <h3>
+  //     changes text ("Your session ended" / "You are signed out")
+  //     and we add aria-live="assertive" to the wrap so assistive tech
+  //     reads it out on mount.
+  //   - "Numbers no longer updating": the greyed-out `body.qg-signed-out`
+  //     class already communicates this visually via CSS.
+  //
+  // Callers of qgShowSessionExpiredBanner used to trigger it by
+  // side-effect on qgAuthed transitions. We keep the function so
+  // extant call sites don't 404, but it's now a no-op — the
+  // .qa-signed-out banner does the work.
   function qgShowSessionExpiredBanner() {
-    var id = "qg-session-expired-banner";
-    if (document.getElementById(id)) return;
-    var el = document.createElement("div");
-    el.id = id;
-    el.setAttribute("role", "alert");
-    // aria-live="assertive" so a screen reader announces this over any
-    // in-progress reading — a stopped feed is the one thing that
-    // interrupts. (Paul is dyslexic; assistive tech has to help here.)
-    el.setAttribute("aria-live", "assertive");
-    el.style.cssText = [
-      "position:fixed", "top:0", "left:0", "right:0", "z-index:99999",
-      "background:#b0141a", "color:#fff", "padding:14px 16px",
-      "font:600 15px system-ui, -apple-system, sans-serif",
-      "text-align:center", "box-shadow:0 2px 8px rgba(0,0,0,0.25)",
-    ].join(";");
-    // Sign-in button routes to whatever renders the sign-in flow. If
-    // no such handler is wired, the button silently no-ops rather than
-    // 404 — the banner itself is the signal.
-    el.innerHTML =
-      "You've been signed out. The numbers on this page are no longer updating." +
-      ' <button type="button" id="qg-session-signin-btn" style="margin-left:12px;background:#fff;color:#b0141a;border:0;padding:6px 12px;border-radius:4px;font-weight:700;cursor:pointer">Sign in again</button>';
-    document.body.appendChild(el);
-    var btn = document.getElementById("qg-session-signin-btn");
-    if (btn) {
-      btn.addEventListener("click", function () {
-        try {
-          if (window.qaAuth && typeof window.qaAuth.signIn === "function") {
-            window.qaAuth.signIn();
-          } else {
-            // Fallback: reload the page — a fresh load will re-run the
-            // dashboard's sign-in flow.
-            window.location.reload();
-          }
-        } catch (_) {
-          window.location.reload();
-        }
-      });
-    }
+    // Signal to renderSignInButton() that the NEXT render is a
+    // "session-expired" case, not a fresh page load, so it can use
+    // the more precise heading. Cleared when the user signs back in.
+    try { window.__qgSessionJustExpired = true; } catch (_) {}
   }
   window.qgShowSessionExpiredBanner = qgShowSessionExpiredBanner;
 
@@ -1688,9 +1676,11 @@
       }
     }
     // #135: post-sign-out red banner listing what was NOT saved.
-    // Rendered on top of the signed-out view. Auto-dismisses on
-    // sign-in (renderChip clears the whole container), or when the
-    // operator clicks the close button.
+    // #265 v3 (Neo, 2026-08-20 — Paul): NOT position:fixed. Renders
+    // as the FIRST child of body in normal document flow so it sits
+    // ABOVE the sign-in banner without covering it. Auto-dismisses
+    // on sign-in (renderChip clears it), or when the operator clicks
+    // the close button.
     function _renderInflightLossNotice(items) {
       const existing = document.getElementById("qa-inflight-lost");
       if (existing) existing.remove();
@@ -1698,19 +1688,17 @@
       b.id = "qa-inflight-lost";
       b.setAttribute("role", "alert");
       b.style.cssText = [
-        "position:fixed", "top:44px", "left:16px", "right:16px",
-        "z-index:9998", "padding:12px 16px 12px 16px",
+        "padding:12px 16px",
         "background:#fdecc8", "border:1px solid #d19b18",
-        "border-radius:6px", "color:#5c3d00",
+        "color:#5c3d00",
         "font-size:13px", "line-height:1.5",
-        "box-shadow:0 4px 10px rgba(0,0,0,0.12)",
-        "max-width:640px", "margin:0 auto",
+        "box-shadow:0 2px 6px rgba(0,0,0,0.10)",
       ].join(";");
       const list = items.map(function (s) {
         return '<li>' + String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;') + '</li>';
       }).join("");
       b.innerHTML =
-        '<div style="display:flex; gap:10px; align-items:flex-start">' +
+        '<div style="display:flex; gap:10px; align-items:flex-start; max-width:640px; margin:0 auto">' +
           '<div style="flex:1">' +
             '<b>Signed out for inactivity.</b> You were part-way through ' +
             'something and it was NOT saved:' +
@@ -1721,7 +1709,8 @@
             'font-size:20px; line-height:1; cursor:pointer; ' +
             'padding:0 4px">×</button>' +
         '</div>';
-      document.body.appendChild(b);
+      // Prepend to body as first child — in-flow, no cover.
+      document.body.insertBefore(b, document.body.firstChild);
       b.querySelector("button").addEventListener("click", function () { b.remove(); });
     }
     function scheduleExpiry() {
@@ -1832,14 +1821,23 @@
       bannerEl.id = "qa-incident-live-banner";
       bannerEl.setAttribute("role", "status");
       bannerEl.setAttribute("aria-live", "polite");
+      // #265 v3 (Neo, 2026-08-20 — Paul): NOT position:fixed.
+      // A fixed-position banner covers content underneath it — the
+      // exact recurring pattern #4 (content hidden behind fixed
+      // elements) that caused #265. `position:sticky; top:0` keeps
+      // the banner visible while scrolling but ALSO takes space in
+      // the document flow, so nothing gets covered. Prepended as the
+      // first child of body so it sits above everything on the page
+      // WITHOUT sitting ON TOP of anything.
       bannerEl.style.cssText = [
-        "display:none", "position:fixed", "top:0", "left:0", "right:0",
-        "z-index:9999", "padding:8px 16px",
+        "display:none", "position:sticky", "top:0",
+        "z-index:100", "padding:8px 16px",
         "background:#5a0f13", "color:#fff", "font-size:13px",
         "font-weight:600", "text-align:center",
         "box-shadow:0 2px 6px rgba(0,0,0,0.25)",
       ].join(";");
-      document.body.appendChild(bannerEl);
+      // Insert as the FIRST child so it pushes everything else down.
+      document.body.insertBefore(bannerEl, document.body.firstChild);
       return bannerEl;
     }
     async function tick() {
