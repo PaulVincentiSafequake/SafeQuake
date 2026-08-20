@@ -1061,6 +1061,35 @@
   }
 
   function renderSignInButton() {
+    // #265 (Neo, 2026-08-20 — Paul): "the sign-in button often does
+    // not respond at all when clicked, and I have to fully restart
+    // the browser before sign-in works." Same class of failure as
+    // the em-dash statusText bug (#238 aftermath) — one silently
+    // broken call kills all sign-in.
+    //
+    // Root cause: renderSignInButton() was called from multiple paths
+    // (initial boot, sign-out reactor, session-expired banner, panel
+    // signin buttons). Each call did `container.innerHTML = ""` and
+    // re-ran `google.accounts.id.initialize()`. Google's docs say
+    // initialize is one-shot per page — repeated calls leave the
+    // rendered button in a state where click doesn't open the OAuth
+    // popup. Rebuilding the DOM node also orphans Google's internal
+    // handlers pointing at the previous node, so subsequent clicks
+    // fall through as no-ops.
+    //
+    // Fix (three parts):
+    //   1. Idempotent: if the sign-in banner is already visible, leave
+    //      it alone — don't rebuild DOM or reinitialize GSI.
+    //   2. initialize() runs exactly once per page load, tracked in
+    //      the module-level `_googleInitialized` flag.
+    //   3. Watchdog: if the user clicks and no credential callback
+    //      fires within 8s (Google is in the "silently broken" state),
+    //      show a plain-English "sign-in appears blocked" hint with a
+    //      Reload button — no more mystery unresponsive buttons.
+    if (_signInVisible()) {
+      return;
+    }
+
     container.innerHTML = "";
     const wrap = document.createElement("div");
     wrap.className = "qa-signed-out";
@@ -1077,26 +1106,130 @@
       if (!window.google || !window.google.accounts || !window.google.accounts.id) {
         return setTimeout(tryInit, 100);
       }
-      window.google.accounts.id.initialize({
-        client_id: CONFIG.GOOGLE_CLIENT_ID,
-        callback: window.__qaGoogleCredential,
-        auto_select: false,
-        cancel_on_tap_outside: true,
-      });
-      window.google.accounts.id.renderButton(
-        document.getElementById("qa-google-button"),
-        {
-          theme: "outline",
-          size: "large",
-          type: "standard",
-          text: "signin_with",
-          shape: "rectangular",
-          logo_alignment: "left",
-        },
-      );
+      // #265 fix (2): initialize exactly ONCE per page load.
+      if (!_googleInitialized) {
+        try {
+          window.google.accounts.id.initialize({
+            client_id: CONFIG.GOOGLE_CLIENT_ID,
+            callback: _wrappedGoogleCredential,
+            auto_select: false,
+            cancel_on_tap_outside: true,
+            // #265: opt out of FedCM for the button flow. FedCM's
+            // exponential cooldown cookie (`g_state`) is the exact
+            // mechanism that made "restart the browser" the only
+            // workaround. Standard OAuth popup does not have this
+            // failure mode.
+            use_fedcm_for_prompt: false,
+          });
+          _googleInitialized = true;
+        } catch (e) {
+          try { console.warn("[qa-auth] GSI initialize failed:", e); } catch (_) {}
+        }
+      }
+      try {
+        window.google.accounts.id.renderButton(
+          document.getElementById("qa-google-button"),
+          {
+            theme: "outline",
+            size: "large",
+            type: "standard",
+            text: "signin_with",
+            shape: "rectangular",
+            logo_alignment: "left",
+          },
+        );
+      } catch (e) {
+        try { console.warn("[qa-auth] GSI renderButton failed:", e); } catch (_) {}
+      }
+      // #265 fix (3): watch the rendered button for clicks that
+      // produce no credential callback. Google renders inside an
+      // iframe so we can't listen to the actual click, but we CAN
+      // detect "button was visible and the tab was active but no
+      // credential arrived" by starting a watchdog on first user
+      // interaction with the container.
+      _armStuckWatchdog();
     };
     tryInit();
   }
+
+  // #265 (Neo, 2026-08-20): idempotency helper — is the sign-in banner
+  // already on screen with a rendered Google button? Prevents multiple
+  // renderSignInButton() calls from destroying and rebuilding the DOM
+  // (which orphans Google's internal click handlers).
+  function _signInVisible() {
+    const wrap = container.querySelector(".qa-signed-out");
+    if (!wrap) return false;
+    const btnHost = wrap.querySelector("#qa-google-button");
+    // Google injects an iframe on successful renderButton — no iframe
+    // means the button never finished rendering and we should re-run.
+    return !!(btnHost && btnHost.querySelector("iframe, div[role='button']"));
+  }
+
+  // #265: wrap the credential callback so we can cancel the stuck-
+  // click watchdog the moment Google fires either a credential or
+  // an error. Also swallows any exception the underlying handler
+  // throws so it can't kill the auth flow silently (Pattern 5).
+  async function _wrappedGoogleCredential(response) {
+    _cancelStuckWatchdog();
+    try {
+      await onGoogleCredential(response);
+    } catch (e) {
+      try { console.error("[qa-auth] credential handler threw:", e); } catch (_) {}
+      showError("Sign-in failed: " + (e && e.message || "unknown error"));
+    }
+  }
+
+  var _stuckWatchdogTimer = null;
+  var _stuckWatchdogArmed = false;
+  function _armStuckWatchdog() {
+    if (_stuckWatchdogArmed) return;
+    _stuckWatchdogArmed = true;
+    const wrap = container.querySelector(".qa-signed-out");
+    if (!wrap) return;
+    // First pointerdown inside the sign-in area starts an 8s timer.
+    // If no credential/error fires in that window, we assume Google's
+    // popup is being blocked (cooldown, popup blocker, etc.) and
+    // surface a plain-English hint.
+    const onFirstClick = function () {
+      wrap.removeEventListener("pointerdown", onFirstClick, true);
+      if (_stuckWatchdogTimer) clearTimeout(_stuckWatchdogTimer);
+      _stuckWatchdogTimer = setTimeout(function () {
+        // If we're already signed in, obviously not stuck.
+        if (getStoredJwt()) return;
+        _renderStuckHint();
+      }, 8000);
+    };
+    wrap.addEventListener("pointerdown", onFirstClick, true);
+  }
+  function _cancelStuckWatchdog() {
+    if (_stuckWatchdogTimer) { clearTimeout(_stuckWatchdogTimer); _stuckWatchdogTimer = null; }
+    _stuckWatchdogArmed = false;
+  }
+  function _renderStuckHint() {
+    const wrap = container.querySelector(".qa-signed-out");
+    if (!wrap) return;
+    if (wrap.querySelector(".qa-stuck-hint")) return;
+    const hint = document.createElement("div");
+    hint.className = "qa-stuck-hint";
+    hint.setAttribute("role", "alert");
+    hint.style.cssText = [
+      "flex-basis:100%", "margin-top:8px", "padding:10px 12px",
+      "background:#fff", "color:#5a0f13", "border-radius:6px",
+      "font-size:13px", "line-height:1.4",
+    ].join(";");
+    hint.innerHTML =
+      '<b>Sign-in didn\'t respond.</b> This can happen when a browser blocks the Google popup. ' +
+      '<button type="button" id="qa-stuck-reload" style="margin-left:8px; padding:4px 10px;' +
+      ' background:#B0141A; color:#fff; border:0; border-radius:4px; font-weight:700; cursor:pointer">' +
+      'Reload page</button>';
+    wrap.appendChild(hint);
+    const btn = document.getElementById("qa-stuck-reload");
+    if (btn) btn.addEventListener("click", function () { window.location.reload(); });
+  }
+  // Module-level guard so `google.accounts.id.initialize()` runs
+  // exactly ONCE per page load, regardless of how many times
+  // renderSignInButton() is called.
+  var _googleInitialized = false;
 
   // ── Global helpers exposed for use OUTSIDE this IIFE ─────────────────
   // A single HTML escaper accessible from every script tag on the page.
@@ -4358,6 +4491,17 @@ window.QuakeAngelRescue = (function () {
     Every device that will receive a real siren alert if you trigger one — the same
     count shown in the trigger confirmation, listed out. Read-only.
   </div>
+  <!-- #266 / #260 (Neo, 2026-08-20 — Paul): relay-health banner. Rendered
+       ABOVE the count so a "0 total" that would otherwise look like
+       "no testers signed up yet" is immediately explained by
+       "registrations are being refused". Hidden when relay is healthy
+       to avoid banner fatigue. -->
+  <div id="qg-relay-health-banner" style="display:none; margin:0 0 10px; padding:10px 12px;
+       background:#fdecc8; border:1px solid #d19b18; border-radius:6px;
+       color:#5c3d00; font-size:13px; line-height:1.4">
+    <b style="font-weight:800">⚠️ Registrations are being refused.</b>
+    <span id="qg-relay-health-reason"></span>
+  </div>
   <div id="qg-devices-summary" style="font-size:13px; color:var(--text); margin-bottom:10px">Loading…</div>
   <div style="margin-bottom:10px; display:flex; gap:8px; align-items:center">
     <button type="button" id="qg-devices-refresh" class="qg-export-btn">Refresh</button>
@@ -6470,6 +6614,14 @@ window.QuakeAngelRescue = (function () {
       _devPurgeBtn.style.display = (_devRole() === "admin") ? "" : "none";
     }
     _devSummary.textContent = "Loading…";
+
+    // #266 / #260 (Neo, 2026-08-20 — Paul): fetch relay health in
+    // parallel so a "0 total" is never presented without the reason
+    // ("registrations are being refused" — server credentials issue,
+    // provider outage, or "no attempts recorded yet"). Fire-and-
+    // forget so it never blocks the device list.
+    _refreshRelayHealth();
+
     try {
       var r = await window.qaApi("/api/admin/device-registry", { cache: "no-store" });
       if (!r.ok) {
@@ -6487,6 +6639,44 @@ window.QuakeAngelRescue = (function () {
           fallback: "We couldn't read the device list right now.",
         }) + '</span>';
       _devBody.innerHTML = "";
+    }
+  }
+
+  // #266 / #260: fetch /api/admin/relay-health and show the amber
+  // banner ABOVE the count when the push provider is refusing (or
+  // when no attempts have been recorded on this deployment at all).
+  // Never throws — the device panel keeps working even if this call
+  // fails; the banner just stays hidden, which is the safe default.
+  async function _refreshRelayHealth() {
+    var banner = document.getElementById("qg-relay-health-banner");
+    var reasonEl = document.getElementById("qg-relay-health-reason");
+    if (!banner || !reasonEl) return;
+    try {
+      var r = await window.qaApi("/api/admin/relay-health", { cache: "no-store" });
+      if (!r.ok) { banner.style.display = "none"; return; }
+      var d = await r.json();
+      // healthy === false → red-orange amber. healthy === null (no
+      // attempts) → grey-neutral info. healthy === true → hidden.
+      if (d.healthy === true) {
+        banner.style.display = "none";
+      } else if (d.healthy === false) {
+        banner.style.background = "#fdecc8";
+        banner.style.borderColor = "#d19b18";
+        banner.style.color = "#5c3d00";
+        banner.querySelector("b").textContent = "⚠️ Registrations are being refused.";
+        reasonEl.textContent = " " + (d.reason || "");
+        banner.style.display = "";
+      } else {
+        // healthy === null — nothing to warn about, just informational.
+        banner.style.background = "#eef2f7";
+        banner.style.borderColor = "#c7d0dc";
+        banner.style.color = "#3a4552";
+        banner.querySelector("b").textContent = "ℹ️ No registrations recorded yet.";
+        reasonEl.textContent = " " + (d.reason || "");
+        banner.style.display = "";
+      }
+    } catch (_) {
+      banner.style.display = "none";
     }
   }
 
