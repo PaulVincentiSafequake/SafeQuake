@@ -2056,8 +2056,12 @@
         }
         const b = ensureBanner();
         if (active) {
-          b.textContent = "⚠ Alert live — idle sign-out suspended. " +
-            (d.reason || "Send a stand-down to re-arm.");
+          // #277: the backend writes the whole sentence, in plain words,
+          // with the elapsed time on its own line. Nothing is prefixed
+          // here — a warning triangle on good news read as an alarm.
+          b.style.whiteSpace = "pre-line";
+          b.textContent = d.reason ||
+            "An alert is running. You will stay signed in while it is.";
           b.style.display = "block";
         } else {
           b.style.display = "none";
@@ -3022,7 +3026,11 @@
     background: #fff; padding: 20px 22px; border-radius: 8px;
     max-width: 460px; width: 90%; font-family: inherit;
   }
-  .qa-um-modal h3 { margin: 0 0 8px 0; font-size: 16px; font-weight: 600; }
+  .qa-um-modal h3 { margin: 0 0 8px 0; font-size: 16px; font-weight: 600;
+                    /* #275: in dark mode the heading inherited a pale
+                       colour and the most important dialog in the product
+                       looked greyed out, as if it were disabled. */
+                    color: #14181d; }
   /* #270: dialog text is written in short lines with blank lines between
      them. Without `pre-line` the browser folded it all into one block of
      prose, which is the hardest possible thing to read at 4am. */
@@ -3032,8 +3040,28 @@
   .qa-um-modal input[type="text"], .qa-um-modal input[type="datetime-local"] {
     width: 100%; padding: 8px 10px; border: 1px solid #cbd0d8; border-radius: 4px;
     font-size: 13px; font-family: inherit; box-sizing: border-box; margin-bottom: 12px;
+    /* #275: the dark-mode field styling leaked into the light dialog, so
+       the box you type the confirmation into looked switched off. */
+    background: #ffffff; color: #14181d;
   }
   .qa-um-modal-actions { display: flex; gap: 8px; justify-content: flex-end; }
+  /* #275: structured dialog body. One idea per block, the part that
+     matters in the middle, and a list you can open when you want names. */
+  #qa-um-modal-rich { max-height: 52vh; overflow-y: auto; margin-bottom: 12px; }
+  #qa-um-modal-rich h4 { margin: 14px 0 4px; font-size: 12px; font-weight: 700;
+                         letter-spacing: .04em; text-transform: uppercase;
+                         color: #5c6470; }
+  #qa-um-modal-rich h4:first-child { margin-top: 0; }
+  #qa-um-modal-rich p { margin: 0 0 6px; font-size: 13.5px; line-height: 1.55;
+                        color: #333; max-height: none; }
+  #qa-um-modal-rich .qg-sd-key { background: #fff6f6; border: 1px solid #e3b5b8;
+                                 border-radius: 6px; padding: 10px 12px; }
+  #qa-um-modal-rich details { margin-top: 8px; }
+  #qa-um-modal-rich summary { cursor: pointer; font-size: 13px; font-weight: 600;
+                              color: #163a6d; padding: 6px 0; min-height: 32px; }
+  #qa-um-modal-rich ul { margin: 6px 0 0; padding-left: 18px; }
+  #qa-um-modal-rich li { font-size: 13px; line-height: 1.55; margin-bottom: 6px;
+                         color: #333; }
 </style>
 
 <div id="qa-um-root" class="qa-um-panel" style="display:none">
@@ -3099,6 +3127,14 @@
   <div class="qa-um-modal">
     <h3 id="qa-um-modal-title">Confirm</h3>
     <p id="qa-um-modal-body"></p>
+    <!-- #275 (2026-08-21 — Paul): the stand-down dialog is the most
+         important dialog in the product — "the moment an operator could
+         walk away from people still asking for help" — and as one block of
+         text nobody could read it quickly. This slot takes a structured
+         body (headings, and a "Show me who" list) for dialogs that need
+         it. Everything put in here is built by us and escaped at the
+         point of insertion. -->
+    <div id="qa-um-modal-rich" style="display:none"></div>
     <input type="text" id="qa-um-modal-input" style="display:none" autocomplete="off" />
     <input type="datetime-local" id="qa-um-modal-datetime" style="display:none" />
     <!-- #267 (Neo, 2026-08-20 — Paul): plain-English feedback slot so
@@ -3134,6 +3170,7 @@
   const modalBg    = document.getElementById('qa-um-modal-bg');
   const modalTitle = document.getElementById('qa-um-modal-title');
   const modalBody  = document.getElementById('qa-um-modal-body');
+  const modalRich  = document.getElementById('qa-um-modal-rich');
   const modalInput = document.getElementById('qa-um-modal-input');
   const modalDate  = document.getElementById('qa-um-modal-datetime');
   const modalError = document.getElementById('qa-um-modal-error');
@@ -3173,6 +3210,10 @@
     modalInput.style.display = 'none';
     modalDate.style.display  = 'none';
     modalInput.value = ''; modalDate.value = '';
+    // #275: put the plain paragraph back and empty the structured slot,
+    // so the next dialog can never inherit the last one's layout.
+    if (modalRich) { modalRich.style.display = 'none'; modalRich.innerHTML = ''; }
+    modalBody.style.display = '';
     // #267: reset the plain-English error slot every close so the
     // next open starts clean.
     if (modalError) { modalError.style.display = 'none'; modalError.textContent = ''; }
@@ -3181,7 +3222,7 @@
   modalCancel.addEventListener('click', function () { closeModal(null); });
   modalBg.addEventListener('click', function (e) { if (e.target === modalBg) closeModal(null); });
 
-  function confirmTyping(title, body, expectedString, actionVerbPhrase) {
+  function confirmTyping(title, body, expectedString, actionVerbPhrase, richHtml) {
     // #267 (Neo, 2026-08-20 — Paul):
     //   "The trigger-alert confirmation box rejects a wrong phrase
     //    silently — just a brief red flash, no message. I typed it in
@@ -3208,7 +3249,18 @@
     //                     "continue" if a caller has not been updated.
     return new Promise(function (resolve) {
       modalTitle.textContent = title;
-      modalBody.textContent  = body;
+      // #275: `richHtml` is an optional structured body (headings and a
+      // "Show me who" list). When given, it REPLACES the paragraph — the
+      // two are never shown together, so there is one place to read.
+      if (richHtml && modalRich) {
+        modalRich.innerHTML = richHtml;
+        modalRich.style.display = 'block';
+        modalBody.style.display = 'none';
+        modalBody.textContent = '';
+      } else {
+        modalBody.style.display = '';
+        modalBody.textContent = body;
+      }
       modalInput.style.display = 'block';
       modalInput.placeholder = 'Type: ' + expectedString;
       modalInput.value = '';
@@ -6218,10 +6270,12 @@ window.QuakeAngelRescue = (function () {
     if (!el) return;
     var lines = [];
     var w = counts.waiting_for_answer || 0, d = counts.phone_went_dark || 0;
-    if (w || d) {
+    var na = counts.no_answer || 0;
+    if (w || d || na) {
       lines.push("Waiting for an answer: " + w + ".");
-      lines.push("Phone went dark: " + d + ".");
-      lines.push("Both are counted in the numbers above.");
+      lines.push("Got our question, no answer: " + na + ".");
+      lines.push("Phone went dark, we cannot confirm they got it: " + d + ".");
+      lines.push("All three are counted in the numbers above.");
     }
     (notes || []).forEach(function (n) { lines.push(n); });
     // #272: name the clock, once, where the numbers are explained. Every
@@ -6439,7 +6493,8 @@ window.QuakeAngelRescue = (function () {
       // reader and a list reader never see different words for the same
       // person.
       ((u.recordState && (u.recordState.state === "phone_went_dark" ||
-                          u.recordState.state === "waiting_for_answer"))
+                          u.recordState.state === "waiting_for_answer" ||
+                          u.recordState.state === "no_answer"))
         ? "<br><b>" + window.qgEsc(u.recordState.label) + "</b>"
         : "") +
       (u.needsExtraction ? "<br><b>🚪 Cannot get out — extraction needed</b>" : "") +
@@ -6489,11 +6544,16 @@ window.QuakeAngelRescue = (function () {
     // deliberately overridden, so that decision is never silent.
     var st = u.recordState || {};
     var silenceLine = "";
-    if (st.state === "phone_went_dark" || st.state === "waiting_for_answer") {
-      var icon = st.state === "phone_went_dark" ? "◌" : "◑";
+    // #276: five kinds now. "Got our question, no answer" is the
+    // worrying one — their own phone confirmed the question arrived. It
+    // gets the same weight as a dark phone, and the detail says which.
+    if (st.state === "phone_went_dark" || st.state === "waiting_for_answer" ||
+        st.state === "no_answer") {
+      var icon = st.state === "waiting_for_answer" ? "◑"
+        : (st.state === "no_answer" ? "◍" : "◌");
       silenceLine =
         '<div class="qg-state-line ' +
-        (st.state === "phone_went_dark" ? "dark" : "waiting") + '">' +
+        (st.state === "waiting_for_answer" ? "waiting" : "dark") + '">' +
         icon + " " + window.qgEsc(st.label || "") + " — " +
         window.qgEsc(st.detail || "") + "</div>";
     } else if (u.reportsImproving) {
@@ -6590,7 +6650,8 @@ window.QuakeAngelRescue = (function () {
         "This sends one message to " + name + ".\n\n" +
         "It says: \u201cAre you all right? No new earthquake. Please tap to " +
         "tell us how you are.\u201d\n\n" +
-        "No siren. It will not override silent mode.\n" +
+        "No siren. Their silent switch still works.\n" +
+        "It does come through Do Not Disturb, so they will see it.\n" +
         "It does use some of their battery.\n";
       if (lowBattery) {
         lines += "\nTheir battery is low" +
@@ -7453,45 +7514,56 @@ window.QuakeAngelRescue = (function () {
         0);
       return;
     }
-    // #274: name the people who stay on the board. A number on its own
-    // lets an operator call off an incident while somebody is still
-    // asking for help and never see their name.
-    var body =
-      "This calls the alert off.\n\n" +
-      clearing + " " + (clearing === 1 ? "phone" : "phones") +
-      " will be told the alert is over.\n" +
-      "They get a calm message and go back to the home screen.\n" +
-      "No siren. No banner. Nothing is deleted.\n\n";
-    if (staying > 0) {
-      body +=
-        staying + " " + (staying === 1 ? "person is" : "people are") +
-        " still asking for help.\n" +
-        (staying === 1 ? "This person stays" : "These people stay") +
-        " on the working board.\n" +
-        (staying === 1 ? "Their phone is" : "Their phones are") +
-        " NOT told the alert is over.\n\n";
-      if (stayingReal > 0) {
-        body += "Staying on the board:\n";
-        stayingList.forEach(function (p) {
-          var line = "• " + (p.name || "No name given");
-          if (p.code) line += " (" + p.code + ")";
-          line += " — " + (p.words || "Asked for help");
-          if (p.last_heard) line += ", last heard " + p.last_heard;
-          if (p.battery_pct != null) line += ", battery " + p.battery_pct + "%";
-          body += line + "\n";
-        });
-      }
-      if (stayingTests > 0) {
-        body += (stayingReal > 0 ? "\n" : "") +
-          "Also " + stayingTests + " test " +
-          (stayingTests === 1 ? "entry" : "entries") +
-          " stay on the board. Not real people.\n";
-      }
-      body += "\nCalling the alert off does not end their rescue.\n\n";
-    } else {
-      body += "Nobody is asking for help right now.\n\n";
+    // #275 (2026-08-21 — Paul): three parts with headings, the part that
+    // matters in the middle, and names behind one tap.
+    //   "A count is easy to click past; names are not."
+    // The headline number is staying_REAL_count. The first version used
+    // staying_count, which INCLUDED the test entries that the next line
+    // then counted again — the dialog said "13 people are still asking for
+    // help" and "also 13 test entries" about the same thirteen rows. An
+    // operator shown casualties who do not exist is worse than any
+    // wording fault. Real people and test entries are counted separately
+    // now, and the backend returns them separately.
+    var esc = window.qgEsc;
+    var whoList = "";
+    if (stayingReal > 0) {
+      whoList = "<details><summary>Show me who</summary><ul>";
+      stayingList.forEach(function (p) {
+        var line = "<strong>" + esc(p.code || "No code") + "</strong> · " +
+          esc(p.name || "No name given") + " · " + esc(p.words || "Asked for help");
+        if (p.waiting_words) line += " · waiting " + esc(p.waiting_words);
+        else if (p.last_heard) line += " · last heard " + esc(p.last_heard);
+        if (p.battery_pct != null) line += " · battery " + esc(p.battery_pct) + "%";
+        whoList += "<li>" + line + "</li>";
+      });
+      whoList += "</ul></details>";
     }
-    body += "Type this phrase exactly to confirm:";
+    var rich =
+      "<h4>What happens</h4><p>" +
+      clearing + " " + (clearing === 1 ? "person" : "people") +
+      " will be told the alert is over. " +
+      (clearing === 1 ? "They get" : "They get") +
+      " a calm message and go back to the home screen. No siren.</p>";
+    if (stayingReal > 0) {
+      rich += "<h4>Who stays on the board</h4><div class=\"qg-sd-key\"><p>" +
+        stayingReal + " " + (stayingReal === 1 ? "person is" : "people are") +
+        " still asking for help. " +
+        (stayingReal === 1 ? "They stay" : "They stay") +
+        " on the board and " +
+        (stayingReal === 1 ? "their phone is" : "their phones are") +
+        " not told anything. Calling the alert off does not end their " +
+        "rescue.</p>" + whoList + "</div>";
+    } else {
+      rich += "<h4>Who stays on the board</h4><p>Nobody is asking for help " +
+        "right now.</p>";
+    }
+    if (stayingTests > 0) {
+      rich += "<h4>Also staying</h4><p>" + stayingTests + " test " +
+        (stayingTests === 1 ? "entry" : "entries") +
+        ". These are not real people.</p>";
+    }
+    rich += "<h4>To confirm</h4><p>Type " + phrase + " below.</p>";
+    var body = "";
     var ok;
     try {
       // Batch 7 R5 hotfix (2026-08-19): via window.confirmTyping. See
@@ -7500,7 +7572,8 @@ window.QuakeAngelRescue = (function () {
         "Call the alert off?",
         body,
         phrase,
-        "recall this alert",
+        "call the alert off",
+        rich,
       );
     } catch (err) {
       showBanner("err",
@@ -7510,7 +7583,7 @@ window.QuakeAngelRescue = (function () {
       return;
     }
     if (!ok) {
-      showBanner("ok", "Cancelled — the alert was NOT called off.", 4000);
+      showBanner("ok", "Cancelled. The alert is still running.", 4000);
       return;
     }
 
