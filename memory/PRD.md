@@ -2109,3 +2109,89 @@ The only remaining browser boxes are unreachable fallbacks behind a
   lowest batteries least), #47 (a deliberate "ask everyone" control),
   #25 (cluster map markers), #188 (group triage by place), #258 (home screen
   redesign — only on request).
+
+## 2026-08-21 (night) — #275, #276, #277, after Paul's production round
+
+Verified closed by Paul on production, v1.0.41: #273 (preview tap opens the
+calm screen, no siren), #174/#205 (every reading present on it), #272 (one
+clock, Malta time, offset on the full history). The real alert punched
+through Focus, which is the critical entitlement working as intended.
+
+### #275 — the stand-down dialog said 13 casualties who did not exist
+Paul: "My working board showed 0 immediate, 0 serious and 1 minor. I believe
+the same 13 test people are being counted twice."
+
+He was right, and the count was the dashboard's fault, not the backend's.
+The headline line used `staying_count`, which INCLUDES test rows, and the
+next line then counted the same rows again as test entries. Checked against
+production: `staying_real_count: 0, staying_test_count: 13` — there were no
+real casualties at all, all thirteen were the seeded TEST people. The
+headline now reads `staying_real_count`, and the two numbers can never
+describe the same row twice.
+
+Restructured to Paul's three sections, with headings, the part that matters
+in the middle, and names behind one tap ("A count is easy to click past;
+names are not."): What happens / Who stays on the board (+ "Show me who",
+listing rescue code, name, how badly hurt, how long they have been waiting,
+battery) / Also staying. "Nothing is deleted" dropped from this dialog —
+it reassured about something nobody was worried about. Sentence case, no
+shouted NOT. Two contrast bugs found while looking at it in a browser: the
+dialog title and the typed-confirmation box inherited dark-mode colours and
+looked disabled. Fixed.
+
+### #276 — the check-in request never arrived, and re-checks never did either
+Paul pressed "Ask them to check in" on his own phone. The dashboard said
+sent. Nothing arrived, not even in Notification Centre.
+
+ROOT CAUSE, in the HEADERS, not the payload:
+  * `apns-expiration: 0` — "attempt delivery once, never store it". A phone
+    that is not instantly reachable loses the notification entirely and we
+    still get a 200.
+  * `apns-priority: 5` — invites Apple to delay it. Delay plus "do not
+    store" is how a push disappears silently.
+Both fixed: priority 10, and Apple keeps the question for 30 minutes.
+
+Paul asked whether the same had been happening to re-checks all along. It
+had. Every re-check went out with `apns-expiration: 0`, which means historic
+"no answer to the previous re-check" rows may be false negatives about
+trapped people. Re-checks now get 10 minutes of store-and-forward — long
+enough to survive a tunnel, short enough that it can never arrive after the
+next re-check in a 15-minute ladder.
+
+Interruption level raised from `active` to `time-sensitive`. Not critical —
+Paul's rule stands and the physical silent switch still wins — but an
+`active` notification is swallowed whole by any Focus mode, and a swallowed
+question manufactures false silence: the operator sees "asked, no answer"
+and sends help towards someone who is fine, while the genuinely unreachable
+look identical. Same entitlement the re-check ladder already relies on.
+
+TWO DIFFERENT FACTS, NOW SAID DIFFERENTLY. A 200 from Apple means Apple
+accepted the push; it says nothing about what the phone showed. So:
+  * The app now posts POST /api/push/receipt when it sees one of our
+    questions — on arrival, on tap, on a quiet `content-available` wake, and
+    for anything still sitting in Notification Centre at next launch.
+  * New record state `no_answer`, label "Got our question, no answer" — the
+    worrying one. The phone confirmed our question arrived and nobody
+    answered.
+  * `phone_went_dark` now says in words: "Their phone never confirmed our
+    question arrived, so we cannot tell whether they saw it."
+  * `ask_state.history_words` says which, and `ask_state.delivery` carries
+    what Apple actually returned (status, reason, apns-id, accepted_at,
+    confirmed_at) — Paul: "Tell me the real delivery response, not that our
+    code called the send function."
+  * Counted separately everywhere: /api/devices counts, the count notes, the
+    CSV and both PDFs. A confirmed-but-unanswered silence is excluded from
+    the mass-dark test — that phone plainly had a network.
+
+### #277 — the alert-live banner
+Was: "Alert live — idle sign-out suspended … 72h window closes."
+Now: "An alert is running. You will stay signed in while it is. This lasts
+until you call the alert off, or 3 days pass." with "Running for 2 hours 14
+minutes." on its own line. Written by the backend, so it took effect on
+production without a dashboard redeploy. The warning triangle is gone — it
+put an alarm on good news.
+
+### Tests
+- New `tests/test_delivery_truth_276.py` (13) and the testing agent's
+  `tests/test_review_276_277.py` (17). 42/42 green in that round.
+- `test_export_hardening.py` public-summary key set updated for `no_answer`.
