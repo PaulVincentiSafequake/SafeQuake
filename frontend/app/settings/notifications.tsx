@@ -197,6 +197,39 @@ export default function NotificationSettingsScreen() {
           </Text>
         </View>
 
+        {/* #279 (2026-08-21 — Paul, after his own check-in request landed
+            silently inside a Focus mode): "Better they decide knowingly
+            than discover it in an earthquake." An earthquake alert breaks
+            through Focus because it carries Apple's critical entitlement.
+            A check-in question deliberately does not — so say so, here,
+            with the way to change it one tap away. */}
+        <View style={styles.focusPanel}>
+          <Ionicons name="moon-outline" size={22} color="#C9A227" />
+          <View style={{ flex: 1, marginLeft: 10 }}>
+            <Text style={styles.focusTitle}>
+              Focus and Do Not Disturb can silence check-ins
+            </Text>
+            <Text style={styles.focusBody}>
+              After an earthquake we may ask you to check in. That question is
+              not an alarm, so a Focus mode can hide it without a sound.
+              {"\n\n"}
+              An earthquake alert is different. It always comes through.
+              {"\n\n"}
+              To let check-in questions through, turn on Time Sensitive
+              Notifications for Quake Angel.
+            </Text>
+            <TouchableOpacity
+              style={styles.focusBtn}
+              onPress={() => Linking.openSettings()}
+              accessibilityRole="button"
+              accessibilityLabel="Open iPhone settings for Quake Angel notifications"
+            >
+              <Text style={styles.focusBtnText}>Open my phone settings</Text>
+              <Ionicons name="chevron-forward" size={18} color="#0F1115" />
+            </TouchableOpacity>
+          </View>
+        </View>
+
         {loading ? (
           <ActivityIndicator style={{marginTop: 40}} color="#5DB1FF" />
         ) : (
@@ -287,6 +320,22 @@ const styles = StyleSheet.create({
   },
   ruleText: { flex: 1, color: "#B3E5C4", fontSize: 14, lineHeight: 20 },
   ruleTextBold: { fontWeight: "700", color: "#E7EDF5" },
+
+  // #279 Focus disclosure.
+  focusPanel: {
+    flexDirection: "row", alignItems: "flex-start",
+    backgroundColor: "#241E08", borderColor: "#7A6414", borderWidth: 1,
+    borderRadius: 12, padding: 14, marginBottom: 20,
+  },
+  focusTitle: { color: "#F2D96B", fontSize: 15, fontWeight: "700", marginBottom: 6 },
+  focusBody: { color: "#D8D2B8", fontSize: 14, lineHeight: 21 },
+  focusBtn: {
+    flexDirection: "row", alignItems: "center", justifyContent: "center",
+    gap: 6, marginTop: 14, minHeight: 48, borderRadius: 10,
+    backgroundColor: "#F2D96B", paddingHorizontal: 16,
+  },
+  focusBtnText: { color: "#0F1115", fontSize: 15, fontWeight: "700" },
+
 
   options: { gap: 10 },
   option: {

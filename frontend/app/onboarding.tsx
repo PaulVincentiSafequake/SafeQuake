@@ -258,6 +258,17 @@ export default function OnboardingScreen() {
               title="Delivered instantly"
               body="Uses Apple's push infrastructure for lowest latency."
             />
+            {/* #279 (2026-08-21 — Paul): said at setup, not discovered in an
+                earthquake. His own check-in question arrived inside a Focus
+                mode with no sound, hidden in a collapsed group. An alert
+                breaks through Focus; a check-in question does not, and we
+                are not making it a critical alert to fix that — the
+                entitlement matters more. So people are told plainly. */}
+            <BulletRow
+              icon="moon-outline"
+              title="Check-in questions can be silenced"
+              body="After a quake we may ask how you are. A Focus mode can hide that question. Alerts always come through."
+            />
           </View>
 
           {/* Apple Watch caveat — shown right next to the permission ask */}
@@ -268,7 +279,9 @@ export default function OnboardingScreen() {
           <Text style={styles.footnote}>
             You can change these settings later in{" "}
             <Text style={styles.footnoteBold}>Settings › Notifications › Quake Angel</Text>
-            .
+            . To let check-in questions through a Focus mode, turn on{" "}
+            <Text style={styles.footnoteBold}>Time Sensitive Notifications</Text>
+            {" "}there too.
           </Text>
         </ScrollView>
 

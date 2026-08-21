@@ -5930,9 +5930,11 @@ window.QuakeAngelRescue = (function () {
 
   function statusLabel(status, severity) {
     if (status === "trapped") {
-      if (severity === "red") return "TRAPPED — IMMEDIATE";
-      if (severity === "yellow") return "Trapped — Serious/Stable";
-      if (severity === "green") return "Trapped — Minor";
+      // #278: sentence case. Capitals for emphasis are shouting, and the
+      // words already carry the weight.
+      if (severity === "red") return "Trapped — immediate";
+      if (severity === "yellow") return "Trapped — serious";
+      if (severity === "green") return "Trapped — minor";
       return "Trapped";
     }
     if (status === "rescued") return "✅ Rescued (confirmed)";
@@ -6847,11 +6849,12 @@ window.QuakeAngelRescue = (function () {
         (e.battery_pct != null ? " · 🔋 " + e.battery_pct + "%" : "");
     } else if (e.kind === "recheck_answered") {
       var ans = {
-        same: "SAME — no change",
-        worse: "WORSE",
-        much_worse: "MUCH WORSE",
-        better: "BETTER — reports improving",
-      }[e.answer] || String(e.answer || "").toUpperCase();
+        // #278: "SAME" is code-speak. Everyday words, sentence case.
+        same: "no change since last time",
+        worse: "worse",
+        much_worse: "much worse",
+        better: "better",
+      }[e.answer] || String(e.answer || "").replace(/_/g, " ");
       var lag = "";
       if (e.queued_offline && e.received_at) {
         // A 45-minute gap is itself operational information about signal at
@@ -6860,7 +6863,7 @@ window.QuakeAngelRescue = (function () {
           window.qgTime(e.answered_at) + ", reached us " +
           window.qgTime(e.received_at) + " (queued offline)</span>";
       }
-      body = "🗣 <b>Answered: " + ans + "</b>" +
+      body = "🗣 <b>Answered — " + ans + "</b>" +
         (e.deteriorating ? ' <span class="qg-badge" style="background:#C21818">↑ deteriorating</span>' : "") +
         " · now " + statusLabel(e.status, e.severity) +
         (e.battery_pct != null ? " · 🔋 " + e.battery_pct + "%" : "") +

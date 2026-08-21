@@ -2195,3 +2195,38 @@ put an alarm on good news.
 - New `tests/test_delivery_truth_276.py` (13) and the testing agent's
   `tests/test_review_276_277.py` (17). 42/42 green in that round.
 - `test_export_hardening.py` public-summary key set updated for `no_answer`.
+
+## 2026-08-21 (late) — #278, #279, after Paul's v1.0.42 production round
+
+Verified closed by Paul on production: the check-in request arrives (the
+delivery-header fix worked), the full loop works end to end (asked from the
+dashboard, arrived on the phone, answered "I need help", landed on the board
+as immediate with the SOS badge and a running clock — the specific guarantee
+he asked for), the card tells the two facts apart correctly, and "Mark as
+rescued" records the operator, the note and Malta time with its offset.
+
+### #279 — Focus can still silence a check-in question. Recorded, not "fixed".
+Paul's phone put the check-in request in a silent collapsed group under
+"While in Personal Focus". He will NOT trade the critical entitlement for
+this, and neither will we. Two consequences, both now shipped:
+  1. People are TOLD at setup. A new bullet on the onboarding permission
+     screen ("Check-in questions can be silenced"), the footnote points at
+     Time Sensitive Notifications, and Settings › Notifications carries a
+     panel that says it in three short paragraphs with an "Open my phone
+     settings" button. Paul: "Better they decide knowingly than discover it
+     in an earthquake."
+  2. The operator wording stays exactly as it is. "Their phone has not
+     confirmed our question arrived" is the only truthful thing we can say
+     and it is what stops a coordinator drawing the wrong conclusion. It is
+     not to be "improved" into something more confident.
+
+### #278 — two wording faults in the history
+  * "Answered: SAME — no change" → "Answered — no change since last time".
+    Also worse / much worse / better, all sentence case, and any unmapped
+    answer now reads as words rather than being upper-cased.
+  * "TRAPPED — IMMEDIATE" → "Trapped — immediate"; the yellow and green
+    labels are "Trapped — serious" and "Trapped — minor".
+  Left alone deliberately: the triage GROUP headers and severity badges
+  (IMMEDIATE / SERIOUS / MINOR). Those are triage category names, not
+  emphasis, and they are what a rescuer reads across a room. Flagged to Paul
+  in case he wants them changed too.
