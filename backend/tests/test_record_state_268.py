@@ -53,7 +53,7 @@ class TestStatusOutranksDeviceState:
         )
         assert st.on_working_board is True
         assert st.state != rs.APP_REMOVED
-        assert "reported needing help" in st.held_reason
+        assert "asked for help" in st.held_reason
 
     def test_rescued_person_whose_app_is_removed_stays_on_the_board(self):
         st = cls({"status": "safe", "rescued_at": ago(100), "updated_at": ago(300)},
@@ -75,8 +75,8 @@ class TestLiveIncidentHoldsEveryone:
         st = cls({"status": "safe", "updated_at": ago(300)},
                  push("Unregistered"), incident_active=True)
         assert st.on_working_board is True
-        assert "an alert is live" in st.held_reason
-        assert "not a report that they are safe" in st.held_reason
+        assert "An alert is live" in st.held_reason
+        assert "not a message saying they are safe" in st.held_reason
 
     def test_same_record_moves_off_only_once_the_alert_is_stood_down(self):
         st = cls({"status": "safe", "updated_at": ago(300)},
@@ -91,7 +91,7 @@ class TestLiveIncidentHoldsEveryone:
                  push("Unregistered"), incident_active=True)
         assert st.on_working_board is True
         assert st.count_in_status_buckets is False
-        assert "not as a person who is not responding" in st.held_reason
+        assert "not counted as a person who is not responding" in st.held_reason
 
     def test_a_trapped_person_is_still_counted_as_trapped(self):
         # Status outranks device state in the COUNTS too, not just the board.
@@ -107,7 +107,7 @@ class TestOnlyUnregisteredMeansRemoved:
         st = cls({"status": "safe", "updated_at": ago(300)}, push("BadDeviceToken"))
         assert st.state == rs.DARK
         assert st.on_working_board is True
-        assert "not proof the app was removed" in st.token_note
+        assert "does not prove the app was removed" in st.token_note
 
     def test_destroyed_phone_produces_no_removal_signal_at_all(self):
         # No APNs reason at all — the safe default is "went dark".
@@ -159,7 +159,7 @@ class TestNeverUsed:
         st = cls(None, push(), ever_located=False)
         assert st.state == rs.NEVER_USED
         assert st.on_working_board is False
-        assert "no position has ever been recorded" in st.detail
+        assert "never been opened" in st.detail
 
     def test_someone_ever_located_is_never_demoted_to_never_used(self):
         st = cls({"status": None, "updated_at": ago(500)}, push(), ever_located=True)
@@ -178,7 +178,7 @@ class TestHumanResolution:
         assert st.state == rs.RESOLVED
         assert st.on_working_board is False
         assert "paul@quakeangel.app" in st.detail
-        assert "Nothing has been deleted" in st.detail
+        assert "Nothing was deleted" in st.detail
 
 
 # ── 7. Labels an operator reads aloud at 4am. ─────────────────────────
@@ -206,8 +206,8 @@ class TestMassDark:
     def test_cluster_is_reported_with_both_tests_passing(self):
         n = rs.detect_mass_dark([ago(m) for m in (60, 61, 63, 64, 66)], 8, now=NOW)
         assert n and n["count"] == 5
-        assert "network or power failure" in n["text"]
-        assert "Nobody has been moved or reclassified" in n["text"]
+        assert "phone network or the power went down" in n["text"]
+        assert "Nobody has been moved or relabelled" in n["text"]
 
     def test_below_the_absolute_floor_says_nothing(self):
         assert rs.detect_mass_dark([ago(60), ago(61), ago(62)], 3, now=NOW) is None
@@ -292,14 +292,15 @@ class TestCountsExcludeOffBoardRecords:
         c = _bucket(self._rows(), include_test=False)
         notes = counts_notes(c)
         joined = " ".join(notes)
-        assert "does not include" in joined
-        assert "app" in joined and "removed" in joined
+        assert "leaves out records we have set aside" in joined
+        # Bare numbers are the defect; the reassurance earns its space.
+        assert "Nothing is ever deleted" in joined
 
     def test_the_note_names_the_removed_records_when_there_are_any(self):
         from dataclasses import replace
         c = replace(_bucket(self._rows(), include_test=False), app_removed=2,
                     never_used=1, resolved_by_operator=1)
         joined = " ".join(counts_notes(c))
-        assert "deleted apps, not missing people" in joined
-        assert "we have no location for them" in joined
-        assert "resolved by an operator" in joined
+        assert "A removed app is not a missing person" in joined
+        assert "We have no place for them" in joined
+        assert "took off the board, with a reason" in joined

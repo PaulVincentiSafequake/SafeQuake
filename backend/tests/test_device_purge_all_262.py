@@ -70,7 +70,7 @@ def test_correct_phrase_purges_and_reports_counts():
     assert body["purged_by"]  # attributed to a principal, not blank
     assert "Removed" in body["message"]
     if body["kept_back"]:
-        assert "reported needing help" in body["message"]
+        assert "asked for help" in body["message"]
         for kept in body["kept_back_detail"]:
             assert kept["short_code"]
-            assert "needing help" in kept["why"]
+            assert "asked for help" in kept["why"]

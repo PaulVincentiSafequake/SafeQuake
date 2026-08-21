@@ -112,7 +112,7 @@ class TestDevicesEnvelope:
 
     def test_count_notes_contains_does_not_include(self):
         b = _devices()
-        assert any("does not include" in n for n in b["count_notes"])
+        assert any("leaves out records we have set aside" in n for n in b["count_notes"])
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -147,7 +147,7 @@ class TestFourSilenceStatesEndToEnd:
         # Still counted as trapped, not shunted into app_removed bucket.
         assert rs["count_in_status_buckets"] is True
         assert rs["held_reason"], "no held_reason recorded for the override"
-        assert "reported needing help" in rs["held_reason"]
+        assert "asked for help" in rs["held_reason"]
 
     def test_D_never_used_is_off_board(self):
         b = _devices()
@@ -191,7 +191,7 @@ class TestCountsHonesty:
     def test_count_notes_names_what_it_leaves_out(self):
         b = _devices()
         joined = " ".join(b["count_notes"])
-        assert "does not include" in joined
+        assert "leaves out records we have set aside" in joined
         assert "app" in joined and "removed" in joined
 
 
@@ -579,7 +579,7 @@ class TestZZ_PurgeAllLast:
             f"trapped person {C} was NOT kept back on wipe! kept={kept_ids}"
         )
         if j["kept_back"] > 0:
-            assert "reported needing help" in j["message"].lower()
+            assert "asked for help" in j["message"].lower()
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -613,7 +613,7 @@ class TestDuplicateAnswerCannotDropACasualty:
             headers=HDR, timeout=15,
         )
         assert r.status_code == 400, r.text
-        assert "itself" in r.json()["detail"]
+        assert "same record twice" in r.json()["detail"]
 
     def test_a_refused_confirmation_leaves_no_decision_on_file(self):
         """A 409 must not silence the suggestion for ever — otherwise the
@@ -641,7 +641,7 @@ class TestResolvingAHelpRecordNeedsADeliberateConfirmation:
             json={"reason_code": "accounted_for"}, headers=HDR, timeout=15,
         )
         assert r.status_code == 409, r.text
-        assert "reported needing help" in r.json()["detail"]
+        assert "asked for help" in r.json()["detail"]
         state, _ = _find(_devices(), C)
         assert state == "on"
 

@@ -42,4 +42,5 @@ def test_devices_payload_carries_the_board_split():
         assert d["label"]
         assert d["off_board_reason"]
     # Every number states what it leaves out.
-    assert any("does not include" in n for n in body["count_notes"])
+    assert any("leaves out records we have set aside" in n
+               for n in body["count_notes"])

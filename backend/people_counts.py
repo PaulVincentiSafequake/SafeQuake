@@ -314,50 +314,51 @@ def counts_notes_short(c: Counts) -> str:
         "These numbers cover the working rescue board only. They leave out "
         f"{excluded} set-aside "
         + ("record" if excluded == 1 else "records")
-        + " — app removed, app never used, or resolved by an operator. "
-        "Nothing has been deleted."
+        + ": app removed, app never used, or taken off by an operator. "
+        "Nothing was deleted."
     )
 
 
 def counts_notes(c: Counts) -> List[str]:
     """"Every number must say what it counts and what it leaves out."
-    These sentences ship with the numbers on the dashboard, in the PDF,
-    in the CSV and in the JSON export — one wording, every surface."""
+
+    Short lines, one idea each, plain words — Paul is dyslexic and asked
+    for both the dashboard and the app to read simply. See
+    memory/writing-and-layout-rules.md before changing any of this. These
+    exact sentences ship with the numbers on the dashboard, in the team
+    PDF and in the audit CSV, so there is one wording everywhere.
+    """
+    people = "person" if c.not_responding == 1 else "people"
     notes = [
-        f"“Not responding” counts {c.not_responding} "
-        f"{'person' if c.not_responding == 1 else 'people'} on the working "
-        "board. It does not include records where the phone reported the app "
-        "was removed, phones that have never used the app, or records an "
-        "operator has resolved.",
+        f"Not responding: {c.not_responding} {people} on the working board.",
+        "That number leaves out records we have set aside. They are listed "
+        "under \u201cNot on the working board\u201d.",
     ]
     if c.app_removed:
+        thing = "record" if c.app_removed == 1 else "records"
         notes.append(
-            f"{c.app_removed} "
-            f"{'record' if c.app_removed == 1 else 'records'} where the phone "
-            "told us the app was removed. These are deleted apps, not missing "
-            "people. Nothing was deleted."
+            f"Set aside: {c.app_removed} {thing} where the phone said the app "
+            "was removed. A removed app is not a missing person."
         )
     if c.app_removed_held_on_board:
+        n = c.app_removed_held_on_board
         notes.append(
-            f"{c.app_removed_held_on_board} of those "
-            f"{'is' if c.app_removed_held_on_board == 1 else 'are'} still shown "
-            "on the working board because an alert is live and they have not "
-            "answered — kept in view deliberately, and not counted as not "
-            "responding."
+            f"{n} of those {'is' if n == 1 else 'are'} still shown on the "
+            "board, because an alert is live and they have not answered."
         )
     if c.never_used:
+        n = c.never_used
         notes.append(
-            f"{c.never_used} "
-            + ("phone received the alert but has" if c.never_used == 1
-               else "phones received the alert but have")
-            + " never used the app, so we have no location for them."
+            f"Set aside: {n} {'phone' if n == 1 else 'phones'} that got the "
+            "alert but never used the app. We have no place for them."
         )
     if c.resolved_by_operator:
+        n = c.resolved_by_operator
         notes.append(
-            f"{c.resolved_by_operator} "
-            f"{'record' if c.resolved_by_operator == 1 else 'records'} were "
-            "resolved by an operator, with a reason recorded."
+            f"Set aside: {n} {'record' if n == 1 else 'records'} an operator "
+            "took off the board, with a reason."
         )
+    notes.append("Nothing is ever deleted. You can put any record back.")
     return notes
 
 

@@ -2310,11 +2310,14 @@ async def resolve_record(
     if code not in RESOLVE_REASONS:
         raise HTTPException(
             400,
-            "Choose why this record is coming off the working board: "
+            "Choose a reason for taking this record off the working board: "
             + ", ".join(sorted(RESOLVE_REASONS)),
         )
     if code == "other" and len(note) < 3:
-        raise HTTPException(400, "Say in a few words why, so the record explains itself later.")
+        raise HTTPException(
+            400,
+            "Say in a few words why. The record has to explain itself later.",
+        )
     if note:
         _cred = _looks_like_credential(note)
         if _cred:
@@ -2334,10 +2337,10 @@ async def resolve_record(
     if ever_helped and not payload.get("acknowledge_help_history"):
         raise HTTPException(
             409,
-            f"{_short_code(device_id)} has reported needing help at some "
-            "point. Taking that record off the working board needs a "
-            "deliberate confirmation — send acknowledge_help_history: true "
-            "with your reason, and it will be recorded against your name.",
+            f"{_short_code(device_id)} asked for help at some point. "
+            "Taking that record off the working board needs a second yes. "
+            "Nothing is deleted, and you can put it back. "
+            "Your name, the time and your reason go on the record.",
         )
 
     reason_text = RESOLVE_REASONS[code] + (f" — {note}" if note else "")
@@ -2391,9 +2394,8 @@ async def unresolve_record(
         "status": "ok",
         "device_id": device_id,
         "message": (
-            "The operator's decision has been undone and recorded. This record "
-            "is back to whatever its own phone says — if the phone reported the "
-            "app was removed, it will read that way again."
+            "Put back, and saved. This record now reads whatever its own phone "
+            "says. If the phone said the app was removed, it will say that."
         ),
     }
 
@@ -2428,8 +2430,8 @@ async def duplicate_decision(
     if other == device_id:
         raise HTTPException(
             400,
-            "A record cannot be the same person as itself. Pick the other "
-            "record you are comparing it with.",
+            "This is the same record twice. Pick the other card you are "
+            "comparing it with.",
         )
 
     rows = await db.device_status.find(
@@ -2443,7 +2445,7 @@ async def duplicate_decision(
     if decision == "rejected":
         await _record_decision(device_id, kind, principal, other_device_id=other)
         return {"status": "ok", "decision": decision,
-                "message": ("Recorded as two different people. Neither record "
+                "message": ("Saved as two different people. Neither record "
                             "was moved or merged.")}
 
     # Confirmed: the OLDER record (first seen earlier) is normally the
@@ -2479,10 +2481,10 @@ async def duplicate_decision(
     if _needed_help(older):
         raise HTTPException(
             409,
-            f"{_short_code(older.get('device_id'))} has reported needing help, "
-            "so it will not be taken off the working board by answering a "
-            "duplicate question. If it really is the same person, resolve that "
-            "record directly and record your reason.",
+            f"{_short_code(older.get('device_id'))} asked for help. "
+            "Answering this question will not take that record off the board. "
+            "If it really is the same person, use \u201cTake off the board\u201d "
+            "on that card and give your reason.",
         )
     newer_code = _short_code(newer.get("device_id"))
     # Only now — after the guards have passed — is the operator's answer
@@ -2514,9 +2516,9 @@ async def duplicate_decision(
         "kept_device_id": newer.get("device_id"),
         "resolved_at": now,
         "message": (
-            f"Recorded as the same person. {_short_code(older.get('device_id'))} "
-            f"moved off the working board; {newer_code} stays. Nothing was "
-            "deleted or merged."
+            f"Saved as the same person. "
+            f"{_short_code(older.get('device_id'))} is off the working board. "
+            f"{newer_code} stays. Nothing was deleted or merged."
         ),
     }
 
@@ -3222,8 +3224,8 @@ async def purge_all_devices(
     if await _rs.incident_is_active(db):
         raise HTTPException(
             409,
-            "An earthquake alert is live. Nothing can be wiped while an "
-            "alert is open — stand the alert down first, then try again.",
+            "An alert is live. Nothing can be wiped while an alert is open. "
+            "Call the alert off first, then try again.",
         )
     protected_ids = await _rs.help_history_ids(db)
     # Anyone whose CURRENT row shows help history too, not just the ledger.
@@ -3245,7 +3247,7 @@ async def purge_all_devices(
     now_iso = _iso(datetime.now(timezone.utc))
     kept_detail = [
         {"device_id": d, "short_code": _short_code(d),
-         "why": "This person has reported needing help at some point."}
+         "why": "This person asked for help at some point."}
         for d in kept_ids
     ]
     try:
@@ -3273,21 +3275,20 @@ async def purge_all_devices(
     )
     if len(kept_ids) == 1:
         message = (
-            f"Removed {res.deleted_count} registered device(s). 1 was kept "
-            "back because that person has reported needing help at some "
-            "point — records like that are never wiped."
+            f"Removed {res.deleted_count} phones. 1 was kept. "
+            "That person asked for help at some point. "
+            "Records like that are never wiped."
         )
     elif kept_ids:
         message = (
-            f"Removed {res.deleted_count} registered device(s). "
-            f"{len(kept_ids)} were kept back because those people have "
-            "reported needing help at some point — records like that are "
-            "never wiped."
+            f"Removed {res.deleted_count} phones. {len(kept_ids)} were kept. "
+            "Those people asked for help at some point. "
+            "Records like that are never wiped."
         )
     else:
         message = (
-            f"Removed {res.deleted_count} registered device(s). None had "
-            "ever reported needing help, so nothing was kept back."
+            f"Removed {res.deleted_count} phones. "
+            "None of them had ever asked for help, so nothing was kept."
         )
     return {
         "before": before,

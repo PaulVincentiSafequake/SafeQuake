@@ -247,9 +247,10 @@ def classify(
     token_note = None
     if (push_row or {}).get("dead_token") and not removed_at:
         token_note = (
-            f"This phone's push token was rejected ({dead_reason or 'reason not given'}). "
-            "That is not proof the app was removed, so this record is treated as "
-            "a phone that went dark."
+            "We could not reach this phone. "
+            f"Apple gave the reason: {dead_reason or 'not given'}. "
+            "That does not prove the app was removed. "
+            "So we treat this as a phone that went dark."
         )
 
     is_dark = silent_minutes is not None and silent_minutes > dark_after
@@ -257,22 +258,24 @@ def classify(
 
     def _clock_state() -> tuple[Optional[str], str]:
         """dark / waiting / answering, from the clock alone."""
+        # Short lines, one idea each — see memory/writing-and-layout-rules.md.
         if is_dark:
             return DARK, (
-                f"Nothing from this phone for {dur_words(silent_minutes)} "
-                f"(last heard {_clock(last)}). No contact possible. "
-                "The status and position shown are LAST KNOWN."
+                f"No word from this phone for {dur_words(silent_minutes)}. "
+                f"Last heard {_clock(last)}. "
+                "We cannot reach them. The status and place shown are the "
+                "last we knew."
             )
         if awaiting:
             return WAITING, (
-                "Alerted"
+                "We alerted them"
                 + (f" at {_clock(last_alert_at)}" if last_alert_at else "")
-                + ", no reply yet. The phone is still reachable — last heard "
-                + f"{dur_words(silent_minutes)} ago."
+                + ". No reply yet. The phone can still be reached. "
+                + f"Last heard {dur_words(silent_minutes)} ago."
             )
         return None, (
             f"Answering. Last heard {dur_words(silent_minutes)} ago."
-            if silent_minutes is not None else "No contact recorded yet."
+            if silent_minutes is not None else "No word from them yet."
         )
 
     # 1 ── a human resolved this record, with a reason on the file.
@@ -283,9 +286,10 @@ def classify(
             state=RESOLVED,
             label=LABELS[RESOLVED],
             detail=(
-                f"Taken off the working board by {who} at "
-                f"{_clock(parse_dt(row.get('resolved_at')))}. Reason: {why}. "
-                "Nothing has been deleted — this record is still here in full."
+                f"Taken off the working board by {who}. "
+                f"Time: {_clock(parse_dt(row.get('resolved_at')))}. "
+                f"Reason: {why}. "
+                "Nothing was deleted. The whole record is still here."
             ),
             on_working_board=False,
             held_reason=None,
@@ -306,10 +310,10 @@ def classify(
         held = None
         if removed_at:
             held = (
-                "Kept on the working board: this person reported needing help. "
-                f"Their phone reported the app was removed at "
-                f"{_clock(parse_dt(removed_at))} — that is not a report that "
-                "they are safe."
+                "Kept on the working board. This person asked for help. "
+                f"Their phone said the app was removed at "
+                f"{_clock(parse_dt(removed_at))}. "
+                "That is not a message saying they are safe."
             )
         return RecordState(
             state=state, label=LABELS.get(state, "Answering"), detail=detail,
@@ -329,15 +333,15 @@ def classify(
             state=NEVER_USED,
             label=LABELS[NEVER_USED],
             detail=(
-                "This phone is registered for alerts"
-                + (f" (since {reg.strftime('%d %b')})" if reg else "")
-                + " but the app has never been opened and no position has ever "
-                "been recorded, so there is nowhere for a team to go. "
-                "They received the alert and have not answered."
+                "This phone gets our alerts"
+                + (f", since {reg.strftime('%d %b')}" if reg else "")
+                + ". The app has never been opened. "
+                "We have no place for them, so there is nowhere to send a team. "
+                "They got the alert and have not answered."
             ),
             on_working_board=False,
             held_reason=None,
-            off_board_reason="Never used the app — no position ever recorded",
+            off_board_reason="Never used the app. We have no place for them.",
             count_in_status_buckets=False,
             silent_minutes=silent_minutes, dark_after_minutes=dark_after,
             ever_needed_help=False, app_removed_at=removed_at,
@@ -356,12 +360,12 @@ def classify(
                 detail=detail,
                 on_working_board=True,
                 held_reason=(
-                    f"The app was removed from this phone at "
-                    f"{_clock(parse_dt(removed_at))}. That is not a report that "
-                    "they are safe, and an alert is live, so this record stays "
-                    "on the working board until the alert is stood down. It is "
-                    "counted as an app that was removed, not as a person who is "
-                    "not responding."
+                    "The app was removed from this phone at "
+                    f"{_clock(parse_dt(removed_at))}. "
+                    "That is not a message saying they are safe. "
+                    "An alert is live, so this stays on the working board. "
+                    "It is counted as an app that was removed. "
+                    "It is not counted as a person who is not responding."
                 ),
                 off_board_reason=None,
                 silent_minutes=silent_minutes, dark_after_minutes=dark_after,
@@ -373,14 +377,15 @@ def classify(
             state=APP_REMOVED,
             label=LABELS[APP_REMOVED],
             detail=(
-                f"This phone told us the app was removed at "
-                f"{_clock(parse_dt(removed_at))}. This is a deleted app, not a "
-                "missing person. Nothing has been deleted from the record."
+                "This phone told us the app was removed at "
+                f"{_clock(parse_dt(removed_at))}. "
+                "This is a removed app, not a missing person. "
+                "Nothing was deleted from the record."
             ),
             on_working_board=False,
             held_reason=None,
             off_board_reason=(
-                f"The phone reported the app was removed at "
+                "The phone said the app was removed at "
                 f"{_clock(parse_dt(removed_at))}"
             ),
             count_in_status_buckets=False,
@@ -462,11 +467,11 @@ def detect_mass_dark(
         "first_at": first.isoformat(),
         "last_at": last.isoformat(),
         "text": (
-            f"{size} of {reporting_total} phones stopped reporting within "
-            f"{dur_words(spread)} of each other "
-            f"({first.strftime('%H:%M')}–{last.strftime('%H:%M')}). "
-            "This usually means a network or power failure, not that these "
-            "people are missing. Nobody has been moved or reclassified."
+            f"{size} of {reporting_total} phones went quiet at about the same "
+            f"time ({first.strftime('%H:%M')} to {last.strftime('%H:%M')}). "
+            "That usually means the phone network or the power went down. "
+            "It rarely means these people are missing. "
+            "Nobody has been moved or relabelled."
         ),
     }
 
