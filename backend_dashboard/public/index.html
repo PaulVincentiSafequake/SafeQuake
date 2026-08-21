@@ -362,6 +362,25 @@
     color: var(--text-muted, #778);
   }
   .qg-off-btn:hover { background: rgba(122,131,147,0.12); }
+  /* #271 "Ask them to check in". One row of its own, 32px tall, with the
+     ask history printed underneath so nobody has to guess whether this
+     person has already been chased. Greyed out states say why in words. */
+  .qg-ask-btn {
+    display: block; margin-top: 8px; padding: 7px 12px; font-size: 13px;
+    min-height: 32px; border-radius: 6px; cursor: pointer;
+    background: #eef4ff; border: 1px solid #7fa4de; color: #163a6d;
+    font-weight: 600;
+  }
+  .qg-ask-btn:hover:enabled { background: #dfeaff; }
+  .qg-ask-btn:disabled {
+    background: #f2f3f5; border-color: #d3d7de; color: #8b909a;
+    cursor: not-allowed;
+  }
+  .qg-ask-history {
+    margin-top: 3px; font-size: 12.5px; line-height: 1.5;
+    color: var(--text-muted, #667);
+  }
+
   .qg-off-panel-inner {
     margin-top: 7px; padding: 9px 10px; border-radius: 7px;
     border: 1px solid #b58900; background: #fff8e1; color: #4a3800;
@@ -1368,6 +1387,80 @@
       .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
   };
 
+  // #270 (2026-08-21 — Paul): "There is developer code in the dialogs."
+  // The grey browser confirm boxes printed the site address above our
+  // words, could not be laid out, and read like a machine talking to
+  // another machine. Every yes/no question in the dashboard goes through
+  // here now, which draws OUR dialog — short lines, plain words, a verb
+  // on the confirm button. Falls back to the browser box only if our
+  // dialog has not loaded yet, so no question can ever be un-askable.
+  //
+  // Usage: if (!(await window.qgAsk(title, lines, "Yes — do it"))) return;
+  window.qgAsk = function (title, body, okLabel) {
+    if (typeof window.confirmPlain === "function") {
+      return window.confirmPlain(title, body, okLabel);
+    }
+    return Promise.resolve(window.confirm(title + "\n\n" + body));
+  };
+  // Same idea for a statement that needs acknowledging — one button.
+  window.qgTell = function (title, body) {
+    if (typeof window.confirmPlain === "function") {
+      return window.confirmPlain(title, body, "OK");
+    }
+    window.alert(title + "\n\n" + body);
+    return Promise.resolve(true);
+  };
+
+  // #272 (2026-08-21 — Paul): ONE clock on every screen — Malta time.
+  //   "One card said 'taken off the board at 10:22' and, right under it,
+  //    'Moved: 21/08/2026, 12:22:08'. Two hours apart, in one record.
+  //    This is a legal record read back in an inquiry alongside radio
+  //    logs kept in local time."
+  // The backend renders Malta time (timefmt.py). The dashboard used the
+  // BROWSER's timezone, so the same instant printed twice, differently,
+  // and neither said which. Every time on this page now goes through
+  // these two helpers, which pin Europe/Malta explicitly — so a laptop
+  // set to another country still shows the operations clock.
+  // Daylight saving is handled by the browser's own timezone database
+  // for the instant in question, exactly as timefmt.py does server-side.
+  var QG_TZ = "Europe/Malta";
+  window.qgTzName = "Malta time";
+  window.qgTime = function (iso) {
+    if (!iso) return "—";
+    try {
+      return new Date(iso).toLocaleTimeString("en-GB", {
+        hour: "2-digit", minute: "2-digit", timeZone: QG_TZ,
+      });
+    } catch (_) { return String(iso); }
+  };
+  window.qgWhen = function (iso) {
+    if (!iso) return "—";
+    try {
+      var d = new Date(iso);
+      return d.toLocaleDateString("en-GB", {
+        day: "numeric", month: "short", year: "numeric", timeZone: QG_TZ,
+      }) + ", " + window.qgTime(iso);
+    } catch (_) { return String(iso); }
+  };
+  // For the records an inquiry reads — the audit feed and a person's full
+  // history — the offset is printed beside the local time, so a reader in
+  // another country cannot misread it. Same rule as the PDFs (timefmt.py).
+  window.qgWhenLegal = function (iso) {
+    if (!iso) return "—";
+    try {
+      var parts = new Intl.DateTimeFormat("en-GB", {
+        timeZone: QG_TZ, timeZoneName: "longOffset",
+      }).formatToParts(new Date(iso));
+      var off = (parts.filter(function (p) { return p.type === "timeZoneName"; })[0] || {}).value;
+      // Browsers say "GMT+02:00"; the backend and the PDFs say "UTC+02:00".
+      // One wording everywhere, so two records of the same instant read
+      // identically (#272).
+      if (off) off = off.replace("GMT", "UTC");
+      return window.qgWhen(iso) + " (Malta time" + (off ? ", " + off : "") + ")";
+    } catch (_) { return window.qgWhen(iso); }
+  };
+
+
   // Human-friendly error translator. Never let a JavaScript error object,
   // enum string, or CORS-style browser-console phrase reach an operator.
   // Batch 7 Pattern 5.
@@ -2291,7 +2384,8 @@
   }
   function fmt(dt) {
     if (!dt) return "—";
-    try { return new Date(dt).toLocaleString(); } catch (_) { return String(dt); }
+    // Audit rows are a legal record: Malta time WITH the offset (#272).
+    return window.qgWhenLegal(dt);
   }
   function timeAgo(dt) {
     if (!dt) return "—";
@@ -2546,26 +2640,36 @@
           // Bigger than typical (Athens ≈ 830 km, Turkey ≈ 1500 km) —
           // pause for confirmation so a stray finger on the number
           // spinner doesn't push us to 5000 km previews silently.
-          if (!confirm("Set preview radius to " + km + " km?\n\n" +
-              "This will fire previews for events much further than Malta's real 600 km alert zone " +
-              "(e.g., " + km + " km covers " +
+          if (!(await window.qgAsk(
+              "Set the preview distance to " + km + " km?",
+              "Malta's real alert zone is 600 km.\n" +
+              "This is a test setting only.\n\n" +
+              "At " + km + " km you will get previews from " +
               (km >= 3000 ? "much of Europe and the Middle East" :
-               km >= 2000 ? "Greece, Turkey, and parts of North Africa" :
-               "Sicily, southern Italy, and parts of Greece") + "). Continue?")) {
+               km >= 2000 ? "Greece, Turkey and parts of North Africa" :
+               "Sicily, southern Italy and parts of Greece") + ".\n\n" +
+              "It clears itself after 7 days.",
+              "Yes — set it"))) {
             return;
           }
         }
         await apiPost("/api/admin/emsc/preview/config", {preview_radius_km_override: km});
         showBanner("ok", "Override set to " + km + " km — auto-clears in 7 days.");
       } else if (action === "clear-radius") {
-        if (!confirm("Clear the test-only radius override?\n\n" +
-            "Previews will immediately revert to Malta's real 600 km boundary.")) return;
+        if (!(await window.qgAsk(
+            "Clear the test distance setting?",
+            "Previews go back to Malta's real 600 km zone straight away.",
+            "Yes — clear it"))) return;
         await apiPost("/api/admin/emsc/preview/config", {clear_preview_radius_override: true});
         showBanner("ok", "Override cleared — back to 600 km.");
       } else if (action === "set-radius-input") {
         return;   // no-op: number spinner change is picked up on Save click
       } else if (action === "kill") {
-        if (!confirm("Disable preview mode across ALL countries immediately?")) return;
+        if (!(await window.qgAsk(
+            "Turn preview mode off everywhere?",
+            "This stops preview notices in every country, straight away.\n" +
+            "Real earthquake alerts are not affected.",
+            "Yes — turn it off"))) return;
         const r = await apiPost("/api/admin/emsc/preview/kill", {});
         showBanner("ok", `KILL: ${r.countries_affected} country/ies affected.`);
       } else if (action === "refresh") {
@@ -2919,7 +3023,12 @@
     max-width: 460px; width: 90%; font-family: inherit;
   }
   .qa-um-modal h3 { margin: 0 0 8px 0; font-size: 16px; font-weight: 600; }
-  .qa-um-modal p  { margin: 0 0 12px 0; font-size: 13px; color: #333; line-height: 1.5; }
+  /* #270: dialog text is written in short lines with blank lines between
+     them. Without `pre-line` the browser folded it all into one block of
+     prose, which is the hardest possible thing to read at 4am. */
+  .qa-um-modal p  { margin: 0 0 12px 0; font-size: 13.5px; color: #333;
+                    line-height: 1.55; white-space: pre-line;
+                    max-height: 46vh; overflow-y: auto; }
   .qa-um-modal input[type="text"], .qa-um-modal input[type="datetime-local"] {
     width: 100%; padding: 8px 10px; border: 1px solid #cbd0d8; border-radius: 4px;
     font-size: 13px; font-family: inherit; box-sizing: border-box; margin-bottom: 12px;
@@ -3050,7 +3159,7 @@
       const d = new Date(iso);
       const now = new Date();
       const days = Math.round((d - now) / 86400000);
-      const dateStr = d.toLocaleDateString(undefined, {year:'numeric', month:'short', day:'numeric'});
+      const dateStr = d.toLocaleDateString(undefined, {year:'numeric', month:'short', day:'numeric', timeZone: 'Europe/Malta'});
       if (Math.abs(days) < 1) return dateStr + ' (today)';
       if (days > 0 && days <= 30) return dateStr + ' (in ' + days + 'd)';
       if (days < 0) return dateStr + ' (' + Math.abs(days) + 'd ago)';
@@ -3161,6 +3270,29 @@
   // click in the product. Same shape as #219; also blocked Paul's
   // Round 3 verification for #208, #205, #253, #250 and #245.
   window.confirmTyping = confirmTyping;
+
+  // #270 (2026-08-21 — Paul): the grey browser confirm boxes showed the
+  // site address, gave us no control over wording or layout, and read
+  // like a developer tool. Every confirmation in the dashboard uses one
+  // of our own dialogs now. Same look, same place on screen, same two
+  // buttons, wherever it appears — see memory/writing-and-layout-rules.md.
+  //
+  // `okLabel` is a verb phrase ("Yes — ask them"), never "OK".
+  function confirmPlain(title, body, okLabel) {
+    return new Promise(function (resolve) {
+      modalTitle.textContent = title;
+      modalBody.textContent  = body;
+      modalInput.style.display = 'none';
+      modalDate.style.display  = 'none';
+      if (modalError) { modalError.style.display = 'none'; modalError.textContent = ''; }
+      modalBg.classList.add('qa-um-show');
+      pendingResolve = function (v) { resolve(v === true); };
+      modalConfirm.textContent = okLabel || 'Yes';
+      modalConfirm.onclick = function () { closeModal(true); };
+      setTimeout(function () { modalConfirm.focus(); }, 50);
+    });
+  }
+  window.confirmPlain = confirmPlain;
   function chooseDatetime(title, body, defaultIsoDays) {
     return new Promise(function (resolve) {
       modalTitle.textContent = title; modalBody.textContent = body;
@@ -3299,21 +3431,27 @@
     const email = btn.getAttribute('data-email');
     if (!act || !email) return;
     if (act === 'delete') {
-      const ok = await confirmTyping('Delete ' + email + '?',
-        'This permanently removes the user from the allowlist. Their historical audit rows remain, but they lose all access immediately. Type the full email to confirm.',
-        email, 'delete this user');
+      const ok = await confirmTyping('Remove ' + email + '?',
+        'They lose all access straight away.\n' +
+        'Their past entries in the audit trail stay.\n\n' +
+        'Type their full email address to go ahead:',
+        email, 'remove this person');
       if (ok) await doAction('delete', email);
     } else if (act === 'expiry') {
-      const iso = await chooseDatetime('Set expiry for ' + email,
-        'Pick the date/time after which this account can no longer sign in. Times are local to your browser.', 90);
+      const iso = await chooseDatetime('Set an end date for ' + email,
+        'Pick the date and time after which they can no longer sign in.\n' +
+        'Times shown are your own local time.', 90);
       if (iso) await doAction('expiry', email, {iso: iso});
     } else if (act === 'role') {
       const newrole = btn.getAttribute('data-newrole');
       const ok = await confirmTyping('Change ' + email + ' to ' + newrole + '?',
         (newrole === 'admin'
-          ? 'Admins can add, disable, and delete other operators. Grant sparingly. Type the full email to confirm.'
-          : 'Demoting from admin to operator removes their user-management access. Type the full email to confirm.'),
-        email, 'change this user\u2019s role');
+          ? 'Admins can add, switch off and remove other operators.\n' +
+            'Give this to very few people.\n\n' +
+            'Type their full email address to go ahead:'
+          : 'They will no longer be able to manage other people.\n\n' +
+            'Type their full email address to go ahead:'),
+        email, 'change what this person can do');
       if (ok) await doAction('role', email, {newrole: newrole});
     } else {
       await doAction(act, email);
@@ -4090,7 +4228,7 @@
         body.innerHTML = html;
         window.scrollTo(sx, sy);
       }
-      meta.textContent = events.length + " events · updated " + new Date().toLocaleTimeString();
+      meta.textContent = events.length + " events · updated " + window.qgTime(new Date().toISOString()) + " Malta time";
     } catch (e) {
       meta.textContent = "load error: " + (e && e.message ? e.message : e);
     }
@@ -4199,10 +4337,13 @@
   async function doExport(kind /* "csv" | "pdf" */) {
     if (typeof window.qaApi !== "function") return;
     // Confirmation friction on CONFIDENTIAL downloads — deliberate.
-    if (!confirm("This audit export is CONFIDENTIAL.\n\n" +
-        "It contains personal data: precise locations, device identifiers and operator notes.\n" +
-        "Only download it if you are authorised and will store it securely.\n\n" +
-        "Download the " + kind.toUpperCase() + "?")) return;
+    if (!(await window.qgAsk(
+        "Download the " + kind.toUpperCase() + " audit file?",
+        "This file is confidential.\n" +
+        "It holds people's names, exact places and operator notes.\n\n" +
+        "Only download it if you are allowed to.\n" +
+        "Keep it somewhere safe.",
+        "Yes — download"))) return;
     var since = windowSinceISO();   // honours "Since the alert" (item 1b)
     var path = "/api/admin/audit-log/export." + kind + "?since=" + encodeURIComponent(since);
     var pseudoCb = document.getElementById("qg-export-pseudo");
@@ -4238,11 +4379,14 @@
     // The team report carries names + GPS — same confirmation friction as
     // the audit exports. The public report is aggregate-only and safe to
     // share, so no dialog. (#133: no B1/B2 jargon in operator-facing text.)
-    if (kind === "operational" && !confirm("The team report is CONFIDENTIAL.\n\n" +
-        "It contains names, exact GPS positions and operator notes.\n" +
-        "Do NOT share it with press, families or anyone outside authorised emergency personnel.\n" +
-        "For anything public, use the \u201Csafe to share\u201D report instead.\n\n" +
-        "Download the team report?")) return;
+    if (kind === "operational" && !(await window.qgAsk(
+        "Download the team report?",
+        "This report is confidential.\n" +
+        "It holds names, exact places and operator notes.\n\n" +
+        "Do not share it with the press, with families, or with anyone " +
+        "outside the team.\n\n" +
+        "For anything public, use the \u201Csafe to share\u201D report.",
+        "Yes — download"))) return;
     var since = windowSinceISO();   // honours "Since the alert" (item 1b)
     var path = "/api/admin/casualty-report/" + kind + ".pdf" + "?since=" + encodeURIComponent(since);
     // Pseudonymisation + detail level apply to the team report only — the
@@ -5173,7 +5317,13 @@ window.QuakeAngelRescue = (function () {
     msgEl.textContent = t || "";
   }
   if (addBtn) addBtn.addEventListener("click", async function () {
-    if (!window.confirm("Add 33 clearly-fake test people to the dashboard? Their names all start with TEST and their rescue codes all start with Z.")) return;
+    if (!(await window.qgAsk(
+        "Add 33 test people?",
+        "These are clearly fake.\n" +
+        "Their names all start with TEST.\n" +
+        "Their rescue codes all start with Z.\n\n" +
+        "You can remove them all again with one button.",
+        "Yes — add them"))) return;
     addBtn.disabled = true; tpSay("Adding…");
     try {
       var r = await window.qaApi("/api/admin/test-people/seed", { method: "POST", body: "{}" });
@@ -5185,7 +5335,11 @@ window.QuakeAngelRescue = (function () {
     } finally { addBtn.disabled = false; }
   });
   if (clrBtn) clrBtn.addEventListener("click", async function () {
-    if (!window.confirm("Remove ALL seeded test people from the dashboard? Only rows starting with TEST are removed — real records are not touched.")) return;
+    if (!(await window.qgAsk(
+        "Remove all the test people?",
+        "Only rows whose name starts with TEST are removed.\n" +
+        "Real records are not touched.",
+        "Yes — remove them"))) return;
     clrBtn.disabled = true; tpSay("Removing…");
     try {
       var r = await window.qaApi("/api/admin/test-people/clear", { method: "POST", body: "{}" });
@@ -5421,7 +5575,11 @@ window.QuakeAngelRescue = (function () {
   });
 
   if (logoClearBtn) logoClearBtn.addEventListener('click', async function () {
-    if (!confirm('Remove the organisation logo? The header will revert to Quake Angel branding only.')) return;
+    if (!(await window.qgAsk(
+        "Remove your logo?",
+        "The header goes back to the Quake Angel name only.\n" +
+        "You can upload a logo again at any time.",
+        "Yes — remove it"))) return;
     logoClearBtn.disabled = true;
     try {
       var r = await window.qaApi('/api/admin/dashboard-settings/logo', {method: 'DELETE'});
@@ -5890,6 +6048,10 @@ window.QuakeAngelRescue = (function () {
       recordState: d.record_state || null,
       everNeededHelp: d.ever_needed_help === true,
       possibleDuplicate: d.possible_duplicate || null,
+      // #271: what we have already asked this phone, and whether we may
+      // ask again yet. Decided server-side so the button can never offer
+      // something the server would refuse.
+      askState: d.ask_state || null,
     };
   }
 
@@ -6014,11 +6176,13 @@ window.QuakeAngelRescue = (function () {
 
   // Tag / untag one person as a test entry. Reversible, audited server-side.
   async function markAsTest(deviceId, isTest) {
-    if (isTest && !window.confirm(
-      "Hide " + deviceId + " from the triage list as a TEST entry?\n\n" +
-      "Nothing is deleted and this is reversible — tick “Show test entries” " +
-      "to see it again. Only do this if you are certain it is not a real person."
-    )) return;
+    if (isTest && !(await window.qgAsk(
+      "Mark this as a test entry?",
+      "It comes off the triage list.\n" +
+      "Nothing is deleted.\n" +
+      "Tick \u201CShow test entries\u201D to see it again.\n\n" +
+      "Only do this if you are sure it is not a real person.",
+      "Yes — mark as test"))) return;
     try {
       var res = await window.qaApi(
         "/api/admin/devices/" + encodeURIComponent(deviceId) + "/mark-test",
@@ -6060,6 +6224,9 @@ window.QuakeAngelRescue = (function () {
       lines.push("Both are counted in the numbers above.");
     }
     (notes || []).forEach(function (n) { lines.push(n); });
+    // #272: name the clock, once, where the numbers are explained. Every
+    // time on this page is Malta time — see window.qgTime.
+    lines.push("All times on this page are Malta time.");
     el.innerHTML = lines.map(function (l) {
       return "<div>" + window.qgEsc(l) + "</div>";
     }).join("");
@@ -6075,7 +6242,7 @@ window.QuakeAngelRescue = (function () {
     head.textContent = "Not on the working board (" + visible.length + ")";
     if (!visible.length) { body.innerHTML = ""; return; }
     body.innerHTML = visible.map(function (r) {
-      var when = r.moved_at ? new Date(r.moved_at).toLocaleString() : "—";
+      var when = window.qgWhen(r.moved_at);
       var putBack = r.state === "resolved_by_operator"
         ? '<button class="qg-off-back" data-device-id="' + r.device_id +
           '">↩︎ Put back on the working board</button>'
@@ -6094,7 +6261,7 @@ window.QuakeAngelRescue = (function () {
         '<div class="qg-off-meta"><b>Why:</b> ' + window.qgEsc(r.off_board_reason || "—") + "</div>" +
         (r.last_updated
           ? '<div class="qg-off-meta"><b>Last heard:</b> ' +
-            window.qgEsc(new Date(r.last_updated).toLocaleString()) + "</div>"
+            window.qgEsc(window.qgWhen(r.last_updated)) + "</div>"
           : "") +
         (r.ever_needed_help
           ? '<div class="qg-off-meta"><b>This person asked for help at some point.</b></div>'
@@ -6125,14 +6292,16 @@ window.QuakeAngelRescue = (function () {
     var no = ev.target.closest && ev.target.closest(".qg-dup-no");
     var back = ev.target.closest && ev.target.closest(".qg-off-back");
     if (yes) {
-      if (!window.confirm(
-        "Save these as the SAME person?\n\n" +
-        "The older record comes off the working board.\n" +
-        "Your name and your reason go on it.\n" +
-        "Nothing is deleted. Nothing is merged.\n" +
-        "You can put it back."
-      )) return;
-      decideDuplicate(yes.dataset.deviceId, yes.dataset.otherId, "confirmed");
+      (async function () {
+        if (!(await window.qgAsk(
+          "Save these as the same person?",
+          "The older record comes off the working board.\n" +
+          "Your name and your reason go on it.\n" +
+          "Nothing is deleted. Nothing is merged.\n" +
+          "You can put it back.",
+          "Yes — same person"))) return;
+        decideDuplicate(yes.dataset.deviceId, yes.dataset.otherId, "confirmed");
+      })();
     } else if (no) {
       decideDuplicate(no.dataset.deviceId, no.dataset.otherId, "rejected");
     } else if (back) {
@@ -6358,7 +6527,7 @@ window.QuakeAngelRescue = (function () {
     }
     var updLine = u.lastUpdated
       ? '<div class="meta">Updated ' + agoWords(u.lastUpdated) + "</div>" +
-        '<div class="qg-card-abs">' + new Date(u.lastUpdated).toLocaleTimeString() + "</div>"
+        '<div class="qg-card-abs">' + window.qgTime(u.lastUpdated) + " Malta time</div>"
       : '<div class="meta">Updated: —</div>';
     // B3 (2026-08-17): per-person full history — every alert sent, every
     // response INCLUDING reconfirmations, battery + location per event.
@@ -6381,12 +6550,97 @@ window.QuakeAngelRescue = (function () {
       '" data-short-code="' + (u.shortCode || "") +
       '" title="Take this record off the working board, with a reason. Nothing is deleted. You can put it back.">' +
       "📤 Take off the board</button>";
+    // #271: "Ask them to check in". Turns "we have not heard from them"
+    // into either an answer or the honest "we asked and heard nothing".
+    // The history is printed next to the button, always — Paul: "Never
+    // make them guess whether someone has already been chased." When we
+    // may not ask yet, the button is greyed AND says why on the card, not
+    // only in a tooltip.
+    var ask = u.askState || {};
+    var askDisabled = ask.can_ask === false;
+    var askBtn = '<button class="qg-ask-btn" data-device-id="' + u.deviceId +
+      '" data-short-code="' + (u.shortCode || "") +
+      '" data-battery="' + (u.batteryPercent != null ? u.batteryPercent : "") +
+      '" data-low-battery="' + (ask.low_battery ? "true" : "false") + '"' +
+      (askDisabled ? " disabled" : "") +
+      ' title="Send one check-in request to this phone. It uses their battery.">' +
+      "📲 Ask them to check in</button>" +
+      '<div class="qg-ask-history">' +
+      window.qgEsc(ask.history_words || "Not asked yet.") +
+      (askDisabled && ask.blocked_reason
+        ? "<br>" + window.qgEsc(ask.blocked_reason)
+        : "") +
+      "</div>";
     return bulkCheck + head + trappedLine + egressLine + silenceLine +
       '<div class="meta">' + statusLabel(u.status, u.severity) + (mob ? " · " + mob : "") +
       (lowBatt ? "" : " · Battery " + (u.batteryPercent != null ? u.batteryPercent : "?") + "%") + "</div>" +
-      battLine + updLine + rescueSlot + histBtn + testBtn + offBtn +
+      battLine + updLine + rescueSlot + askBtn + histBtn + testBtn + offBtn +
       '<div class="qg-off-panel" id="qg-off-panel-' + u.deviceId + '" hidden></div>';
   }
+
+  // ── #271: ask ONE person to check in ─────────────────────────────────
+  // Paul, 2026-08-21: "Never allow this to become a bulk action by
+  // accident. Asking one person is a judgement. Asking everyone at once
+  // is a broadcast that drains every phone in the incident." So this is
+  // one button on one card, with its own confirmation, every time.
+  async function askToCheckIn(deviceId, code, lowBattery, batteryPct, acknowledged) {
+    var name = code || "this phone";
+    if (!acknowledged) {
+      var lines =
+        "This sends one message to " + name + ".\n\n" +
+        "It says: \u201cAre you all right? No new earthquake. Please tap to " +
+        "tell us how you are.\u201d\n\n" +
+        "No siren. It will not override silent mode.\n" +
+        "It does use some of their battery.\n";
+      if (lowBattery) {
+        lines += "\nTheir battery is low" +
+          (batteryPct ? " (" + batteryPct + "% left)" : "") +
+          ". Their phone may be their lifeline.\n";
+      }
+      lines += "\nWe will save your name and the time on the record.";
+      var ok = await window.confirmPlain(
+        "Ask " + name + " to check in?", lines, "Yes — ask them",
+      );
+      if (!ok) { banner("ok", "Nothing was sent.", 4000); return; }
+    }
+    var res = await window.qaApi(
+      "/api/admin/records/" + encodeURIComponent(deviceId) + "/ask-to-check-in",
+      {method: "POST",
+       body: JSON.stringify(acknowledged ? {acknowledge_low_battery: true} : {})},
+    );
+    var body = null;
+    try { body = await res.json(); } catch (_) {}
+    if (res.status === 409 && !acknowledged && lowBattery) {
+      // The server's own sentence about the battery — never paraphrased.
+      var again = await window.confirmPlain(
+        "Ask anyway?", (body && body.detail) || "", "Yes — ask them",
+      );
+      if (again) return askToCheckIn(deviceId, code, lowBattery, batteryPct, true);
+      banner("ok", "Nothing was sent.", 4000);
+      return;
+    }
+    if (!res.ok) {
+      banner("err", (body && body.detail) || window.qgHumanHttpMessage(res.status), 10000);
+      return;
+    }
+    banner("ok", (body && body.message) || "Asked them to check in.", 10000);
+    lastSidebarSig = null;
+    refresh();
+  }
+
+  document.addEventListener("click", function (ev) {
+    var t = ev.target;
+    if (!t || !t.closest) return;
+    var askEl = t.closest(".qg-ask-btn");
+    if (!askEl || askEl.disabled) return;
+    askToCheckIn(
+      askEl.dataset.deviceId,
+      askEl.dataset.shortCode,
+      askEl.dataset.lowBattery === "true",
+      askEl.dataset.battery,
+      false,
+    );
+  });
 
   // ── #268: "take off the working board", with a reason on the file ─────
   // Doctrine: "Records get resolved by a human with a reason recorded,
@@ -6440,8 +6694,10 @@ window.QuakeAngelRescue = (function () {
     if (res.status === 409 && !acknowledged) {
       // The server's own words — it names the person and says why this
       // needs a second look. Never paraphrased here.
-      if (window.confirm(((body && body.detail) || "") +
-          "\n\nTake it off the working board?")) {
+      if (await window.qgAsk(
+          "Take this record off the working board?",
+          (body && body.detail) || "",
+          "Yes — take it off")) {
         return resolveRecord(deviceId, code, note, true);
       }
       banner("ok", "Left on the working board.", 5000);
@@ -6509,7 +6765,8 @@ window.QuakeAngelRescue = (function () {
   }
 
   function histEventHtml(e) {
-    var t = e.at ? new Date(e.at).toLocaleString() : "—";
+    // A person's full history is read back in an inquiry — offset printed.
+    var t = window.qgWhenLegal(e.at);
     var body;
     if (e.kind === "alert_sent") {
       body = "🔔 <b>Alert broadcast</b>" +
@@ -6539,8 +6796,8 @@ window.QuakeAngelRescue = (function () {
         // A 45-minute gap is itself operational information about signal at
         // that location, so it is stated rather than hidden.
         lag = ' <span class="qg-hist-reconf">answered ' +
-          new Date(e.answered_at).toLocaleTimeString() + ", reached us " +
-          new Date(e.received_at).toLocaleTimeString() + " (queued offline)</span>";
+          window.qgTime(e.answered_at) + ", reached us " +
+          window.qgTime(e.received_at) + " (queued offline)</span>";
       }
       body = "🗣 <b>Answered: " + ans + "</b>" +
         (e.deteriorating ? ' <span class="qg-badge" style="background:#C21818">↑ deteriorating</span>' : "") +
@@ -7105,21 +7362,22 @@ window.QuakeAngelRescue = (function () {
     var body;
     if (previewFailed) {
       body =
-        "We could not check how many phones will be alerted. The alert " +
-        "will still be sent to everyone registered on this system.\n\n" +
-        "Type this phrase exactly to confirm:";
+        "We could not check how many phones will be alerted.\n" +
+        "The alert still goes to everyone registered here.\n\n" +
+        "Type the word below to send it:";
     } else if (total === 0) {
       body =
-        "There are no phones registered on this system right now. If you " +
-        "send this, nothing will happen. If new phones register in the next " +
-        "few seconds they will still get it.\n\n" +
-        "Type this phrase exactly to confirm:";
+        "No phones are registered right now.\n" +
+        "If you send this, nothing will happen.\n" +
+        "Any phone that registers in the next few seconds still gets it.\n\n" +
+        "Type the word below to send it:";
     } else {
       body =
-        "This will siren " + total + " " + (total === 1 ? "phone" : "phones") +
-        " right now, including phones on silent, and mark everyone as " +
-        "'not answered yet' until they check in.\n\n" +
-        "Type this phrase exactly to confirm:";
+        "This sirens " + total + " " + (total === 1 ? "phone" : "phones") +
+        " right now.\n" +
+        "It sounds even on phones set to silent.\n\n" +
+        "Everyone is shown as waiting for an answer until they check in.\n\n" +
+        "Type the word below to send it:";
     }
     var ok;
     try {
@@ -7179,6 +7437,9 @@ window.QuakeAngelRescue = (function () {
     }
     var total = Number(preview && preview.total) || 0;
     var phrase = (preview && preview.confirmation_phrase) || "STANDDOWN";
+    var clearing = Number(preview && preview.clearing_count) || 0;
+    var stayingList = (preview && preview.staying_people) || [];
+    var staying = Number(preview && preview.staying_count) || stayingList.length;
     if (total === 0) {
       showBanner("err", "No phones are registered on this system. There is nothing to stand down.", 8000);
       return;
@@ -7189,12 +7450,37 @@ window.QuakeAngelRescue = (function () {
         0);
       return;
     }
+    // #274: name the people who stay on the board. A number on its own
+    // lets an operator call off an incident while somebody is still
+    // asking for help and never see their name.
     var body =
-      "This will tell " + total + " " + (total === 1 ? "phone" : "phones") +
-      " that the alert has been called off. Anyone stuck on the check-in " +
-      "screen will be shown a calm 'Alert called off' message and taken " +
-      "back home. Silent — no siren, no banner.\n\n" +
-      "Type this phrase exactly to confirm:";
+      "This calls the alert off.\n\n" +
+      clearing + " " + (clearing === 1 ? "phone" : "phones") +
+      " will be told the alert is over.\n" +
+      "They get a calm message and go back to the home screen.\n" +
+      "No siren. No banner. Nothing is deleted.\n\n";
+    if (staying > 0) {
+      body +=
+        staying + " " + (staying === 1 ? "person is" : "people are") +
+        " still asking for help.\n" +
+        (staying === 1 ? "This person stays" : "These people stay") +
+        " on the working board.\n" +
+        (staying === 1 ? "Their phone is" : "Their phones are") +
+        " NOT told the alert is over.\n\n" +
+        "Staying on the board:\n";
+      stayingList.forEach(function (p) {
+        var line = "• " + (p.name || "No name given");
+        if (p.code) line += " (" + p.code + ")";
+        line += " — " + (p.words || "Asked for help");
+        if (p.last_heard) line += ", last heard " + p.last_heard;
+        if (p.battery_pct != null) line += ", battery " + p.battery_pct + "%";
+        body += line + "\n";
+      });
+      body += "\nCalling the alert off does not end their rescue.\n\n";
+    } else {
+      body += "Nobody is asking for help right now.\n\n";
+    }
+    body += "Type this phrase exactly to confirm:";
     var ok;
     try {
       // Batch 7 R5 hotfix (2026-08-19): via window.confirmTyping. See
@@ -7243,7 +7529,15 @@ window.QuakeAngelRescue = (function () {
       }
       var data = await res.json();
       var n = Number(data && data.recipients) || 0;
-      showBanner("ok", "Alert called off — sent silently to " + n + " " + (n === 1 ? "phone" : "phones") + ".", 8000);
+      var kept = Number(data && data.kept_on_board_count) || 0;
+      var msg = "Alert called off. " + n + " " + (n === 1 ? "phone was" : "phones were") +
+        " told, quietly.";
+      if (kept > 0) {
+        msg += " " + kept + " " + (kept === 1 ? "person is" : "people are") +
+          " still asking for help and " + (kept === 1 ? "stays" : "stay") +
+          " on the board.";
+      }
+      showBanner("ok", msg, 12000);
     } catch (e) {
       showBanner("err", "Network error. Stand-down NOT sent. Check your connection and try again.");
     } finally {
@@ -7318,13 +7612,15 @@ window.QuakeAngelRescue = (function () {
       if (__srTicks >= 15) clearInterval(__srPoll);
     }, 400);
 
-    stopBtn.addEventListener("click", function onStopClick() {
-      var ok = window.confirm(
-        "Stop the repeating 'Are you safe?' reminders on every phone?\n\n" +
-        "Use this after a false alarm. It is sent SILENTLY — nobody gets " +
-        "another notification, the reminders simply stop.\n\n" +
-        "The original alert is not recalled, and anyone who has already " +
-        "answered is unaffected."
+    stopBtn.addEventListener("click", async function onStopClick() {
+      var ok = await window.qgAsk(
+        "Stop the repeating check-in reminders?",
+        "Use this after a false alarm.\n\n" +
+        "Nobody gets another notification.\n" +
+        "The reminders simply stop, quietly.\n\n" +
+        "The alert itself is not called off.\n" +
+        "Anyone who has already answered is not affected.",
+        "Yes — stop them",
       );
       if (!ok) return;
       sendStopReminders();
@@ -7351,7 +7647,7 @@ window.QuakeAngelRescue = (function () {
   function _tremorFmtRow(r) {
     var esc = window.qgEsc;
     var mag = (r.magnitude == null) ? "M?" : ("M" + Number(r.magnitude).toFixed(1));
-    var when = r.at ? new Date(r.at).toLocaleString() : "—";
+    var when = window.qgWhen(r.at);
     return '<tr>' +
       '<td style="padding:4px 8px; white-space:nowrap">' + esc(when) + '</td>' +
       '<td style="padding:4px 8px">' + esc(r.kind || "") + '</td>' +
@@ -7405,8 +7701,8 @@ window.QuakeAngelRescue = (function () {
     var provenance = d.config_last_updated_at
       ? '<p style="margin:12px 0 0; color:#888; font-size:11px">' +
         'Settings last changed on ' +
-        esc(new Date(d.config_last_updated_at).toLocaleString()) +
-        '. Fetched at ' + esc(new Date(d.at || Date.now()).toLocaleTimeString()) + '.</p>'
+        esc(window.qgWhen(d.config_last_updated_at)) +
+        '. Fetched at ' + esc(window.qgTime(d.at || new Date().toISOString())) + ' Malta time.</p>'
       : "";
     _tremorPanelBody.innerHTML = head + ingest + body + provenance;
   }
@@ -7496,8 +7792,8 @@ window.QuakeAngelRescue = (function () {
 
   function _devFmtRow(d) {
     var esc = window.qgEsc;
-    var reg = d.registered_at ? new Date(d.registered_at).toLocaleString() : "—";
-    var seen = d.last_seen_at ? new Date(d.last_seen_at).toLocaleString() : "—";
+    var reg = window.qgWhen(d.registered_at);
+    var seen = window.qgWhen(d.last_seen_at);
     var isDead = d.status === "dead_token";
     var statusCell = isDead
       ? '<span style="color:#8a5a00; font-weight:600" title="' +
@@ -7521,7 +7817,7 @@ window.QuakeAngelRescue = (function () {
       (deadCount ? ' · <span style="color:#8a5a00">' + esc(String(deadCount)) + ' dead, excluded from that count</span>' : '') +
       ' <span style="color:var(--text-muted); font-size:11px">' +
       '(same count as the trigger confirmation) · fetched ' +
-      esc(d.generated_at ? new Date(d.generated_at).toLocaleTimeString() : "now") + '</span>';
+      esc(d.generated_at ? window.qgTime(d.generated_at) + ' Malta time' : "now") + '</span>';
     if (!d.devices || d.devices.length === 0) {
       _devBody.innerHTML = '<p style="margin:0; color:var(--text-muted)"><i>No devices registered.</i></p>';
       return;
@@ -7639,13 +7935,14 @@ window.QuakeAngelRescue = (function () {
     var ok = false;
     try {
       ok = await window.confirmTyping(
-        "Clear all registered devices?",
-        "This permanently deletes every row in the device registry — every " +
-        "phone that would receive a real siren alert. Only do this to wipe " +
-        "out your own test installs before real pilot testers start. " +
-        "Type " + DEVICE_PURGE_PHRASE + " below to continue.",
+        "Clear all registered phones?",
+        "This deletes every phone from the list for good.\n" +
+        "Those phones would no longer get a real alert.\n\n" +
+        "Use it only to clear out your own test installs.\n" +
+        "Do it before real testers start.\n\n" +
+        "Type the word below to go ahead:",
         DEVICE_PURGE_PHRASE,
-        "erase every registered device",
+        "erase every registered phone",
       );
     } catch (err) {
       try { console.error("confirmTyping threw:", err); } catch (_) {}
