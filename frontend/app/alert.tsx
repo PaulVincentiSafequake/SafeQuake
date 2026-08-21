@@ -1169,8 +1169,8 @@ export default function AlertScreen() {
                 <>
                   If you don&apos;t answer, we mark you as{" "}
                   <Text style={styles.unansweredNoteBold}>not responding</Text>
-                  {" "}— never as trapped. There is no alert running and no
-                  siren. You can close this and answer later.
+                  {" "}— never as trapped. No earthquake alert is running.
+                  You can close this and answer later.
                 </>
               ) : (
                 <>

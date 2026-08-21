@@ -94,6 +94,10 @@ class Counts:
     # wherever a number is shown.
     waiting_for_answer: int = 0
     phone_went_dark: int = 0
+    # #276: of the people we asked and have not heard from, how many
+    # confirmed on their own phone that the question arrived. Those are
+    # the worrying ones; the rest may simply never have seen it.
+    no_answer: int = 0
     app_removed: int = 0
     # Of those, how many are still ON the working board because an alert
     # is live and they have not answered (Paul's rule 1 beats rule 5, but
@@ -266,6 +270,9 @@ async def load_board(db, include_test: bool = False, now=None) -> Board:
         phone_went_dark=sum(
             1 for r in board if st_of(r) == rs.DARK
             and r["record_state"].get("count_in_status_buckets") is not False),
+        no_answer=sum(
+            1 for r in board if st_of(r) == rs.NO_ANSWER
+            and r["record_state"].get("count_in_status_buckets") is not False),
         app_removed=(sum(1 for r in off_board if st_of(r) == rs.APP_REMOVED)
                      + len(held_removed)),
         app_removed_held_on_board=len(held_removed),
@@ -277,6 +284,9 @@ async def load_board(db, include_test: bool = False, now=None) -> Board:
     # Mass-dark: many phones stopping at roughly the same moment is a
     # network or power failure, not many people going missing at once.
     notices: List[Dict[str, Any]] = []
+    # #276: a confirmed-but-unanswered question is NOT evidence of a
+    # network failure — the phone plainly had a network. Only the
+    # unconfirmed silences feed the mass-dark test.
     dark_stamps = [r.get("updated_at") for r in board if st_of(r) == rs.DARK]
     reporting_total = sum(1 for r in board if r.get("updated_at"))
     notice = rs.detect_mass_dark(dark_stamps, reporting_total, now=now)

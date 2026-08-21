@@ -784,6 +784,8 @@ async def public_summary():
             # reads keep working while the new wording rolls out.
             "waiting_for_answer": c.waiting_for_answer,
             "phone_went_dark": c.phone_went_dark,
+            # #276: asked, their phone confirmed it arrived, still no answer.
+            "no_answer": c.no_answer,
             "app_removed": c.app_removed,
             "never_used": c.never_used,
             "resolved_by_operator": c.resolved_by_operator,
@@ -2604,6 +2606,14 @@ def _ask_state(row: dict, now: Optional[datetime] = None) -> dict:
         if since is not None:
             history += f" Last asked {dur_words(since)} ago"
             history += ", no answer." if unanswered > 0 else ", and they answered."
+        # #276: say whether the phone confirmed our question arrived. A
+        # 200 from Apple is not evidence that anybody saw anything.
+        delivery = asks.get("delivery") or {}
+        if unanswered > 0:
+            if delivery.get("confirmed_at"):
+                history += " Their phone confirmed it arrived."
+            elif delivery.get("apns_status") == 200:
+                history += " Their phone has not confirmed it arrived."
 
     can_ask, blocked = True, None
     if unanswered >= ASK_MAX_UNANSWERED:
@@ -2630,6 +2640,8 @@ def _ask_state(row: dict, now: Optional[datetime] = None) -> dict:
         "blocked_reason": blocked,
         "low_battery": bool(low_battery),
         "gap_minutes": gap,
+        # #276: the real delivery facts, for the operator and for an inquiry.
+        "delivery": asks.get("delivery") or {},
     }
 
 
@@ -2723,6 +2735,21 @@ async def ask_to_check_in(
     sent = any((e.get("status_code") or 0) == 200 for e in (result.get("events") or []))
     now_iso = _iso(now)
     who = audit_attribution(principal)
+    # #276: keep what Apple ACTUALLY said. Paul: "Tell me the real delivery
+    # response, not that our code called the send function." A 200 from
+    # Apple means accepted for delivery — it does NOT mean the phone showed
+    # it, which is exactly the distinction the card has to make.
+    ev = (result.get("events") or [{}])[0]
+    delivery = {
+        "apns_status": ev.get("status_code"),
+        "apns_reason": ev.get("reason"),
+        "apns_id": ev.get("apns_id"),
+        "environment": ev.get("environment"),
+        "accepted_at": now_iso if sent else None,
+        # Set only when the phone itself tells us it arrived
+        # (POST /api/push/receipt).
+        "confirmed_at": None,
+    }
 
     await db.device_status.update_one(
         {"device_id": device_id},
@@ -2733,6 +2760,7 @@ async def ask_to_check_in(
                 "last_at": now_iso if sent else asks.get("last_at"),
                 "last_by": who,
                 "last_check_id": check_id,
+                "delivery": delivery,
             },
         }},
     )
@@ -2745,6 +2773,7 @@ async def ask_to_check_in(
         ),
         "answered": False,
         "check_id": check_id,
+        "delivery": delivery,
         "decided_by": who,
         "decided_at": now_iso,
     })
@@ -2760,10 +2789,12 @@ async def ask_to_check_in(
         "device_id": device_id,
         "asked_at": now_iso,
         "asked_by": who,
+        "delivery": delivery,
         "message": (
-            f"Asked {code} to check in. If they answer, their card will "
-            "update. If they do not, the card will say we asked and heard "
-            "nothing."
+            f"Sent the question to {code}. Apple accepted it. "
+            "Their phone will confirm when it arrives, and the card will "
+            "say so. If we never get that confirmation, the card will say "
+            "we cannot be sure they saw it."
         ),
     }
 
@@ -2774,6 +2805,68 @@ def _parse_iso_or_none_safe(s):
         return _p(s)
     except Exception:
         return None
+
+
+@api_router.post("/push/receipt")
+async def push_receipt(payload: dict = Body(...)):
+    """The phone tells us a question actually arrived on it.
+
+    #276 (2026-08-21 — Paul):
+      "The card must distinguish 'the phone received our question and
+       nobody answered' from 'we cannot confirm the phone ever saw it'.
+       Those are different facts and only one is worrying."
+
+    A 200 from Apple means Apple accepted the push. It says nothing about
+    whether the phone ever showed it. Without this receipt, a notification
+    lost in transit and a person ignoring us look identical on the board —
+    and an operator would send help towards somebody who is fine while the
+    genuinely unreachable look the same.
+
+    Sent by the app when it sees the notification: in the foreground, on a
+    quiet background wake (`content-available`), when the person taps it,
+    and on next launch for anything still sitting in Notification Centre.
+    Best effort by design — a missing receipt means "we cannot confirm",
+    never "they ignored us".
+
+    Body: {"device_id": "qg-...", "check_id": "ask-...", "kind": "...",
+           "how": "shown" | "tapped" | "woke", "seen_at": "<ISO, optional>"}
+
+    Deliberately unauthenticated, like the other device-reported endpoints:
+    the worst a forged receipt can do is make us LESS worried about one
+    phone, and it cannot change anybody's status.
+    """
+    device_id = str(payload.get("device_id") or "").strip()
+    if not device_id:
+        raise HTTPException(400, "We need to know which phone this came from.")
+    now_iso = _iso(datetime.now(timezone.utc))
+    seen_at = payload.get("seen_at") or now_iso
+    how = str(payload.get("how") or "shown")
+    receipt = {
+        "check_id": (str(payload.get("check_id")) if payload.get("check_id") else None),
+        "kind": str(payload.get("kind") or ""),
+        "how": how,
+        "at": seen_at,
+        "recorded_at": now_iso,
+    }
+    await db.device_status.update_one(
+        {"device_id": device_id},
+        {"$set": {"push_receipt": receipt}},
+    )
+    # Stamp the confirmation onto the ask itself when the receipt is for
+    # the question we are waiting on, so the card can say "their phone
+    # showed our question at 16:58".
+    if receipt["check_id"]:
+        await db.device_status.update_one(
+            {"device_id": device_id, "asks.last_check_id": receipt["check_id"]},
+            {"$set": {"asks.delivery.confirmed_at": seen_at,
+                      "asks.delivery.confirmed_how": how}},
+        )
+        await db.record_decisions.update_many(
+            {"device_id": device_id, "check_id": receipt["check_id"]},
+            {"$set": {"delivery.confirmed_at": seen_at,
+                      "delivery.confirmed_how": how}},
+        )
+    return {"ok": True, "recorded_at": now_iso}
 
 
 @api_router.post("/mark-rescued")
@@ -3150,17 +3243,29 @@ async def _stand_down_split() -> Dict[str, Any]:
     held_back = [d for d in ios_all if str(d.get("user_id") or "") in staying_ids]
 
     def _person(r: Dict[str, Any]) -> Dict[str, Any]:
+        from record_state import dur_words
         sev = (r.get("severity") or "").lower()
         sev_words = {
             "red": "Badly hurt",
             "yellow": "Hurt",
             "green": "Not hurt, but stuck",
         }.get(sev, "Asked for help")
+        # #275: how long they have been waiting, in words. An operator
+        # reading "waiting 2 hours 40 minutes" behaves differently from one
+        # reading a timestamp they have to subtract in their head.
+        since = r.get("trapped_since") or r.get("updated_at")
+        waiting = None
+        parsed = _parse_iso_or_none_safe(since)
+        if parsed:
+            mins = int((datetime.now(timezone.utc) - parsed).total_seconds() // 60)
+            if mins >= 1:
+                waiting = dur_words(mins)
         return {
             "device_id": str(r.get("device_id")),
             "name": r.get("display_name") or "No name given",
             "code": r.get("short_code"),
             "words": sev_words,
+            "waiting_words": waiting,
             "last_heard": timefmt.human(r.get("updated_at")),
             "battery_pct": r.get("battery_pct"),
         }
@@ -3415,15 +3520,22 @@ async def admin_incident_status(
             if h == 0 and m == 0:
                 dur = "under a minute"
             elif h == 0:
-                dur = f"{m}m"
+                dur = f"{m} minutes"
             elif m == 0:
-                dur = f"{h}h"
+                dur = f"{h} hours" if h != 1 else "1 hour"
             else:
-                dur = f"{h}h {m}m"
+                dur = (f"{h} hours {m} minutes" if h != 1
+                       else f"1 hour {m} minutes")
+            # #277 (2026-08-21 — Paul): "'Idle sign-out suspended' and '72h
+            # window' are jargon, and it takes three readings to work out it
+            # is good news." Good news first, in everyday words, and the
+            # elapsed time on its own line.
+            days = int(round(ACTIVE_WINDOW_H / 24))
             reason = (
-                f"An earthquake alert has been live for {dur} without a "
-                f"stand-down. Idle sign-out is suspended until you send "
-                f"a stand-down or the {int(ACTIVE_WINDOW_H)}h window closes."
+                "An alert is running. You will stay signed in while it is. "
+                "This lasts until you call the alert off, or "
+                f"{days} days pass.\n"
+                f"Running for {dur}."
             )
 
     return {

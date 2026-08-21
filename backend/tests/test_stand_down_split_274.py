@@ -156,7 +156,10 @@ class TestCheckInRequestIsNotAnEarthquakeAlert:
         )
         aps = p["aps"]
         assert aps["sound"] == "default"
-        assert aps["interruption-level"] == "active"
+        # #276: raised from "active" to "time-sensitive" after Paul's check-in
+        # request was swallowed whole by a Focus mode. Still no siren and the
+        # physical silent switch still wins — see test_delivery_truth_276.
+        assert aps["interruption-level"] == "time-sensitive"
         assert "critical" not in str(aps).lower()
         assert p["body"]["kind"] == "check_in_request"
         # Reassurance first, always.

@@ -472,6 +472,10 @@ def _build_recheck_payload(
             "interruption-level": interruption,
             "relevance-score": 1,
             "category": RECHECK_CATEGORY_ID,
+            # #276: wake the app quietly alongside the banner so it can
+            # confirm the question actually arrived. "No answer" and
+            # "we cannot confirm they saw it" are different facts.
+            "content-available": 1,
         },
         # expo-notifications iOS ONLY reads `userInfo["body"]` for
         # `content.data` on remote pushes — nesting here is what makes
@@ -899,6 +903,18 @@ async def send_recheck_prompts(
                 payload=payload,
                 idempotency_key=f"{idempotency_key}-{d.get('user_id')}",
                 apns_priority="10",   # a trapped person's check is immediate
+                # #276 (2026-08-21 — Paul): "check whether the same silent
+                # failure has been happening with re-check notifications
+                # all along." It has. Every re-check went out with
+                # `apns-expiration: 0` — one delivery attempt, never
+                # stored — so a phone that was asleep or briefly out of
+                # signal lost the question, Apple returned 200, and the
+                # ladder recorded "no answer to the previous re-check".
+                # That is a false negative about a trapped person.
+                # 10 minutes of store-and-forward: long enough to survive a
+                # tunnel or a locked phone, short enough that it can never
+                # arrive after the NEXT re-check in a 15-minute ladder.
+                apns_expiration=str(int(time.time()) + 600),
             )
         return d, res
 
@@ -927,10 +943,31 @@ def _build_check_in_request_payload(
        silent mode. That entitlement is for real earthquakes only."
       "'No new earthquake' must be the first thing in the body."
 
-    So this is an ORDINARY notification: `active` interruption level, the
-    default sound, priority 5 on the header. It never touches the critical
-    path (#207) and never uses `time-sensitive` either — a routine check
-    has no business breaching someone's Focus.
+    So this is an ORDINARY notification. It never touches the critical
+    path (#207) and it never overrides the physical silent switch.
+
+    #276 (2026-08-21 — Paul): the FIRST version of this vanished. Apple
+    returned 200 and the phone showed nothing, not even in Notification
+    Centre. Two causes, both in the header rather than the payload:
+
+      * `apns-expiration: 0` told Apple "attempt delivery once and never
+        store it". A phone that is not instantly reachable — asleep, poor
+        signal, in a Focus schedule — loses the notification entirely, and
+        we get a 200 for it. Now +30 minutes: a check-in question is still
+        worth answering twenty minutes later.
+      * `apns-priority: 5` invites Apple to batch or delay it. Delay plus
+        "do not store" is how a push disappears. Priority 10 now — this is
+        a question an operator just pressed a button to ask.
+
+    `interruption-level` is `time-sensitive`, NOT `active`. Paul's rules
+    still hold: no siren, and the physical silent switch still wins. But
+    an `active` notification is swallowed by any Focus mode, and a
+    swallowed question manufactures false silence — the operator sees
+    "asked, no answer" and sends help towards somebody who is fine, while
+    the genuinely unreachable look identical on the board. We never
+    present uncertainty as fact. `time-sensitive` breaks Focus without
+    breaking the silent switch, and it is the same entitlement the
+    re-check ladder already relies on (#207).
 
     `kind: "check_in_request"` routes the tap to the calm check-in screen,
     which carries the same reassurance and the same I'M SAFE / I NEED HELP
@@ -951,8 +988,14 @@ def _build_check_in_request_payload(
         "aps": {
             "alert": {"title": title, "body": body},
             "sound": "default",
-            "interruption-level": "active",
+            "interruption-level": "time-sensitive",
             "category": RECHECK_CATEGORY_ID,
+            # #276: also wake the app quietly so it can tell us the phone
+            # actually got the question. That is what turns "we asked and
+            # heard nothing" into either "their phone showed it and nobody
+            # answered" or "we cannot confirm they ever saw it" — two
+            # different facts, and only one of them is worrying.
+            "content-available": 1,
         },
         "body": body_data,
     }
@@ -998,7 +1041,10 @@ async def send_check_in_request(
         device_token=device.get("device_token") or "",
         payload=payload,
         idempotency_key=idempotency_key,
-        apns_priority="5",
+        # #276: immediate delivery, and Apple keeps it for 30 minutes if
+        # the phone is briefly unreachable. See the payload docstring.
+        apns_priority="10",
+        apns_expiration=str(int(time.time()) + 1800),
     )
     pruned = await _prune_dead_devices(db, [res])
     return {

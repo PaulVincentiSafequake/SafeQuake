@@ -304,8 +304,9 @@ class TestAccessGating:
         # aggregate numbers only, nothing device-shaped.
         assert set(body["counts"].keys()) == {
             "safe", "trapped", "rescued", "not_responding", "unknown",
-            "waiting_for_answer", "phone_went_dark", "app_removed",
-            "never_used", "resolved_by_operator", "off_board_total",
+            "waiting_for_answer", "phone_went_dark", "no_answer",
+            "app_removed", "never_used", "resolved_by_operator",
+            "off_board_total",
         }
         # nothing device-shaped may leak
         text = r.text.lower()

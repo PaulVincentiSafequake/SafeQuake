@@ -64,6 +64,20 @@ from typing import Any, Dict, List, Optional, Sequence, Set
 # label is what an operator reads and what gets spoken over a radio.
 WAITING = "waiting_for_answer"
 DARK = "phone_went_dark"
+# #276 (2026-08-21 — Paul): a fifth state, because "we asked and heard
+# nothing" was hiding two different facts.
+#
+#   "The card must distinguish 'the phone received our question and nobody
+#    answered' from 'we cannot confirm the phone ever saw it'. Those are
+#    different facts and only one is worrying."
+#
+# Apple returning 200 means Apple accepted the push, not that the phone
+# showed it. When the phone itself confirms the question arrived (see
+# POST /api/push/receipt) and still nobody answers, that IS worrying and
+# reads as NO_ANSWER. When no confirmation ever comes back we say we
+# cannot be sure — that stays DARK, and the detail says so in words.
+# Never present uncertainty as fact.
+NO_ANSWER = "no_answer"
 # #271 (2026-08-21 — Paul, from the live board): CW7EF read "Phone went
 # dark — nothing from this phone for 14 hours 23 minutes. No contact
 # possible." The phone was switched on, charged, on wifi and perfectly
@@ -92,6 +106,10 @@ RESOLVED = "resolved_by_operator"
 LABELS: Dict[str, str] = {
     WAITING: "Waiting for an answer",
     DARK: "Phone went dark",
+    # #276: the worrying one. Their phone confirmed our question arrived
+    # and nobody has answered it. Said in six words an operator can repeat
+    # over a radio after hearing it once.
+    NO_ANSWER: "Got our question, no answer",
     # The label carries the time, because the state describes what WE
     # have done, not what the person has done (Paul's wording, and his
     # reason: "'Quiet' invites the reader to imagine something is wrong").
@@ -300,6 +318,18 @@ def classify(
     ask_count = int(asks.get("count") or 0)
     if ask_count > 1:
         _asked_words += f", {ask_count} times in total"
+    # #276: did the PHONE confirm the question arrived? Apple accepting it
+    # proves nothing about what the phone showed.
+    _delivery = asks.get("delivery") or {}
+    _receipt = row.get("push_receipt") or {}
+    _confirmed_at = parse_dt(_delivery.get("confirmed_at"))
+    if not _confirmed_at and _receipt.get("at"):
+        _r_at = parse_dt(_receipt.get("at"))
+        # A receipt for some other push still proves this phone was awake
+        # and receiving AFTER we asked, which is the same evidence.
+        if _r_at and last_ask and _r_at >= last_ask:
+            _confirmed_at = _r_at
+    ask_confirmed = bool(_confirmed_at)
     # The dark clock runs from the ASK, not from their last report. A
     # person last heard from yesterday who was asked a minute ago has not
     # gone dark — they have had a minute to answer.
@@ -332,15 +362,33 @@ def classify(
                 "The only way to know is to ask."
             )
         if is_dark:
+            if ask_confirmed:
+                # The worrying one: we KNOW the question landed on their
+                # phone, and nobody has answered it.
+                return NO_ANSWER, (
+                    f"Their phone got our question at {_clock(_confirmed_at)}. "
+                    f"Nobody has answered for {dur_words(unanswered_minutes)}. "
+                    f"Last heard {_clock(last)}. "
+                    "The status and place shown are the last we knew."
+                )
             return DARK, (
                 f"We asked{_asked_words}. No answer for "
                 f"{dur_words(unanswered_minutes)}. "
+                "Their phone never confirmed our question arrived, so we "
+                "cannot tell whether they saw it. "
                 f"Last heard {_clock(last)}. "
                 "The status and place shown are the last we knew."
             )
+        if ask_confirmed:
+            return WAITING, (
+                f"Their phone got our question at {_clock(_confirmed_at)}. "
+                f"No reply yet, {dur_words(unanswered_minutes)} so far."
+                + (f" Last heard {_clock(last)}." if last else "")
+            )
         return WAITING, (
             f"We asked{_asked_words}. No reply yet, "
-            f"{dur_words(unanswered_minutes)} so far."
+            f"{dur_words(unanswered_minutes)} so far. "
+            "Their phone has not confirmed our question arrived."
             + (f" Last heard {_clock(last)}." if last else "")
         )
 

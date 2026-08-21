@@ -1156,6 +1156,7 @@ async def export_audit_log_csv(
     writer.writerow(_pad(["people_on_working_board", str(_c.total)]))
     writer.writerow(_pad(["waiting_for_an_answer", str(_c.waiting_for_answer)]))
     writer.writerow(_pad(["phone_went_dark", str(_c.phone_went_dark)]))
+    writer.writerow(_pad(["no_answer", str(_c.no_answer)]))
     writer.writerow(_pad(["not_on_working_board_app_removed", str(_c.app_removed)]))
     writer.writerow(_pad(["not_on_working_board_never_used_app", str(_c.never_used)]))
     writer.writerow(_pad(["not_on_working_board_resolved_by_operator",
@@ -1702,6 +1703,7 @@ async def casualty_report_operational_pdf(
     summary_data[-1:-1] = [
         ["Silence right now — inside the rows above:", ""],
         ["  — waiting for an answer",     str(current_counts.waiting_for_answer)],
+        ["  — got our question, no answer", str(current_counts.no_answer)],
         ["  — phone went dark",           str(current_counts.phone_went_dark)],
         ["Not on the working board — NOT in the rows above:", ""],
         ["  — app removed from this phone", str(current_counts.app_removed)],

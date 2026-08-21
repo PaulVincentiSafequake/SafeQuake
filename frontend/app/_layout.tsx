@@ -26,6 +26,7 @@ import {
   scheduleCheckInReminders,
 } from "@/src/utils/reminders";
 import { recordTap, buildLogFields, type TapSource } from "@/src/utils/tapProbe";
+import { reportPresentedPushes, reportPushSeen } from "@/src/utils/pushReceipt";
 
 const ONBOARDING_DONE_KEY = "quakeguard_onboarding_done";
 
@@ -275,6 +276,10 @@ export default function RootLayout() {
         // occasionally a no-op (the same race that made the original
         // tap handler's router.push land nowhere).
         setTimeout(checkAndRedirect, 150);
+        // #276: confirm anything of ours still sitting in Notification
+        // Centre. This is how a question that arrived while the app was
+        // closed gets confirmed to the operator's board at all.
+        reportPresentedPushes();
       }
     });
 
@@ -320,6 +325,9 @@ export default function RootLayout() {
 
       // C1: any re-check answer tapped while offline goes out on app open.
       flushRecheckQueue().catch(() => {});
+      // #276: on cold start too — a question may have been sitting on the
+      // lock screen since before the app was opened.
+      reportPresentedPushes();
     })();
   }, [router]);
 
@@ -594,6 +602,8 @@ export default function RootLayout() {
     const tapSub = Notifications.addNotificationResponseReceivedListener(
       (response) => {
         const data = (response.notification.request.content.data ?? {}) as any;
+        // #276: a tap is the strongest possible proof it arrived.
+        reportPushSeen(data, "tapped");
         // Action buttons on tremor notices (batch 5, B9). "Close" must do
         // nothing at all — no navigation, no app launch. Tapping the
         // notification body behaves exactly like "See location on map",
@@ -624,6 +634,9 @@ export default function RootLayout() {
     const recvSub = Notifications.addNotificationReceivedListener((n) => {
       const data = (n.request.content.data ?? {}) as any;
       const kind = String(data.kind ?? "").trim();
+      // #276: the phone has the question in its hands. Tell the operator's
+      // board so "no answer" can be told apart from "never arrived".
+      reportPushSeen(data, "shown");
       if (kind === "cancel_reminders") {
         cancelCheckInReminders().catch(() => {});
         return;
