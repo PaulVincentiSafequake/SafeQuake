@@ -1920,3 +1920,26 @@ needing help now requires `acknowledge_help_history: true`. It is still
 allowed — a human may know they are accounted for — but never by accident,
 and it is recorded against their name.
 Five new tests pin all of it. Full #268 suite: 40 HTTP + 40 unit, all green.
+
+### #268 follow-up 2 — the app-removed fact is now durable
+Found while re-checking the work on live preview data: the "app removed"
+fact lived ONLY on the `push_devices` registration row. That row is
+transient — the admin registry wipe deletes it and a re-register replaces
+it — so after an unrelated cleanup a known-deleted app silently reverted
+to "Phone went dark" and walked back onto the working board as a missing
+person. The exact defect #268 exists to kill, resurrected by a wipe.
+
+Fix: `_prune_dead_devices` now also stamps `app_removed_at` /
+`app_removed_source` on the `device_status` record itself (only for
+`Unregistered`, never for `BadDeviceToken`), and `classify` reads either
+source. Cleared in exactly two places, both of which are positive evidence
+that the app is back and both of which move the record TOWARDS the board:
+a check-in (`POST /api/status`) and a successful re-register
+(`POST /api/register-push`). A check-in also clears a stale `dead_token`
+mark on the registration, because a phone that is answering demonstrably
+has the app installed; if the token really is dead the next push re-marks
+it. Pinned by one unit test and two HTTP tests.
+
+Also in this pass: B2's one-page guard was tightened (10/12 leading, 7.5pt
+note) so the exclusions line cannot tip the page on a data-heavy window —
+verified stable across repeated runs.

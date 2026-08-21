@@ -231,12 +231,19 @@ def classify(
 
     # What the phone network told us, and how much of it we are allowed
     # to believe (see module docstring).
+    #
+    # Two sources, deliberately. The push registration row carries the
+    # live signal; `app_removed_at` on the rescue record itself is the
+    # durable copy, because the registration row is transient (a registry
+    # wipe or a re-register removes it) and without the durable copy a
+    # known-deleted app silently reverts to "Phone went dark" and walks
+    # back onto the working board as a missing person.
     dead_reason = (push_row or {}).get("dead_token_reason")
     removed_at = (
         (push_row or {}).get("dead_token_at")
         if (push_row or {}).get("dead_token") and dead_reason == APP_REMOVED_REASON
         else None
-    )
+    ) or row.get("app_removed_at")
     token_note = None
     if (push_row or {}).get("dead_token") and not removed_at:
         token_note = (

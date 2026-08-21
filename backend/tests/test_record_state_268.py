@@ -119,6 +119,20 @@ class TestOnlyUnregisteredMeansRemoved:
         import apns
         assert apns.APP_REMOVED_REASON == rs.APP_REMOVED_REASON == "Unregistered"
 
+    def test_the_fact_survives_the_push_registration_being_deleted(self):
+        """Found while re-checking #268: the app-removed fact lived ONLY on
+        the push_devices row, which the admin registry wipe deletes — so a
+        known-deleted app silently reverted to "Phone went dark" and walked
+        back onto the working board as a missing person. The durable copy
+        lives on the rescue record itself."""
+        st = cls({"status": "safe", "updated_at": ago(300),
+                  "app_removed_at": ago(55),
+                  "app_removed_source": "apns_unregistered"},
+                 None)  # no registration row at all
+        assert st.state == rs.APP_REMOVED
+        assert st.on_working_board is False
+        assert st.app_removed_at is not None
+
 
 # ── 4. Two thresholds, and the real elapsed time always shown. ────────
 class TestDarkThresholds:

@@ -664,3 +664,45 @@ class TestResolvingAHelpRecordNeedsADeliberateConfirmation:
         back = requests.post(f"{BASE}/api/admin/records/{C}/unresolve",
                              json={}, headers=HDR, timeout=15)
         assert back.status_code == 200, back.text
+
+
+class TestTheAppRemovedFactIsDurable:
+    """The registration row is transient — the admin registry wipe deletes
+    it. If the app-removed fact only lived there, a phantom would silently
+    reappear on the working board after an unrelated cleanup."""
+
+    def test_it_survives_the_push_registration_being_deleted(self):
+        _seed()
+        # Simulate what _prune_dead_devices writes, then delete the
+        # registration exactly as the registry wipe does.
+        import pymongo
+        mdb = pymongo.MongoClient(os.environ["MONGO_URL"])[
+            os.environ.get("DB_NAME", "test_database")]
+        mdb.device_status.update_one(
+            {"device_id": B},
+            {"$set": {"app_removed_at": datetime.now(timezone.utc).isoformat(),
+                      "app_removed_source": "apns_unregistered"}},
+        )
+        mdb.push_devices.delete_many({"user_id": B})
+        state, row = _find(_devices(), B)
+        assert state == "off", "a known-deleted app walked back onto the board"
+        assert row["label"] == "App removed from this phone"
+
+    def test_a_check_in_from_that_phone_brings_it_straight_back(self):
+        _seed()
+        import pymongo
+        mdb = pymongo.MongoClient(os.environ["MONGO_URL"])[
+            os.environ.get("DB_NAME", "test_database")]
+        mdb.device_status.update_one(
+            {"device_id": B},
+            {"$set": {"app_removed_at": datetime.now(timezone.utc).isoformat(),
+                      "app_removed_source": "apns_unregistered"}},
+        )
+        assert _find(_devices(), B)[0] == "off"
+        r = requests.post(f"{BASE}/api/status", json={
+            "device_id": B, "status": "safe", "display_name": "Neo Tester",
+            "latitude": 35.8997, "longitude": 14.5146,
+        }, timeout=15)
+        assert r.status_code == 200, r.text
+        state, row = _find(_devices(), B)
+        assert state == "on", "a phone that reported again stayed set aside"

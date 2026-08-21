@@ -281,6 +281,29 @@ async def _prune_dead_devices(
             }},
         )
         marked += res.modified_count
+        # #268 (2026-08-21): the app-removed FACT has to live on the rescue
+        # record, not only on the push registration.
+        #
+        # Found while re-checking the #268 work: the registration row is
+        # transient — the admin registry wipe deletes it, and a re-register
+        # replaces it — so when the row went, so did the only evidence that
+        # the app had been removed, and the record silently reverted to
+        # "Phone went dark" and reappeared on the working board as a
+        # missing person. That is exactly the phantom casualty #268 exists
+        # to kill, resurrected by an unrelated cleanup.
+        #
+        # Stamped only for `Unregistered` (Apple saying the app is gone).
+        # `BadDeviceToken` is not evidence of removal and must never write
+        # here. Cleared in one place only: a fresh check-in from that
+        # device, which proves the app is back (see POST /api/status).
+        if reason == APP_REMOVED_REASON:
+            await db.device_status.update_one(
+                {"device_id": user_id, "app_removed_at": {"$exists": False}},
+                {"$set": {
+                    "app_removed_at": now_iso,
+                    "app_removed_source": "apns_unregistered",
+                }},
+            )
     if marked:
         logging.info(
             f"[apns] #262 auto-marked {marked} dead device(s) "

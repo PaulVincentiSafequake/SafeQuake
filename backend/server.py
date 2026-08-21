@@ -376,9 +376,25 @@ async def post_status(payload: StatusInPayload):
     await db.device_status.update_one(
         {"device_id": doc["device_id"]},
         {"$set": doc, "$setOnInsert": {"created_at": now},
+         # #268: a check-in proves the app is installed and the person is
+         # answering, so both the operator's resolution and the durable
+         # "app removed" stamp are cleared. This is the ONLY place either
+         # is cleared, and it is the safe direction — software may move a
+         # record towards the working board, never away from it.
          "$unset": {"resolved_at": "", "resolved_by": "",
-                    "resolved_reason": "", "resolved_as": ""}},
+                    "resolved_reason": "", "resolved_as": "",
+                    "app_removed_at": "", "app_removed_source": ""}},
         upsert=True,
+    )
+    # #268: a check-in is positive evidence that the app exists on that
+    # phone, so a stale "Unregistered" mark on its registration is cleared
+    # too — otherwise the record stays set aside even though the person is
+    # visibly answering. If the token really is dead, the next push will
+    # mark it again.
+    await db.push_devices.update_one(
+        {"user_id": doc["device_id"], "dead_token": True},
+        {"$unset": {"dead_token": "", "dead_token_reason": "",
+                    "dead_token_at": ""}},
     )
     if returning:
         try:
@@ -1942,6 +1958,13 @@ async def register_push(body: RegisterPushBody, request: Request = None):
                 upsert=True,
             )
             persisted = True
+            # #268: the app is demonstrably installed again on this phone,
+            # so clear the durable "app removed" stamp on the rescue record
+            # too. Same safe direction as a check-in: towards the board.
+            await db.device_status.update_one(
+                {"device_id": body.user_id},
+                {"$unset": {"app_removed_at": "", "app_removed_source": ""}},
+            )
         elif relay_status is None:
             # Network-error path: best-effort persist so retries work.
             await db.push_devices.update_one(

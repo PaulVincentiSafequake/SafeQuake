@@ -2015,7 +2015,7 @@ async def casualty_report_public_pdf(
     title_style = PS("T", parent=styles["Heading1"], fontSize=15, spaceAfter=5, textColor=colors.HexColor("#111"))
     meta_style  = PS("M", parent=styles["Normal"], fontSize=9, textColor=colors.HexColor("#444"), spaceAfter=6)
     h2_style    = PS("H2", parent=styles["Heading2"], fontSize=12, spaceAfter=4, textColor=colors.HexColor("#111"))
-    body_style  = PS("B", parent=styles["Normal"], fontSize=10, leading=13, spaceAfter=3)
+    body_style  = PS("B", parent=styles["Normal"], fontSize=10, leading=12, spaceAfter=2)  # #268: 13/3 -> 12/2, headroom for the exclusions line
     footer_style = PS("F", parent=styles["Normal"], fontSize=8, textColor=colors.HexColor("#666"), spaceBefore=8)
 
     story = [
@@ -2126,8 +2126,8 @@ async def casualty_report_public_pdf(
     from people_counts import counts_notes_short as _counts_notes_b2
     story.append(Paragraph(
         _html.escape(_counts_notes_b2(current_counts)),
-        PS("B2CountNote", parent=styles["Normal"], fontSize=8,
-           leading=9.5, spaceBefore=2, spaceAfter=0,
+        PS("B2CountNote", parent=styles["Normal"], fontSize=7.5,
+           leading=9, spaceBefore=1, spaceAfter=0,
            textColor=colors.HexColor("#555")),
     ))
 

@@ -410,6 +410,8 @@ async def _load_rows(db) -> List[Dict[str, Any]]:
             "trapped_since": 1, "created_at": 1,
             "resolved_at": 1, "resolved_by": 1, "resolved_reason": 1,
             "resolved_as": 1, "is_test": 1,
+            # #268: the durable copy of "the phone told us the app is gone".
+            "app_removed_at": 1, "app_removed_source": 1,
         },
     ).to_list(10000)
 
