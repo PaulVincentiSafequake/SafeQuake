@@ -284,40 +284,41 @@
      None of these styles use colour alone — every state carries a symbol
      and words, because a tired operator at 4am reads words. */
   .qg-count-notes {
-    margin: 6px 0 8px; font-size: 12px; line-height: 1.55;
+    margin: 6px 0 10px; font-size: 13px; line-height: 1.6;
     color: var(--text, #222);
   }
-  .qg-count-notes div { margin-top: 3px; }
+  .qg-count-notes div { margin-top: 4px; }
   .qg-board-notices { margin-bottom: 8px; }
   .qg-notice {
     border: 1px solid #b58900; background: #fff8e1; color: #4a3800;
-    border-radius: 8px; padding: 8px 10px; font-size: 12.5px;
-    line-height: 1.5; margin-bottom: 6px;
+    border-radius: 8px; padding: 9px 11px; font-size: 13px;
+    line-height: 1.6; margin-bottom: 6px;
   }
   .qg-state-line {
-    margin-top: 4px; font-size: 12px; line-height: 1.5;
+    margin-top: 5px; font-size: 12.5px; line-height: 1.55;
     border-left: 3px solid #8a8f98; padding-left: 7px;
   }
   .qg-state-line.dark { border-left-color: #B0141A; color: #7a1015; font-weight: 600; }
   .qg-state-line.waiting { border-left-color: #b58900; }
   .qg-state-held {
-    margin-top: 4px; font-size: 11.5px; line-height: 1.5;
+    margin-top: 5px; font-size: 12.5px; line-height: 1.55;
     background: #fff8e1; border: 1px dashed #b58900; color: #4a3800;
     border-radius: 6px; padding: 6px 8px;
   }
   .qg-dup {
-    margin-top: 6px; padding: 7px 9px; border-radius: 7px;
+    margin-top: 6px; padding: 8px 10px; border-radius: 7px;
     border: 1px solid #2f6fbf; background: #eef4fc; color: #17324f;
-    font-size: 12px; line-height: 1.5;
+    font-size: 12.5px; line-height: 1.6;
   }
+  .qg-dup-note { margin-top: 3px; color: #17324f; }
   .qg-dup ul { margin: 4px 0 6px 16px; padding: 0; }
   /* The evidence list must not pick up the dark card styling used
      elsewhere in the sidebar (ul.userlist li) — this block is
      light-on-purpose so the evidence reads as evidence, not as another
      casualty card. Specificity has to beat `ul.userlist li`. */
   ul.userlist .qg-dup li, .qg-dup ul li {
-    background: none; border: 0; padding: 0; margin: 2px 0;
-    color: #17324f; font-size: 12px; list-style: disc;
+    background: none; border: 0; padding: 0; margin: 3px 0;
+    color: #17324f; font-size: 12.5px; list-style: disc;
     box-shadow: none; display: list-item; border-radius: 0;
   }
   .qg-dup button {
@@ -334,12 +335,12 @@
     min-height: 40px;
   }
   .qg-offboard-intro {
-    font-size: 12px; color: var(--text, #222); margin: 7px 2px;
+    font-size: 12.5px; color: var(--text, #222); margin: 5px 2px;
     line-height: 1.55;
   }
   .qg-off-card {
     border: 1px solid var(--border, #cbd0d8); border-radius: 8px;
-    padding: 9px 10px; margin-bottom: 7px; font-size: 12px; line-height: 1.5;
+    padding: 10px; margin-bottom: 8px; font-size: 12.5px; line-height: 1.6;
     background: var(--surface-2, #f8f9fb); color: var(--text, #16202a);
   }
   .qg-off-card .qg-off-code { font-size: 15px; font-weight: 800; letter-spacing: 1px; }
@@ -351,6 +352,37 @@
     border: 1px solid var(--border, #cbd0d8);
     background: var(--surface-3, #eef0f4); color: var(--text, #17324f);
     font-weight: 600;
+  }
+  /* "Take off the working board" — the human path. Deliberately quiet:
+     it must be findable, never the easiest thing to hit by accident. */
+  .qg-off-btn {
+    margin-top: 6px; margin-left: 6px; padding: 4px 10px; font-size: 11.5px;
+    min-height: 28px; border-radius: 5px; cursor: pointer;
+    background: none; border: 1px solid var(--border, #cbd0d8);
+    color: var(--text-muted, #778);
+  }
+  .qg-off-btn:hover { background: rgba(122,131,147,0.12); }
+  .qg-off-panel-inner {
+    margin-top: 7px; padding: 9px 10px; border-radius: 7px;
+    border: 1px solid #b58900; background: #fff8e1; color: #4a3800;
+    font-size: 12.5px; line-height: 1.6;
+  }
+  .qg-off-panel-head { font-weight: 700; font-size: 13.5px; margin-bottom: 5px; }
+  .qg-off-panel-note { margin: 3px 0; }
+  .qg-off-reason {
+    display: block; width: 100%; text-align: left; margin-bottom: 5px;
+    min-height: 36px; padding: 8px 10px; font-size: 12.5px; font-weight: 600;
+    border-radius: 6px; cursor: pointer;
+    border: 1px solid #b58900; background: #fff; color: #4a3800;
+  }
+  .qg-off-why {
+    width: 100%; box-sizing: border-box; margin: 4px 0 6px; padding: 6px 8px;
+    font-size: 12px; border-radius: 6px; border: 1px solid #b58900;
+    background: #fff; color: #4a3800; min-height: 32px;
+  }
+  .qg-off-cancel {
+    min-height: 30px; padding: 5px 10px; font-size: 12px; border-radius: 6px;
+    cursor: pointer; border: 1px solid #b58900; background: none; color: #4a3800;
   }
 
   .qg-list-tools input {
@@ -2777,10 +2809,11 @@
          when, and why." -->
     <details class="qg-offboard" id="qg-offboard" hidden>
       <summary id="qg-offboard-summary">Not on the working board</summary>
-      <div class="qg-offboard-intro">
-        These records are deliberately not in the list above. Nothing has been
-        deleted. Each one says what it is, when it moved and who moved it.
-      </div>
+      <div class="qg-offboard-intro">These records are not in the list above,
+        on purpose.</div>
+      <div class="qg-offboard-intro">Nothing has been deleted.</div>
+      <div class="qg-offboard-intro">Each one says what it is, when it moved,
+        and who moved it.</div>
       <div id="qg-offboard-body"></div>
     </details>
   </div>
@@ -6022,10 +6055,9 @@ window.QuakeAngelRescue = (function () {
     var lines = [];
     var w = counts.waiting_for_answer || 0, d = counts.phone_went_dark || 0;
     if (w || d) {
-      lines.push(
-        "Silence right now: " + w + " waiting for an answer · " + d +
-        " with a phone that went dark. Both are counted in the numbers above."
-      );
+      lines.push("Waiting for an answer: " + w + ".");
+      lines.push("Phone went dark: " + d + ".");
+      lines.push("Both are counted in the numbers above.");
     }
     (notes || []).forEach(function (n) { lines.push(n); });
     el.innerHTML = lines.map(function (l) {
@@ -6057,15 +6089,15 @@ window.QuakeAngelRescue = (function () {
         '<div class="qg-off-label">' + window.qgEsc(r.label || "—") + "</div>" +
         '<div>' + window.qgEsc(r.detail || "") + "</div>" +
         dup +
-        '<div class="qg-off-meta">Moved: ' + window.qgEsc(when) +
-        " · by " + window.qgEsc(r.moved_by || "—") + "</div>" +
-        '<div class="qg-off-meta">Why: ' + window.qgEsc(r.off_board_reason || "—") + "</div>" +
+        '<div class="qg-off-meta"><b>Moved:</b> ' + window.qgEsc(when) + "</div>" +
+        '<div class="qg-off-meta"><b>Moved by:</b> ' + window.qgEsc(r.moved_by || "—") + "</div>" +
+        '<div class="qg-off-meta"><b>Why:</b> ' + window.qgEsc(r.off_board_reason || "—") + "</div>" +
         (r.last_updated
-          ? '<div class="qg-off-meta">Last heard from the phone: ' +
+          ? '<div class="qg-off-meta"><b>Last heard:</b> ' +
             window.qgEsc(new Date(r.last_updated).toLocaleString()) + "</div>"
           : "") +
         (r.ever_needed_help
-          ? '<div class="qg-off-meta"><b>This person has reported needing help at some point.</b></div>'
+          ? '<div class="qg-off-meta"><b>This person asked for help at some point.</b></div>'
           : "") +
         putBack +
         "</div>";
@@ -6094,10 +6126,11 @@ window.QuakeAngelRescue = (function () {
     var back = ev.target.closest && ev.target.closest(".qg-off-back");
     if (yes) {
       if (!window.confirm(
-        "Record these as the SAME person?\n\n" +
-        "The older record comes off the working board with your name and the " +
-        "reason against it. Nothing is deleted and nothing is merged. You can " +
-        "put it back afterwards."
+        "Save these as the SAME person?\n\n" +
+        "The older record comes off the working board.\n" +
+        "Your name and your reason go on it.\n" +
+        "Nothing is deleted. Nothing is merged.\n" +
+        "You can put it back."
       )) return;
       decideDuplicate(yes.dataset.deviceId, yes.dataset.otherId, "confirmed");
     } else if (no) {
@@ -6112,7 +6145,7 @@ window.QuakeAngelRescue = (function () {
           banner("err", window.qgHumanHttpMessage(res.status));
           return;
         }
-        banner("ok", "Back on the working board.", 6000);
+        banner("ok", "Put back on the working board.", 6000);
         lastSidebarSig = null;
         refresh();
       })();
@@ -6319,7 +6352,8 @@ window.QuakeAngelRescue = (function () {
         '" data-other-id="' + dp.other_device_id + '">Yes — same person</button>' +
         '<button class="qg-dup-no secondary" data-device-id="' + u.deviceId +
         '" data-other-id="' + dp.other_device_id + '">No — two different people</button>' +
-        '<div class="meta">Nothing is merged either way. Your answer is recorded with your name and the time.</div>' +
+        '<div class="qg-dup-note">Nothing is merged either way.</div>' +
+        '<div class="qg-dup-note">Your answer is saved with your name and the time.</div>' +
         "</div>";
     }
     var updLine = u.lastUpdated
@@ -6337,11 +6371,125 @@ window.QuakeAngelRescue = (function () {
         ? "This is hidden from the live list by default. Put it back as a real entry."
         : "Hide this from the live triage list as a test entry. Reversible.") +
       '">' + (u.isTest ? "↩︎ Not a test" : "🧪 Mark as test") + "</button>";
+    // #268: the only way a record leaves the working board other than the
+    // phone telling us the app is gone — a human, with a reason, recorded.
+    // Needed on day one: a phone whose registration we no longer hold can
+    // never be reported by Apple, so without this control such a record
+    // would sit on the board as a missing person for ever with no way to
+    // deal with it.
+    var offBtn = '<button class="qg-off-btn" data-device-id="' + u.deviceId +
+      '" data-short-code="' + (u.shortCode || "") +
+      '" title="Take this record off the working board, with a reason. Nothing is deleted. You can put it back.">' +
+      "📤 Take off the board</button>";
     return bulkCheck + head + trappedLine + egressLine + silenceLine +
       '<div class="meta">' + statusLabel(u.status, u.severity) + (mob ? " · " + mob : "") +
       (lowBatt ? "" : " · Battery " + (u.batteryPercent != null ? u.batteryPercent : "?") + "%") + "</div>" +
-      battLine + updLine + rescueSlot + histBtn + testBtn;
+      battLine + updLine + rescueSlot + histBtn + testBtn + offBtn +
+      '<div class="qg-off-panel" id="qg-off-panel-' + u.deviceId + '" hidden></div>';
   }
+
+  // ── #268: "take off the working board", with a reason on the file ─────
+  // Doctrine: "Records get resolved by a human with a reason recorded,
+  // never removed silently by software. This will be read back in an
+  // inquiry." So a reason is required, the reason list is fixed, "Other"
+  // demands a note, and anyone who has ever reported needing help takes a
+  // second deliberate confirmation (the server refuses the first attempt
+  // with 409 and says why — we surface that text, we do not paraphrase it).
+  // Plain words, verb-free, one line each. Paul is dyslexic — see
+  // memory/writing-and-layout-rules.md before rewording any of these.
+  var OFF_BOARD_REASONS = [
+    ["duplicate", "Same person, listed twice"],
+    ["app_removed", "App removed from this phone"],
+    ["never_used", "Never used the app"],
+    ["accounted_for", "Found another way (radio or in person)"],
+    ["test_entry", "This is one of our test entries"],
+    ["other", "Something else — say why"],
+  ];
+
+  function offBoardPanelHtml(deviceId, code) {
+    return '<div class="qg-off-panel-inner">' +
+      '<div class="qg-off-panel-head">Take ' + window.qgEsc(code || "this record") +
+      " off the working board</div>" +
+      '<div class="qg-off-panel-note">Nothing is deleted.</div>' +
+      '<div class="qg-off-panel-note">It moves to the ' +
+      '\u201cNot on the working board\u201d list.</div>' +
+      '<div class="qg-off-panel-note">Your name, the time and your reason ' +
+      "go on the record.</div>" +
+      '<div class="qg-off-panel-note">You can put it back.</div>' +
+      '<div class="qg-off-panel-note"><b>Pick a reason:</b></div>' +
+      OFF_BOARD_REASONS.map(function (r) {
+        return '<button class="qg-off-reason" data-device-id="' + deviceId +
+          '" data-reason-code="' + r[0] + '">' + window.qgEsc(r[1]) + "</button>";
+      }).join("") +
+      '<input class="qg-off-why" type="text" maxlength="200" ' +
+      'placeholder="Add a note (needed for \u201cSomething else\u201d)">' +
+      '<button class="qg-off-cancel" data-device-id="' + deviceId +
+      '">Cancel</button>' +
+      "</div>";
+  }
+
+  async function resolveRecord(deviceId, code, note, acknowledged) {
+    var payload = {reason_code: code, reason: note};
+    if (acknowledged) payload.acknowledge_help_history = true;
+    var res = await window.qaApi(
+      "/api/admin/records/" + encodeURIComponent(deviceId) + "/resolve",
+      {method: "POST", body: JSON.stringify(payload)},
+    );
+    var body = null;
+    try { body = await res.json(); } catch (_) {}
+    if (res.status === 409 && !acknowledged) {
+      // The server's own words — it names the person and says why this
+      // needs a second look. Never paraphrased here.
+      if (window.confirm(((body && body.detail) || "") +
+          "\n\nTake it off the working board?")) {
+        return resolveRecord(deviceId, code, note, true);
+      }
+      banner("ok", "Left on the working board.", 5000);
+      return;
+    }
+    if (!res.ok) {
+      banner("err", (body && body.detail) || window.qgHumanHttpMessage(res.status));
+      return;
+    }
+    banner("ok", "Moved off the working board. Reason saved: " +
+      ((body && body.resolved_reason) || "—"), 8000);
+    lastSidebarSig = null;
+    refresh();
+  }
+
+  document.addEventListener("click", function (ev) {
+    var t = ev.target;
+    if (!t || !t.closest) return;
+    var open = t.closest(".qg-off-btn");
+    if (open) {
+      var panel = document.getElementById("qg-off-panel-" + open.dataset.deviceId);
+      if (!panel) return;
+      if (panel.hidden) {
+        panel.innerHTML = offBoardPanelHtml(open.dataset.deviceId, open.dataset.shortCode);
+        panel.hidden = false;
+      } else {
+        panel.hidden = true;
+        panel.innerHTML = "";
+      }
+      return;
+    }
+    var cancel = t.closest(".qg-off-cancel");
+    if (cancel) {
+      var p = document.getElementById("qg-off-panel-" + cancel.dataset.deviceId);
+      if (p) { p.hidden = true; p.innerHTML = ""; }
+      return;
+    }
+    var reason = t.closest(".qg-off-reason");
+    if (reason) {
+      var wrap = reason.closest(".qg-off-panel-inner");
+      var why = wrap ? (wrap.querySelector(".qg-off-why") || {}).value || "" : "";
+      if (reason.dataset.reasonCode === "other" && why.trim().length < 3) {
+        banner("err", "Say in a few words why, so the record explains itself later.");
+        return;
+      }
+      resolveRecord(reason.dataset.deviceId, reason.dataset.reasonCode, why.trim(), false);
+    }
+  });
 
   // ── B3: per-person full history modal ────────────────────────────────
   function histMapLink(e) {
