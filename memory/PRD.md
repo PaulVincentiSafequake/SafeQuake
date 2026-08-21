@@ -1943,3 +1943,63 @@ it. Pinned by one unit test and two HTTP tests.
 Also in this pass: B2's one-page guard was tightened (10/12 leading, 7.5pt
 note) so the exclusions line cannot tip the page on a data-heavy window —
 verified stable across repeated runs.
+
+### #268 — plain-language pass (Paul: "I am dyslexic")
+Paul, 2026-08-21: *"remember that whenever you create buttons, text and
+descriptions and manage layouts, that I am dyslexic and I want both
+dashboard and the app to be simple to understand, intuitive to use always
+following the most intuitive approach."*
+
+Standing rule written down in **`/app/memory/writing-and-layout-rules.md`**
+— read it before adding any text or control to any surface. Summary: one
+idea per sentence, ~12 words maximum, everyday words only, lead with what
+matters, same thing = same words everywhere, verbs first on buttons, short
+lines instead of paragraphs, 12.5px minimum body text, line height 1.5+,
+never colour alone, read it aloud before shipping.
+
+Applied to everything #268 added, on every surface (dashboard, both PDFs,
+the CSV, API messages and confirmation dialogs):
+- "No word from this phone for 3 hours. Last heard 05:36. We cannot reach
+  them. The status and place shown are the last we knew." — was one
+  clause-heavy sentence.
+- Count provenance is now a scannable list: "Not responding: 1 person on
+  the working board." / "Set aside: 1 record where the phone said the app
+  was removed. A removed app is not a missing person." / "Nothing is ever
+  deleted. You can put any record back."
+- Every API refusal an operator can see was rewritten the same way, e.g.
+  "O268C asked for help at some point. Taking that record off the working
+  board needs a second yes. Nothing is deleted, and you can put it back."
+- Dashboard type up to 12.5–13px with 1.6 line height, bold lead words on
+  scannable lines, 36px reason buttons.
+- Tests updated to pin the new wording (they assert the exact operator
+  sentences, so a future reword cannot silently reintroduce jargon).
+
+### #268 — "Take off the board", the human path (new control)
+Verifying on production exposed a real gap. `F6XJY`'s push registration had
+already been deleted by the #262 pre-pilot wipe, and Apple can only report
+a token we still hold — so that record can NEVER be reported as removed. It
+would have sat on the working board as a missing person for ever with no
+control to deal with it. A safety surface with no way out is a defect.
+
+So every card now carries **"Take off the board"**: six plain reasons
+(same person listed twice / app removed from this phone / never used the
+app / found another way / one of our test entries / something else — say
+why), a note field, and a Cancel. "Something else" without a note is
+refused in words, client-side, before any request. Anyone who has ever
+asked for help needs a second yes, and the dialog is the server's own
+sentence, not a paraphrase. Nothing is deleted; "Put back on the working
+board" sits on every off-board card.
+
+### Live verification (rule 4a)
+- **Verified live on production**, 2026-08-21: loaded
+  `https://safequake.onrender.com` (the deployed dashboard, pushed to
+  `PaulVincentiSafequake/SafeQuake`, Render redeployed), signed-out view,
+  and read the new provenance lines rendered from the live backend at
+  `quake-alert-18.emergent.host`: "Waiting for an answer: 0." / "Phone went
+  dark: 5." / "Both are counted in the numbers above." plus the
+  exclusions line. Production `/api/devices` confirmed serving
+  `record_state` for all 43 records, and `/api/admin/device-registry`
+  confirmed only ONE registration exists (CW7EF) — which is why F6XJY needs
+  the human path.
+- **Production backend still carries the pre-plain-language wording** of
+  the count notes. The short-line version needs Paul to redeploy.
