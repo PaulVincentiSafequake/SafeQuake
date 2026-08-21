@@ -278,6 +278,81 @@
     font-size: 11px; color: var(--text-muted, #667); padding: 3px 8px; cursor: pointer;
   }
   .qg-list-tools { margin-bottom: 8px; }
+
+  /* ── #268 (2026-08-21 — Paul): the four kinds of silence ──────────────
+     Doctrine: silence is information, but only if we know what kind it is.
+     None of these styles use colour alone — every state carries a symbol
+     and words, because a tired operator at 4am reads words. */
+  .qg-count-notes {
+    margin: 6px 0 8px; font-size: 12px; line-height: 1.55;
+    color: var(--text, #222);
+  }
+  .qg-count-notes div { margin-top: 3px; }
+  .qg-board-notices { margin-bottom: 8px; }
+  .qg-notice {
+    border: 1px solid #b58900; background: #fff8e1; color: #4a3800;
+    border-radius: 8px; padding: 8px 10px; font-size: 12.5px;
+    line-height: 1.5; margin-bottom: 6px;
+  }
+  .qg-state-line {
+    margin-top: 4px; font-size: 12px; line-height: 1.5;
+    border-left: 3px solid #8a8f98; padding-left: 7px;
+  }
+  .qg-state-line.dark { border-left-color: #B0141A; color: #7a1015; font-weight: 600; }
+  .qg-state-line.waiting { border-left-color: #b58900; }
+  .qg-state-held {
+    margin-top: 4px; font-size: 11.5px; line-height: 1.5;
+    background: #fff8e1; border: 1px dashed #b58900; color: #4a3800;
+    border-radius: 6px; padding: 6px 8px;
+  }
+  .qg-dup {
+    margin-top: 6px; padding: 7px 9px; border-radius: 7px;
+    border: 1px solid #2f6fbf; background: #eef4fc; color: #17324f;
+    font-size: 12px; line-height: 1.5;
+  }
+  .qg-dup ul { margin: 4px 0 6px 16px; padding: 0; }
+  /* The evidence list must not pick up the dark card styling used
+     elsewhere in the sidebar (ul.userlist li) — this block is
+     light-on-purpose so the evidence reads as evidence, not as another
+     casualty card. Specificity has to beat `ul.userlist li`. */
+  ul.userlist .qg-dup li, .qg-dup ul li {
+    background: none; border: 0; padding: 0; margin: 2px 0;
+    color: #17324f; font-size: 12px; list-style: disc;
+    box-shadow: none; display: list-item; border-radius: 0;
+  }
+  .qg-dup button {
+    min-height: 32px; padding: 5px 10px; margin-right: 6px; font-size: 12px;
+    border-radius: 6px; cursor: pointer; border: 1px solid #2f6fbf;
+    background: #2f6fbf; color: #fff; font-weight: 600;
+  }
+  .qg-dup button.secondary { background: #fff; color: #17324f; }
+  .qg-offboard { margin-top: 12px; }
+  .qg-offboard > summary {
+    cursor: pointer; font-size: 13px; font-weight: 700; padding: 8px 10px;
+    border: 1px solid var(--border, #cbd0d8); border-radius: 8px;
+    background: var(--surface-2, #f8f9fb); color: var(--text, #16202a);
+    min-height: 40px;
+  }
+  .qg-offboard-intro {
+    font-size: 12px; color: var(--text, #222); margin: 7px 2px;
+    line-height: 1.55;
+  }
+  .qg-off-card {
+    border: 1px solid var(--border, #cbd0d8); border-radius: 8px;
+    padding: 9px 10px; margin-bottom: 7px; font-size: 12px; line-height: 1.5;
+    background: var(--surface-2, #f8f9fb); color: var(--text, #16202a);
+  }
+  .qg-off-card .qg-off-code { font-size: 15px; font-weight: 800; letter-spacing: 1px; }
+  .qg-off-card .qg-off-label { font-weight: 700; margin-top: 2px; }
+  .qg-off-card .qg-off-meta { color: var(--text, #222); opacity: .75; }
+  .qg-off-card button {
+    min-height: 32px; margin-top: 6px; padding: 5px 10px; font-size: 12px;
+    border-radius: 6px; cursor: pointer;
+    border: 1px solid var(--border, #cbd0d8);
+    background: var(--surface-3, #eef0f4); color: var(--text, #17324f);
+    font-weight: 600;
+  }
+
   .qg-list-tools input {
     width: 100%; box-sizing: border-box; padding: 7px 10px; font-size: 13px;
     border: 1px solid var(--border, #cbd0d8); border-radius: 7px;
@@ -2675,6 +2750,9 @@
       <div class="stat danger"><div class="stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.68 13.31a16 16 0 0 0 3.41 2.6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 17.92z"></path><line x1="23" y1="1" x2="1" y2="23"></line></svg></div><div class="stat-text"><div class="num" id="count-danger">0</div><div class="label">Not Responding</div></div></div>
       <div class="stat rescued"><div class="stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path><path d="m9 12 2 2 4-4"></path></svg></div><div class="stat-text"><div class="num" id="count-rescued">0</div><div class="label">Rescued</div></div></div>
     </div>
+    <!-- #268: every number says what it counts and what it leaves out,
+         in plain words, right under the numbers themselves. -->
+    <div class="qg-count-notes" id="qg-count-notes" aria-live="polite"></div>
     <div class="qg-list-tools">
       <input id="qg-triage-search" type="search"
              placeholder="Search by name or rescue code…"
@@ -2688,7 +2766,23 @@
       </label>
       <div class="qg-sort-label">Longest waiting first — low battery breaks ties</div>
     </div>
+    <!-- #268 (2026-08-21 — Paul): board-level notices. A wall of phones
+         going dark within minutes of each other is a network or power
+         failure, not many people going missing at once, and the board has
+         to say so rather than presenting a wall of casualties. -->
+    <div class="qg-board-notices" id="qg-board-notices" aria-live="polite"></div>
     <div class="triage-groups" id="userlist"></div>
+    <!-- #268: "Removed records go to a clearly labelled area an operator
+         can open — not hidden, not deleted. Anyone can see what was moved,
+         when, and why." -->
+    <details class="qg-offboard" id="qg-offboard" hidden>
+      <summary id="qg-offboard-summary">Not on the working board</summary>
+      <div class="qg-offboard-intro">
+        These records are deliberately not in the list above. Nothing has been
+        deleted. Each one says what it is, when it moved and who moved it.
+      </div>
+      <div id="qg-offboard-body"></div>
+    </details>
   </div>
 </div>
 
@@ -5585,6 +5679,9 @@ window.QuakeAngelRescue = (function () {
         }
       } catch (_) {}
       try { updateCountPills({safe: 0, trapped: 0, danger: 0, rescued: 0, waiting: 0}); } catch (_) {}
+      // #268: wipe the off-board area and notices on sign-out too — no
+      // personal record may survive the JWT being dropped.
+      try { renderOffBoard([], {}); renderBoardNotices([]); renderCountNotes([], {}); } catch (_) {}
     });
   }
 
@@ -5751,6 +5848,15 @@ window.QuakeAngelRescue = (function () {
       // and for rows an operator has tagged by hand (our own test check-ins
       // come from a real phone, so no id pattern can catch them).
       isTest: d.is_test === true,
+      // ── #268: the four kinds of silence, decided server-side ─────────
+      // recordState = { state, label, detail, on_working_board,
+      //                 held_reason, silent_minutes, dark_after_minutes,
+      //                 ever_needed_help, app_removed_at, token_note }
+      // The dashboard never re-derives any of this: one classifier, one
+      // answer, so the card, the pin and the report cannot disagree.
+      recordState: d.record_state || null,
+      everNeededHelp: d.ever_needed_help === true,
+      possibleDuplicate: d.possible_duplicate || null,
     };
   }
 
@@ -5778,7 +5884,11 @@ window.QuakeAngelRescue = (function () {
         safe: c.safe || 0, trapped: c.trapped || 0, danger: c.not_responding || 0,
         rescued: c.rescued || 0, waiting: c.unknown || 0,
       });
+      // #268: the exclusions travel with the public numbers too.
+      renderCountNotes(summary.count_notes || [], c);
     }
+    renderOffBoard([], {});
+    renderBoardNotices([]);
     markers.forEach(function (m) { map.removeLayer(m); });
     markers.clear();
     lastUsers = [];
@@ -5819,6 +5929,12 @@ window.QuakeAngelRescue = (function () {
         lastSidebarSig = null;   // force one full sidebar rebuild after sign-in
       }
       var allUsers = (data.devices || []).map(normalizeDevice);
+      // #268: everything the backend deliberately kept OFF the working
+      // board, with why/when/who. Rendered in its own labelled area —
+      // never hidden, never deleted.
+      renderOffBoard(data.off_board || [], data.counts || {});
+      renderBoardNotices(data.notices || []);
+      renderCountNotes(data.count_notes || [], data.counts || {});
       // #146: test entries are excluded from the live triage list, the map
       // and the counts by default — an operator must never have to work out
       // whether a pin is a real person. Nothing is deleted; the toggle
@@ -5888,6 +6004,119 @@ window.QuakeAngelRescue = (function () {
     var btn = ev.target.closest && ev.target.closest(".qg-test-btn");
     if (!btn) return;
     markAsTest(btn.dataset.deviceId, btn.dataset.isTest !== "true");
+  });
+
+  // ── #268: notices, count provenance, and the off-board area ─────────
+  function renderBoardNotices(notices) {
+    var el = document.getElementById("qg-board-notices");
+    if (!el) return;
+    el.innerHTML = (notices || []).map(function (n) {
+      return '<div class="qg-notice" role="status">⚠ ' +
+        window.qgEsc(n.text || "") + "</div>";
+    }).join("");
+  }
+
+  function renderCountNotes(notes, counts) {
+    var el = document.getElementById("qg-count-notes");
+    if (!el) return;
+    var lines = [];
+    var w = counts.waiting_for_answer || 0, d = counts.phone_went_dark || 0;
+    if (w || d) {
+      lines.push(
+        "Silence right now: " + w + " waiting for an answer · " + d +
+        " with a phone that went dark. Both are counted in the numbers above."
+      );
+    }
+    (notes || []).forEach(function (n) { lines.push(n); });
+    el.innerHTML = lines.map(function (l) {
+      return "<div>" + window.qgEsc(l) + "</div>";
+    }).join("");
+  }
+
+  function renderOffBoard(rows, counts) {
+    var wrap = document.getElementById("qg-offboard");
+    var body = document.getElementById("qg-offboard-body");
+    var head = document.getElementById("qg-offboard-summary");
+    if (!wrap || !body || !head) return;
+    var visible = showTestEntries ? rows : rows.filter(function (r) { return !r.is_test; });
+    wrap.hidden = visible.length === 0;
+    head.textContent = "Not on the working board (" + visible.length + ")";
+    if (!visible.length) { body.innerHTML = ""; return; }
+    body.innerHTML = visible.map(function (r) {
+      var when = r.moved_at ? new Date(r.moved_at).toLocaleString() : "—";
+      var putBack = r.state === "resolved_by_operator"
+        ? '<button class="qg-off-back" data-device-id="' + r.device_id +
+          '">↩︎ Put back on the working board</button>'
+        : "";
+      var dup = r.possible_duplicate
+        ? '<div class="qg-off-meta">' + window.qgEsc(r.possible_duplicate.text || "") + "</div>"
+        : "";
+      return '<div class="qg-off-card">' +
+        '<div class="qg-off-code">' + window.qgEsc(r.short_code || r.device_id || "—") +
+        (r.display_name ? " · " + window.qgEsc(r.display_name) : "") + "</div>" +
+        '<div class="qg-off-label">' + window.qgEsc(r.label || "—") + "</div>" +
+        '<div>' + window.qgEsc(r.detail || "") + "</div>" +
+        dup +
+        '<div class="qg-off-meta">Moved: ' + window.qgEsc(when) +
+        " · by " + window.qgEsc(r.moved_by || "—") + "</div>" +
+        '<div class="qg-off-meta">Why: ' + window.qgEsc(r.off_board_reason || "—") + "</div>" +
+        (r.last_updated
+          ? '<div class="qg-off-meta">Last heard from the phone: ' +
+            window.qgEsc(new Date(r.last_updated).toLocaleString()) + "</div>"
+          : "") +
+        (r.ever_needed_help
+          ? '<div class="qg-off-meta"><b>This person has reported needing help at some point.</b></div>'
+          : "") +
+        putBack +
+        "</div>";
+    }).join("");
+  }
+
+  async function decideDuplicate(deviceId, otherId, decision) {
+    var res = await window.qaApi(
+      "/api/admin/records/" + encodeURIComponent(deviceId) + "/duplicate-decision",
+      { method: "POST", body: JSON.stringify({ other_device_id: otherId, decision: decision }) }
+    );
+    var body = null;
+    try { body = await res.json(); } catch (_) {}
+    if (!res.ok) {
+      banner("err", (body && body.detail) || window.qgHumanHttpMessage(res.status));
+      return;
+    }
+    banner("ok", (body && body.message) || "Recorded.", 8000);
+    lastSidebarSig = null;
+    refresh();
+  }
+
+  document.addEventListener("click", function (ev) {
+    var yes = ev.target.closest && ev.target.closest(".qg-dup-yes");
+    var no = ev.target.closest && ev.target.closest(".qg-dup-no");
+    var back = ev.target.closest && ev.target.closest(".qg-off-back");
+    if (yes) {
+      if (!window.confirm(
+        "Record these as the SAME person?\n\n" +
+        "The older record comes off the working board with your name and the " +
+        "reason against it. Nothing is deleted and nothing is merged. You can " +
+        "put it back afterwards."
+      )) return;
+      decideDuplicate(yes.dataset.deviceId, yes.dataset.otherId, "confirmed");
+    } else if (no) {
+      decideDuplicate(no.dataset.deviceId, no.dataset.otherId, "rejected");
+    } else if (back) {
+      (async function () {
+        var res = await window.qaApi(
+          "/api/admin/records/" + encodeURIComponent(back.dataset.deviceId) + "/unresolve",
+          { method: "POST", body: JSON.stringify({}) }
+        );
+        if (!res.ok) {
+          banner("err", window.qgHumanHttpMessage(res.status));
+          return;
+        }
+        banner("ok", "Back on the working board.", 6000);
+        lastSidebarSig = null;
+        refresh();
+      })();
+    }
   });
 
   function renderMap(users) {
@@ -6004,6 +6233,13 @@ window.QuakeAngelRescue = (function () {
     return '<span style="font-size:16px; font-weight:800; letter-spacing:1px">' + qgCode(u) + "</span>" + nameBit +
       '<br><span style="font-size:9px; color:#888">' + u.deviceId + "</span>" +
       "<br>" + statusLabel(u.status, u.severity) + sevChip + trappedLine +
+      // #268: the kind of silence travels with the pin too, so a map
+      // reader and a list reader never see different words for the same
+      // person.
+      ((u.recordState && (u.recordState.state === "phone_went_dark" ||
+                          u.recordState.state === "waiting_for_answer"))
+        ? "<br><b>" + window.qgEsc(u.recordState.label) + "</b>"
+        : "") +
       (u.needsExtraction ? "<br><b>🚪 Cannot get out — extraction needed</b>" : "") +
       (mob ? "<br>" + mob : "") + "<br>Battery: " + (u.batteryPercent != null ? u.batteryPercent : "?") + "%" + rescueSlot;
   }
@@ -6044,18 +6280,47 @@ window.QuakeAngelRescue = (function () {
       ? '<div class="qg-card-batt-low">🚪 Cannot get out on their own — extraction needed (a team with cutting gear). Injuries may still be minor.</div>'
       : "";
     // C1: silence is information, and its two kinds must not look the same.
-    // Neither reduces priority — "we don't know" must never read as
-    // "we know they're fine".
+    // #268 (2026-08-21 — Paul): now FOUR kinds, decided server-side in
+    // record_state.py, and the label is whatever an operator would say out
+    // loud. Nothing here reduces priority, and nothing here ever implies
+    // anyone is safe. `held_reason` is shown whenever a device signal was
+    // deliberately overridden, so that decision is never silent.
+    var st = u.recordState || {};
     var silenceLine = "";
-    if (u.silenceState === "dark") {
-      silenceLine = '<div class="qg-card-batt-low">◌ Phone dark since ' +
-        (u.lastUpdated ? new Date(u.lastUpdated).toLocaleTimeString() : "—") +
-        " — no contact possible. Status and position below are LAST KNOWN.</div>";
-    } else if (u.silenceState === "silent_alive") {
-      silenceLine = '<div class="qg-card-batt-low">◑ No answer to the last re-checks · phone still alive' +
-        (u.batteryPercent != null ? " · battery " + u.batteryPercent + "%" : "") + "</div>";
+    if (st.state === "phone_went_dark" || st.state === "waiting_for_answer") {
+      var icon = st.state === "phone_went_dark" ? "◌" : "◑";
+      silenceLine =
+        '<div class="qg-state-line ' +
+        (st.state === "phone_went_dark" ? "dark" : "waiting") + '">' +
+        icon + " " + window.qgEsc(st.label || "") + " — " +
+        window.qgEsc(st.detail || "") + "</div>";
     } else if (u.reportsImproving) {
       silenceLine = '<div class="meta">Reports improving — not re-triaged automatically</div>';
+    }
+    if (st.held_reason) {
+      silenceLine += '<div class="qg-state-held">⚑ ' +
+        window.qgEsc(st.held_reason) + "</div>";
+    }
+    if (st.token_note) {
+      silenceLine += '<div class="meta">' + window.qgEsc(st.token_note) + "</div>";
+    }
+    // #268: two entries, one human. Flagged with the evidence, never
+    // merged by software. The operator decides and the decision is
+    // recorded with who made it and when.
+    if (u.possibleDuplicate) {
+      var dp = u.possibleDuplicate;
+      var evi = (dp.evidence || []).map(function (e) {
+        return "<li>" + window.qgEsc(e) + "</li>";
+      }).join("");
+      silenceLine +=
+        '<div class="qg-dup"><b>' + window.qgEsc(dp.text || "") + "</b>" +
+        "<ul>" + evi + "</ul>" +
+        '<button class="qg-dup-yes" data-device-id="' + u.deviceId +
+        '" data-other-id="' + dp.other_device_id + '">Yes — same person</button>' +
+        '<button class="qg-dup-no secondary" data-device-id="' + u.deviceId +
+        '" data-other-id="' + dp.other_device_id + '">No — two different people</button>' +
+        '<div class="meta">Nothing is merged either way. Your answer is recorded with your name and the time.</div>' +
+        "</div>";
     }
     var updLine = u.lastUpdated
       ? '<div class="meta">Updated ' + agoWords(u.lastUpdated) + "</div>" +
@@ -6461,12 +6726,21 @@ window.QuakeAngelRescue = (function () {
   // Headless-test hook: renders a synthetic device list through the real
   // pipeline (normalize → map → sidebar). No effect unless explicitly
   // called from the console.
-  window.__qgDebugRender = function (rawDevices) {
+  // #268: an optional second argument carries the rest of a real
+  // /api/devices payload (off_board, notices, counts, count_notes) so the
+  // whole board — including the off-board area — can be rendered and
+  // eyeballed without a live sign-in.
+  window.__qgDebugRender = function (rawDevices, payload) {
     var users = rawDevices.map(normalizeDevice);
     lastUsers = users;
     renderMap(users);
     applyFilterVisibility();
     renderSidebar(users);
+    if (payload) {
+      renderOffBoard(payload.off_board || [], payload.counts || {});
+      renderBoardNotices(payload.notices || []);
+      renderCountNotes(payload.count_notes || [], payload.counts || {});
+    }
   };
 })();
 
