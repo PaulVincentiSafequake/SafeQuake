@@ -295,8 +295,18 @@ class TestAccessGating:
         r = requests.get(f"{BASE_URL}/api/public/summary", timeout=15)
         assert r.status_code == 200
         body = r.json()
-        assert set(body.keys()) == {"generated_at", "total", "counts", "last_alert_at"}
-        assert set(body["counts"].keys()) == {"safe", "trapped", "rescued", "not_responding", "unknown"}
+        assert set(body.keys()) == {"generated_at", "total", "counts",
+                                    "last_alert_at", "count_notes"}
+        # #268 (2026-08-21): the four kinds of silence were added here so
+        # a signed-out reader gets the same honest breakdown, and
+        # `count_notes` states what each number leaves out. The GDPR
+        # guarantee this test exists for is unchanged and asserted below:
+        # aggregate numbers only, nothing device-shaped.
+        assert set(body["counts"].keys()) == {
+            "safe", "trapped", "rescued", "not_responding", "unknown",
+            "waiting_for_answer", "phone_went_dark", "app_removed",
+            "never_used", "resolved_by_operator", "off_board_total",
+        }
         # nothing device-shaped may leak
         text = r.text.lower()
         for banned in ("device_id", "latitude", "longitude", "short_code", "@"):

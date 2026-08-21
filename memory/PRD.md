@@ -1766,3 +1766,157 @@ Mobile:
 ### Not started
 Home-screen redesign (§8) — held per Paul's instruction until the
 regression sweep is signed off.
+
+---
+
+## #268 — the phantom casualty (Neo, 2026-08-21)
+App version unchanged: **v1.0.40, build 40** (no mobile code touched).
+This round is **backend + dashboard only**.
+
+### The defect
+The rescue board showed two entries that were both Paul: `CW7EF` (his
+live phone) and `F6XJY` (an old install that no longer exists on any
+phone). `F6XJY` read "Not responding · Phone dark since 21:08 · Battery
+?%" — to an operator, a missing person with a last known position. In a
+real incident a team is dispatched to find nobody while a real missing
+person waits.
+
+### Doctrine encoded (Paul's words, kept verbatim in the code)
+1. "Silence is information, but only if we know what kind of silence it
+   is." → four states, never one bucket.
+2. "Never infer that anyone is safe from an absence of data." → nothing
+   in this work marks anyone safe or reduces concern.
+3. "Never delete a person from a rescue board." → nothing deletes. The
+   strongest software action is `on_working_board = False`, which moves a
+   record to a labelled area an operator can open.
+4. "Status always outranks device state." → any record that has EVER
+   reported needing help (trapped / needs-extraction / rescued in the
+   append-only `status_events` ledger, or `trapped_since` on the row)
+   cannot leave the working board, whatever the token says. Guaranteed by
+   the first branch of `record_state.classify` and pinned by tests.
+
+### The four states (`/app/backend/record_state.py`)
+| wire value | label read aloud | on the working board |
+|---|---|---|
+| `waiting_for_answer` | "Waiting for an answer" | yes |
+| `phone_went_dark` | "Phone went dark" | yes (never downgraded) |
+| `app_removed` | "App removed from this phone" | no (unless an alert is live) |
+| `never_used` | "Never used the app" | no |
+| `resolved_by_operator` | "Resolved by an operator" | no |
+
+### What the phone networks actually tell us — and the limits
+- **Only APNs `Unregistered` (410)** may claim the app was removed. It is
+  a positive fact reported by Apple, not an absence.
+- **`BadDeviceToken` no longer counts.** Before #268 both reasons were
+  treated identically, so a prod/sandbox mismatch on our side could
+  manufacture a phantom "removed". It now reads "Phone went dark" plus a
+  technical note.
+- **A destroyed / flat / out-of-signal phone produces no `Unregistered`
+  at all** → lands on "Phone went dark". That is the safe default and it
+  is deliberate.
+- **`Unregistered` cannot separate "user deleted the app" from "phone
+  wiped/restored"**. Reported as what it is, never as intent.
+- **Android can never be classified "app removed"** — the relay reports
+  chunk-level HTTP status, not per-token invalidity. Android silence is
+  always "Phone went dark". Told to Paul explicitly.
+
+### Where the doctrine collided, and how it was resolved
+Paul's rule 1 ("a token dying mid-incident for someone who has not
+answered — do not move them") and rule 4 ("dead and removed devices must
+not be counted in 'not responding' anywhere") both had to hold at once.
+So a removed-app record during a live alert stays **on** the board with a
+held-reason line, and is counted in its own named bucket
+(`app_removed_held_on_board`) instead of inside `not_responding`. Anyone
+with help history is exempt and is counted as the person they are.
+
+### Thresholds, and how they were chosen
+- Dark after **45 minutes** normally, **15 minutes** for anyone who has
+  reported needing help (Paul: "for them, silence is clinically
+  meaningful"). The card always shows the real elapsed time as well.
+- Mass-dark notice: a cluster of **≥5** records going quiet inside a
+  **10-minute** window that is **≥40%** of everyone in contact. 10 min
+  because our own check-in ladder is 15 min coarse, so phones that died in
+  the same second can be ~15 min apart in last-contact stamps; ≥5 as an
+  absolute floor so a 3-tester board does not cry wolf; ≥40% so a large
+  deployment does not fire on 5 unrelated dropouts in 500. Both tests
+  must pass. The notice never moves or reclassifies anyone.
+- Duplicate suggestion: handover within **30 minutes** (required) AND
+  same first name OR last positions within **150 m**. Different names,
+  both recorded, is a **veto**. Test entries are excluded.
+
+### Files
+- NEW `/app/backend/record_state.py` — the classifier, thresholds,
+  mass-dark detection, help/location history helpers, live-alert check.
+- NEW `/app/backend/duplicates.py` — suggestions with evidence, no writes.
+- `people_counts.py` — `load_board()` is now the single source of truth
+  for who is on the working board; new counts + `counts_notes()` /
+  `counts_notes_short()` / `moved_by_words()`.
+- `server.py` — `/api/devices` returns `devices` (working board only),
+  `off_board`, `notices`, `counts`, `count_notes`; new endpoints
+  `POST /api/admin/records/{id}/resolve|unresolve|duplicate-decision`;
+  `/api/public/summary` carries the new counts + notes; a check-in now
+  un-resolves a record (software may only ever move a record TOWARDS the
+  board); purge-all refuses during a live alert and keeps back every
+  help-history record, reporting what was kept.
+- `apns.py` — `APP_READ_REMOVED` contract: `APP_REMOVED_REASON =
+  "Unregistered"` named next to `DEAD_TOKEN_REASONS`.
+- `reports_export.py` — B1 gains the indented breakdown, the exclusion
+  notes and a "Records not on the working board" appendix; B2 (strict
+  one-pager) gains a one-sentence exclusion note, paid for by tightening
+  two spacers; the audit CSV gains counts, notes and one row per
+  off-board record.
+- `/app/memory/dashboard_build/index.html` — state line + held reason +
+  token note on every card, duplicate banner with Confirm/Reject, count
+  provenance under the numbers, mass-dark notice above the list, and a
+  collapsible "Not on the working board (N)" area with Put-back.
+- NEW `/app/backend/scripts/seed_268_scenario.py` — PREVIEW-ONLY seeder
+  that reproduces all four states plus a duplicate pair.
+
+### Tests
+- NEW `tests/test_record_state_268.py` — 31 pure unit tests pinning every
+  sentence of the doctrine (status outranks device state, live-incident
+  hold, Unregistered-only, both thresholds, never-demote-a-located-person,
+  radio-safe labels, mass-dark maths, duplicate evidence and vetoes,
+  counts excluding set-aside records).
+- NEW `tests/test_record_decisions_268.py` (8) — endpoint refusals:
+  unauthenticated, unexplained, unknown record, invented verdict.
+- NEW `tests/test_devices_payload_268.py` (1) — payload shape pinning
+  (own module: this suite tolerates one DB-touching request per module).
+- UPDATED `tests/test_export_hardening.py` (public summary shape),
+  `tests/test_count_consistency.py` (fake DB gained the collections the
+  board reads), `tests/test_device_purge_all_262.py` (keeps-back doctrine).
+- Regression sweep, file by file: no new failures. All report/export/
+  count/recheck/audit/user-management files green. The pre-existing
+  failures (schema-drift push/debug suites, a short_code that happens to
+  contain "B1") are unchanged.
+
+### Verified where
+- Verified live on the PREVIEW backend + a local copy of the deployed
+  dashboard: seeded all four states, saw them classified through
+  `GET /api/devices`, clicked "Yes — same person" in the browser and saw
+  the real endpoint resolve the older record with attribution, checked
+  the B1 appendix, the B2 one-pager and the audit CSV.
+- NOT yet verified on production (`quakeangel.app` +
+  `quake-alert-18.emergent.host`): needs Paul's Publish for the backend
+  and a `git push` for the dashboard.
+
+### #268 follow-up — two holes closed the same day
+An independent backend sweep (35 fresh HTTP tests,
+`tests/test_268_end_to_end.py`) tried to break the doctrine and found two
+real paths:
+1. **Answering "same person" could drop a casualty.** The endpoint resolved
+   the OLDER record by date alone, so confirming a duplicate moved a
+   TRAPPED person off the working board — software choosing to remove a
+   casualty. Fixed: if exactly one of the pair has help history, that one
+   is KEPT whatever the dates say; if the record that would be resolved
+   has help history anyway, the endpoint refuses with 409 and tells the
+   operator to resolve it explicitly. The operator's answer is now written
+   down only AFTER the guards pass, so a refusal cannot silence the
+   suggestion for ever.
+2. **A record could be marked a duplicate of itself**, self-resolving with
+   a self-contradictory message. Now a 400.
+Also hardened while there: `/resolve` on a record that has ever reported
+needing help now requires `acknowledge_help_history: true`. It is still
+allowed — a human may know they are accounted for — but never by accident,
+and it is recorded against their name.
+Five new tests pin all of it. Full #268 suite: 40 HTTP + 40 unit, all green.

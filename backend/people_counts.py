@@ -34,7 +34,8 @@ Design decisions
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, replace
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from deps import is_test_device
@@ -84,6 +85,23 @@ class Counts:
     test_filtered_out: int
     # Whether test entries were included (for stated provenance).
     include_test: bool
+    # ── #268 (2026-08-21 — Paul): the four kinds of silence ───────────
+    # "Every number must say what it counts and what it leaves out."
+    # These five are counted on the WORKING BOARD ONLY, except
+    # app_removed / never_used / resolved which are BY DEFINITION off it.
+    # `not_responding` above therefore excludes all three — that is the
+    # phantom-casualty fix, and `counts_notes()` states it in words
+    # wherever a number is shown.
+    waiting_for_answer: int = 0
+    phone_went_dark: int = 0
+    app_removed: int = 0
+    # Of those, how many are still ON the working board because an alert
+    # is live and they have not answered (Paul's rule 1 beats rule 5, but
+    # they are still never counted as "not responding").
+    app_removed_held_on_board: int = 0
+    never_used: int = 0
+    resolved_by_operator: int = 0
+    off_board_total: int = 0
 
     def to_dict(self) -> Dict[str, int]:
         return asdict(self)
@@ -102,8 +120,8 @@ async def compute_counts(db, include_test: bool = False) -> Counts:
     Returns:
       Counts (see dataclass). All fields are integers.
     """
-    rows = await _load_rows(db)
-    return _bucket(rows, include_test=include_test)
+    board = await load_board(db, include_test=include_test)
+    return board.counts
 
 
 async def compute_people(db, include_test: bool = False) -> List[Dict[str, Any]]:
@@ -122,6 +140,245 @@ async def compute_people(db, include_test: bool = False) -> List[Dict[str, Any]]
         if r["is_test"] and not include_test:
             continue
         out.append(r)
+    return out
+
+
+# ── #268: the working board, and what is deliberately not on it ───────
+@dataclass(frozen=True)
+class Board:
+    """One load of the whole picture. `/api/devices`, every count, the
+    PDFs and the CSVs all read THIS, so no two surfaces can disagree
+    about who is on the working board.
+
+    board      — records an operator works from.
+    off_board  — records deliberately NOT on it, each carrying the reason
+                 and, where a human decided, who decided and when.
+                 Visible, openable, never deleted, never hidden.
+    notices    — board-level plain-English notices (e.g. mass-dark).
+    notes      — "what this counts and what it leaves out", in words, for
+                 every surface that shows a number.
+    """
+    board: List[Dict[str, Any]]
+    off_board: List[Dict[str, Any]]
+    counts: Counts
+    notices: List[Dict[str, Any]]
+    notes: List[str]
+
+
+async def load_board(db, include_test: bool = False, now=None) -> Board:
+    """Classify every record once, split the working board from the
+    labelled off-board area, and count both.
+
+    Ordering matters and is asserted by tests/test_record_state_268.py:
+    help history is resolved from the append-only ledger BEFORE any
+    device signal is consulted, so "status outranks device state" cannot
+    be broken by a later edit to the token-handling code.
+    """
+    import record_state as rs
+    from duplicates import find_duplicate_candidates
+
+    now = now or datetime.now(timezone.utc)
+    rows = await _load_rows(db)
+
+    push_rows = await db.push_devices.find(
+        {}, {"_id": 0, "user_id": 1, "platform": 1, "created_at": 1,
+             "updated_at": 1, "dead_token": 1, "dead_token_reason": 1,
+             "dead_token_at": 1},
+    ).to_list(10000)
+    push_by_id = {str(p.get("user_id")): p for p in push_rows if p.get("user_id")}
+
+    help_ids = await rs.help_history_ids(db)
+    located = await rs.located_ids(db)
+    incident_active = await rs.incident_is_active(db)
+    from reports_export import _short_codes_for
+    last_alert_at = await rs.last_alert_at(db)
+
+    # Registered for alerts but never checked in — invisible before #268
+    # because the board only ever read device_status. They are real people
+    # whose phones received the siren and who did not answer, so they get
+    # a record, a state and a spoken count.
+    known = {str(r.get("device_id")) for r in rows}
+    for uid, p in push_by_id.items():
+        if uid not in known:
+            rows.append({
+                "device_id": uid,
+                "platform": p.get("platform"),
+                "created_at": p.get("created_at"),
+                "never_checked_in": True,
+            })
+
+    code_map = _short_codes_for([r.get("device_id") for r in rows])
+
+    kept: List[Dict[str, Any]] = []
+    filtered = 0
+    for r in rows:
+        r["is_test"] = is_test_device(r)
+        if r["is_test"] and not include_test:
+            filtered += 1
+            continue
+        did = str(r.get("device_id"))
+        r["short_code"] = code_map.get(r.get("device_id"))
+        r["effective_status"] = effective_status(r)
+        r["ever_needed_help"] = did in help_ids or rs.ever_needed_help_row(r)
+        r["record_state"] = rs.classify(
+            r, push_by_id.get(did),
+            ever_needed_help=r["ever_needed_help"],
+            ever_located=did in located,
+            incident_active=incident_active,
+            last_alert_at=last_alert_at,
+            now=now,
+        ).to_dict()
+        kept.append(r)
+
+    # Duplicate SUGGESTIONS only — never a merge, never an auto-resolve.
+    # Test entries are excluded: they are not people, and a bulk seed
+    # inserts dozens of rows at the same instant and the same coordinates,
+    # which would otherwise flood the board with suggestions and train an
+    # operator to dismiss the real ones.
+    decisions = await _latest_decisions(db)
+    flags = find_duplicate_candidates(
+        [r for r in kept if not r.get("is_test")], decisions,
+    )
+    for r in kept:
+        flag = flags.get(str(r.get("device_id")))
+        if flag:
+            r["possible_duplicate"] = flag
+
+    board = [r for r in kept if r["record_state"]["on_working_board"]]
+    off_board = [r for r in kept if not r["record_state"]["on_working_board"]]
+
+    counts = _bucket(board, include_test=True)
+    st_of = lambda r: r["record_state"]["state"]  # noqa: E731
+    # Held on the board because an alert is live, but the phone has told us
+    # the app is gone. Counted here, and never inside "not responding".
+    held_removed = [
+        r for r in board
+        if r["record_state"].get("app_removed_at")
+        and r["record_state"].get("count_in_status_buckets") is False
+    ]
+    counts = replace(
+        counts,
+        include_test=include_test,
+        test_filtered_out=filtered,
+        waiting_for_answer=sum(
+            1 for r in board if st_of(r) == rs.WAITING
+            and r["record_state"].get("count_in_status_buckets") is not False),
+        phone_went_dark=sum(
+            1 for r in board if st_of(r) == rs.DARK
+            and r["record_state"].get("count_in_status_buckets") is not False),
+        app_removed=(sum(1 for r in off_board if st_of(r) == rs.APP_REMOVED)
+                     + len(held_removed)),
+        app_removed_held_on_board=len(held_removed),
+        never_used=sum(1 for r in off_board if st_of(r) == rs.NEVER_USED),
+        resolved_by_operator=sum(1 for r in off_board if st_of(r) == rs.RESOLVED),
+        off_board_total=len(off_board),
+    )
+
+    # Mass-dark: many phones stopping at roughly the same moment is a
+    # network or power failure, not many people going missing at once.
+    notices: List[Dict[str, Any]] = []
+    dark_stamps = [r.get("updated_at") for r in board if st_of(r) == rs.DARK]
+    reporting_total = sum(1 for r in board if r.get("updated_at"))
+    notice = rs.detect_mass_dark(dark_stamps, reporting_total, now=now)
+    if notice:
+        notices.append(notice)
+
+    return Board(
+        board=board, off_board=off_board, counts=counts,
+        notices=notices, notes=counts_notes(counts),
+    )
+
+
+def moved_by_words(row: Dict[str, Any]) -> str:
+    """Who took this record off the working board, in plain words. One
+    wording for the dashboard, the PDF and the CSV — an inquiry must not
+    find three different answers to the same question."""
+    st = row.get("record_state") or {}
+    if row.get("resolved_by"):
+        return str(row["resolved_by"])
+    if st.get("state") == "app_removed":
+        return "the phone itself — Apple reported the app is no longer installed"
+    if st.get("state") == "never_used":
+        return "nobody — this record has never been on the working board"
+    return "—"
+
+
+def counts_notes_short(c: Counts) -> str:
+    """One sentence, for the public one-page report (#126 keeps B2 to a
+    single page, and it is read by families and journalists). Says the
+    same thing as counts_notes, shorter."""
+    excluded = c.app_removed + c.never_used + c.resolved_by_operator
+    if not excluded:
+        return "These numbers cover everyone on the working rescue board."
+    return (
+        "These numbers cover the working rescue board only. They leave out "
+        f"{excluded} set-aside "
+        + ("record" if excluded == 1 else "records")
+        + " — app removed, app never used, or resolved by an operator. "
+        "Nothing has been deleted."
+    )
+
+
+def counts_notes(c: Counts) -> List[str]:
+    """"Every number must say what it counts and what it leaves out."
+    These sentences ship with the numbers on the dashboard, in the PDF,
+    in the CSV and in the JSON export — one wording, every surface."""
+    notes = [
+        f"“Not responding” counts {c.not_responding} "
+        f"{'person' if c.not_responding == 1 else 'people'} on the working "
+        "board. It does not include records where the phone reported the app "
+        "was removed, phones that have never used the app, or records an "
+        "operator has resolved.",
+    ]
+    if c.app_removed:
+        notes.append(
+            f"{c.app_removed} "
+            f"{'record' if c.app_removed == 1 else 'records'} where the phone "
+            "told us the app was removed. These are deleted apps, not missing "
+            "people. Nothing was deleted."
+        )
+    if c.app_removed_held_on_board:
+        notes.append(
+            f"{c.app_removed_held_on_board} of those "
+            f"{'is' if c.app_removed_held_on_board == 1 else 'are'} still shown "
+            "on the working board because an alert is live and they have not "
+            "answered — kept in view deliberately, and not counted as not "
+            "responding."
+        )
+    if c.never_used:
+        notes.append(
+            f"{c.never_used} "
+            + ("phone received the alert but has" if c.never_used == 1
+               else "phones received the alert but have")
+            + " never used the app, so we have no location for them."
+        )
+    if c.resolved_by_operator:
+        notes.append(
+            f"{c.resolved_by_operator} "
+            f"{'record' if c.resolved_by_operator == 1 else 'records'} were "
+            "resolved by an operator, with a reason recorded."
+        )
+    return notes
+
+
+async def _latest_decisions(db) -> Dict[str, Dict[str, Any]]:
+    """Newest duplicate decision per device_id. A rejected suggestion must
+    not come back on the next 4-second poll and re-ask the same question."""
+    out: Dict[str, Dict[str, Any]] = {}
+    try:
+        rows = await db.record_decisions.find(
+            {"kind": {"$in": ["duplicate_confirmed", "duplicate_rejected"]}},
+            {"_id": 0},
+        ).sort("decided_at", -1).to_list(5000)
+    except Exception:
+        return out
+    for r in rows:
+        did = str(r.get("device_id"))
+        out.setdefault(did, r)
+        other = str(r.get("other_device_id") or "")
+        if other:
+            out.setdefault(other, {**r, "device_id": other,
+                                   "other_device_id": r.get("device_id")})
     return out
 
 
@@ -147,6 +404,12 @@ async def _load_rows(db) -> List[Dict[str, Any]]:
             "pre_rescue_status": 1, "pre_rescue_severity": 1, "pre_rescue_mobility": 1,
             "synthetic": 1,
             "recheck": 1, "deteriorating": 1, "reports_improving": 1,
+            # #268: help history and the human-resolution fields. Both are
+            # needed by record_state.classify — without them the "status
+            # outranks device state" guarantee cannot be evaluated.
+            "trapped_since": 1, "created_at": 1,
+            "resolved_at": 1, "resolved_by": 1, "resolved_reason": 1,
+            "resolved_as": 1, "is_test": 1,
         },
     ).to_list(10000)
 
@@ -159,6 +422,18 @@ def _bucket(rows: List[Dict[str, Any]], *, include_test: bool) -> Counts:
     kept = []
     filtered = 0
     for r in rows:
+        # #268: a record that is not on the working board is not in ANY of
+        # these buckets. Defensive — load_board only passes board rows —
+        # but it means a future caller cannot accidentally count a deleted
+        # app as a person who is not responding.
+        st_meta = r.get("record_state") or {}
+        if st_meta and st_meta.get("on_working_board") is False:
+            continue
+        # A record whose phone reported the app removed is counted in its
+        # own named bucket, never inside "not responding" — even while it
+        # is held on the working board because an alert is live.
+        if st_meta.get("count_in_status_buckets") is False:
+            continue
         if is_test_device(r):
             if not include_test:
                 filtered += 1

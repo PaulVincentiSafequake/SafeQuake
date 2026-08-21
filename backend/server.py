@@ -362,12 +362,39 @@ async def post_status(payload: StatusInPayload):
         {"user_id": doc["device_id"]}, {"_id": 0, "platform": 1},
     )
     doc["platform"] = (dev or {}).get("platform")
+    # #268: if this record had been resolved off the working board and the
+    # phone is now reporting again, it comes straight back on. Software may
+    # only ever move a record TOWARDS the working board on its own — the
+    # other direction always needs a human with a reason. The return is
+    # recorded so the board's history explains itself.
+    prior = await db.device_status.find_one(
+        {"device_id": doc["device_id"]},
+        {"_id": 0, "resolved_at": 1, "resolved_reason": 1},
+    )
+    returning = bool((prior or {}).get("resolved_at"))
     # Upsert latest state.
     await db.device_status.update_one(
         {"device_id": doc["device_id"]},
-        {"$set": doc, "$setOnInsert": {"created_at": now}},
+        {"$set": doc, "$setOnInsert": {"created_at": now},
+         "$unset": {"resolved_at": "", "resolved_by": "",
+                    "resolved_reason": "", "resolved_as": ""}},
         upsert=True,
     )
+    if returning:
+        try:
+            await db.record_decisions.insert_one({
+                "device_id": doc["device_id"],
+                "kind": "record_returned_by_check_in",
+                "reason": (
+                    "This phone reported again, so the record went back on the "
+                    "working board. It had been resolved: "
+                    + str((prior or {}).get("resolved_reason") or "no reason recorded")
+                ),
+                "decided_by": "the phone reported again",
+                "decided_at": now,
+            })
+        except Exception as e:
+            logging.warning(f"Failed to log #268 board return: {e}")
     # Append immutable history row for the audit log. `device_status` only
     # holds the LATEST state; `status_events` is the append-only ledger.
     try:
@@ -406,15 +433,26 @@ async def get_devices(
     )
     require_role(principal, "admin", "operator")
 
-    query: dict = {}
+    # ── #268 (Neo, 2026-08-21 — Paul) ────────────────────────────────
+    # `devices` is now the WORKING BOARD only, and `off_board` is the
+    # labelled area beside it. The split is computed in
+    # people_counts.load_board so the board, the counts, the map, the
+    # PDFs and the CSVs cannot disagree about who is a person to search
+    # for. A record is only ever moved off the working board when the
+    # phone reported a positive fact (the app was removed), or it has
+    # never been used at all, or a human resolved it with a reason.
+    # Nothing is deleted, nothing is hidden, and anybody who has ever
+    # reported needing help stays on the board whatever their phone does.
+    from people_counts import load_board
+    board = await load_board(db, include_test=True)
+
+    rows = board.board
     if since:
-        query["updated_at"] = {"$gte": since}
+        rows = [r for r in rows if str(r.get("updated_at") or "") >= since]
+    rows.sort(key=lambda r: str(r.get("updated_at") or ""), reverse=True)
+    rows = rows[:limit]
 
-    rows = await db.device_status.find(query, {"_id": 0}).sort("updated_at", -1).to_list(limit)
-
-    # Collision-safe short codes across the ACTIVE device set (item 2) and
     # 'trapped since' timestamps for the current trapped spell (item 3).
-    code_map = _short_codes_for([r.get("device_id") for r in rows])
     trapped_since = await _trapped_since_map(
         [r.get("device_id") for r in rows if r.get("status") == "trapped"]
     )
@@ -431,7 +469,7 @@ async def get_devices(
             # short_code is derived on read, not stored — that way any change
             # to the algorithm (e.g. hash-based instead of tail) applies to
             # existing rows without a migration.
-            "short_code": code_map.get(r.get("device_id")) or _short_code(r.get("device_id")),
+            "short_code": r.get("short_code") or _short_code(r.get("device_id")),
             "trapped_since": trapped_since.get(r.get("device_id")),
             # Optional first name captured at first app launch. Nullable —
             # dashboards should render "NAME · CODE" when present and fall
@@ -489,6 +527,42 @@ async def get_devices(
             "recheck": r.get("recheck"),
             "deteriorating": bool(r.get("deteriorating")),
             "reports_improving": bool(r.get("reports_improving")),
+            # ── #268: the four kinds of silence, in plain English ────────
+            # `record_state.state` is the wire value; `label` and `detail`
+            # are what an operator reads and what gets spoken over a radio.
+            # `held_reason` is present when a device signal was overridden
+            # (someone who reported needing help, or a live alert) —
+            # visible on the card so the decision is never silent.
+            "record_state": r.get("record_state"),
+            "ever_needed_help": bool(r.get("ever_needed_help")),
+            "possible_duplicate": r.get("possible_duplicate"),
+        }
+
+    def off(r: dict) -> dict:
+        """A record NOT on the working board. Enough to identify the person
+        and read back what was moved, when and why — never enough to be
+        mistaken for a live casualty needing a team."""
+        from people_counts import moved_by_words
+        st = r.get("record_state") or {}
+        return {
+            "device_id": r.get("device_id"),
+            "short_code": r.get("short_code") or _short_code(r.get("device_id")),
+            "display_name": r.get("display_name"),
+            "state": st.get("state"),
+            "label": st.get("label"),
+            "detail": st.get("detail"),
+            "off_board_reason": st.get("off_board_reason"),
+            "moved_at": r.get("resolved_at") or st.get("app_removed_at"),
+            "moved_by": moved_by_words(r),
+            "resolved_reason": r.get("resolved_reason"),
+            "last_status": r.get("status"),
+            "last_updated": r.get("updated_at"),
+            "latitude": r.get("latitude"),
+            "longitude": r.get("longitude"),
+            "ever_needed_help": bool(r.get("ever_needed_help")),
+            "platform": r.get("platform"),
+            "is_test": bool(r.get("is_test")),
+            "possible_duplicate": r.get("possible_duplicate"),
         }
 
     return {
@@ -496,6 +570,16 @@ async def get_devices(
         "test_count": sum(1 for r in rows if _is_test_device(r)),
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "devices": [clean(r) for r in rows],
+        # #268: visible rather than silent. Everything moved off the
+        # working board, with when and why, for anyone to open.
+        "off_board": [off(r) for r in board.off_board],
+        "off_board_count": len(board.off_board),
+        # Board-level notices (e.g. many phones going dark together being
+        # a network failure rather than many missing people).
+        "notices": board.notices,
+        # "What this counts and what it leaves out", in words.
+        "counts": board.counts.to_dict(),
+        "count_notes": board.notes,
     }
 
 
@@ -648,7 +732,7 @@ async def public_summary():
     that skipped the test-entry filter, so the public number was higher
     than the operator number for the same moment (Paul, 2026-08-19).
     """
-    from people_counts import compute_counts
+    from people_counts import compute_counts, counts_notes
     c = await compute_counts(db, include_test=False)
     alert_dt = await _last_alert_start()
     return {
@@ -662,7 +746,18 @@ async def public_summary():
             "rescued": c.rescued,
             "not_responding": c.not_responding,
             "unknown": c.unknown,
+            # #268: the four kinds of silence. Added rather than folded
+            # into the five above, so the deployed dashboard's existing
+            # reads keep working while the new wording rolls out.
+            "waiting_for_answer": c.waiting_for_answer,
+            "phone_went_dark": c.phone_went_dark,
+            "app_removed": c.app_removed,
+            "never_used": c.never_used,
+            "resolved_by_operator": c.resolved_by_operator,
+            "off_board_total": c.off_board_total,
         },
+        # "Every number must say what it counts and what it leaves out."
+        "count_notes": counts_notes(c),
         # Timestamp of the most recent alert broadcast (non-personal). The
         # dashboard anchors its "Since the alert" window to this.
         "last_alert_at": alert_dt.isoformat() if alert_dt else None,
@@ -2124,6 +2219,285 @@ async def admin_relay_health(
         "generated_at": _iso(datetime.now(timezone.utc)),
     }
 
+# ---------- #268: taking a record off the working board, by a human ----
+# Doctrine (Paul, 2026-08-21): "Never delete a person from a rescue board.
+# Records get resolved by a human with a reason recorded, never removed
+# silently by software. This will be read back in an inquiry."
+#
+# So: no delete, ever. `resolved_at` / `resolved_by` / `resolved_reason`
+# are set on the device_status row, an immutable row is appended to
+# `status_events` AND to `record_decisions`, and the record then appears
+# in the dashboard's labelled off-board area with who moved it, when and
+# why. Reversible by `/records/{id}/unresolve`, which is also recorded.
+#
+# A reason is REQUIRED. An unexplained removal from a rescue board is
+# exactly the thing an inquiry would ask about, so the API refuses it.
+RESOLVE_REASONS = {
+    "duplicate": "Same person as another record",
+    "app_removed": "The app was removed from this phone",
+    "never_used": "Registered but never used the app",
+    "test_entry": "Our own test entry",
+    "accounted_for": "Accounted for by another means (radio, in person)",
+    "other": "Other (explained in the note)",
+}
+
+
+async def _record_decision(
+    device_id: str, kind: str, principal, *,
+    other_device_id: Optional[str] = None,
+    reason_code: Optional[str] = None,
+    reason: Optional[str] = None,
+) -> str:
+    now = _iso(datetime.now(timezone.utc))
+    who = audit_attribution(principal)
+    doc = {
+        "device_id": device_id,
+        "kind": kind,
+        "other_device_id": other_device_id,
+        "reason_code": reason_code,
+        "reason": reason,
+        "decided_by": who,
+        "decided_at": now,
+    }
+    await db.record_decisions.insert_one(dict(doc))
+    try:
+        await db.status_events.insert_one({**doc, "recorded_at": now,
+                                           "status": None})
+    except Exception as e:
+        logging.warning(f"Failed to append record_decisions to status_events: {e}")
+    logging.info(f"[#268] {kind} on {device_id} by {who}: {reason_code} {reason}")
+    return now
+
+
+@api_router.post("/admin/records/{device_id}/resolve")
+async def resolve_record(
+    device_id: str,
+    payload: dict = Body(...),
+    request: Request = None,
+    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
+):
+    """Move ONE record off the working board, by a named human, with a
+    reason. Nothing is deleted and the record stays fully readable in the
+    off-board area and in every export."""
+    principal = await resolve_principal(request, x_admin_token, ADMIN_TRIGGER_PASSWORD, db)
+    require_role(principal, "admin", "operator")
+
+    code = str(payload.get("reason_code") or "").strip()
+    note = str(payload.get("reason") or "").strip()
+    if code not in RESOLVE_REASONS:
+        raise HTTPException(
+            400,
+            "Choose why this record is coming off the working board: "
+            + ", ".join(sorted(RESOLVE_REASONS)),
+        )
+    if code == "other" and len(note) < 3:
+        raise HTTPException(400, "Say in a few words why, so the record explains itself later.")
+    if note:
+        _cred = _looks_like_credential(note)
+        if _cred:
+            raise HTTPException(422, f"Note not saved — it {_cred}.")
+
+    row = await db.device_status.find_one({"device_id": device_id}, {"_id": 0})
+    if not row:
+        raise HTTPException(404, "No record with that id.")
+
+    # #268 follow-up: status outranks device state, so taking a person who
+    # has EVER reported needing help off the working board is allowed —
+    # a human may know they are accounted for — but never by accident. It
+    # takes a second, explicit acknowledgement, and the refusal says why.
+    import record_state as _rs
+    ever_helped = (device_id in await _rs.help_history_ids(db)
+                   or _rs.ever_needed_help_row(row))
+    if ever_helped and not payload.get("acknowledge_help_history"):
+        raise HTTPException(
+            409,
+            f"{_short_code(device_id)} has reported needing help at some "
+            "point. Taking that record off the working board needs a "
+            "deliberate confirmation — send acknowledge_help_history: true "
+            "with your reason, and it will be recorded against your name.",
+        )
+
+    reason_text = RESOLVE_REASONS[code] + (f" — {note}" if note else "")
+    now = await _record_decision(
+        device_id, "record_resolved", principal,
+        reason_code=code, reason=reason_text,
+        other_device_id=str(payload.get("other_device_id") or "") or None,
+    )
+    await db.device_status.update_one(
+        {"device_id": device_id},
+        {"$set": {
+            "resolved_at": now,
+            "resolved_by": audit_attribution(principal),
+            "resolved_reason": reason_text,
+            "resolved_as": code,
+        }},
+    )
+    return {"status": "ok", "device_id": device_id, "resolved_at": now,
+            "resolved_by": audit_attribution(principal),
+            "resolved_reason": reason_text}
+
+
+@api_router.post("/admin/records/{device_id}/unresolve")
+async def unresolve_record(
+    device_id: str,
+    payload: dict = Body(default={}),
+    request: Request = None,
+    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
+):
+    """Put a record back on the working board. Operators make mistakes at
+    4am and a record must never be one-way. Also recorded, with who."""
+    principal = await resolve_principal(request, x_admin_token, ADMIN_TRIGGER_PASSWORD, db)
+    require_role(principal, "admin", "operator")
+
+    row = await db.device_status.find_one({"device_id": device_id}, {"_id": 0})
+    if not row:
+        raise HTTPException(404, "No record with that id.")
+    if not row.get("resolved_at"):
+        raise HTTPException(400, "This record is already on the working board.")
+
+    await _record_decision(
+        device_id, "record_unresolved", principal,
+        reason=str((payload or {}).get("reason") or "").strip() or None,
+    )
+    await db.device_status.update_one(
+        {"device_id": device_id},
+        {"$unset": {"resolved_at": "", "resolved_by": "",
+                    "resolved_reason": "", "resolved_as": ""}},
+    )
+    return {
+        "status": "ok",
+        "device_id": device_id,
+        "message": (
+            "The operator's decision has been undone and recorded. This record "
+            "is back to whatever its own phone says — if the phone reported the "
+            "app was removed, it will read that way again."
+        ),
+    }
+
+
+@api_router.post("/admin/records/{device_id}/duplicate-decision")
+async def duplicate_decision(
+    device_id: str,
+    payload: dict = Body(...),
+    request: Request = None,
+    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
+):
+    """An operator answers "is this the same person as X?".
+
+    Software never decides this (duplicates.py only ever suggests, with
+    the evidence). CONFIRM resolves the OLDER of the two records with the
+    reason "same person as <code>" and leaves the newer one working;
+    nothing is merged, no field is copied between records, and the older
+    record stays fully readable. REJECT records the rejection so the
+    suggestion stops coming back on the next poll.
+
+    Body: {"other_device_id": "...", "decision": "confirmed"|"rejected"}
+    """
+    principal = await resolve_principal(request, x_admin_token, ADMIN_TRIGGER_PASSWORD, db)
+    require_role(principal, "admin", "operator")
+
+    other = str(payload.get("other_device_id") or "").strip()
+    decision = str(payload.get("decision") or "").strip().lower()
+    if decision not in ("confirmed", "rejected"):
+        raise HTTPException(400, "decision must be 'confirmed' or 'rejected'.")
+    if not other:
+        raise HTTPException(400, "other_device_id is required.")
+    if other == device_id:
+        raise HTTPException(
+            400,
+            "A record cannot be the same person as itself. Pick the other "
+            "record you are comparing it with.",
+        )
+
+    rows = await db.device_status.find(
+        {"device_id": {"$in": [device_id, other]}}, {"_id": 0},
+    ).to_list(2)
+    by_id = {r.get("device_id"): r for r in rows}
+    if device_id not in by_id or other not in by_id:
+        raise HTTPException(404, "One of those records no longer exists.")
+
+    kind = f"duplicate_{decision}"
+    if decision == "rejected":
+        await _record_decision(device_id, kind, principal, other_device_id=other)
+        return {"status": "ok", "decision": decision,
+                "message": ("Recorded as two different people. Neither record "
+                            "was moved or merged.")}
+
+    # Confirmed: the OLDER record (first seen earlier) is normally the
+    # stale one.
+    #
+    # #268 follow-up (2026-08-21, found by the testing sweep): "status
+    # always outranks device state" has to hold HERE too. Picking the
+    # older record by date alone let this endpoint move a TRAPPED person
+    # off the working board as a side effect of an operator answering
+    # "same person" — software choosing to drop a casualty. Two guards:
+    #   * if exactly one of the pair has ever reported needing help, the
+    #     OTHER one is the one that gets resolved, whichever is older;
+    #   * if the record that would be resolved has help history anyway
+    #     (both do, or the only help record is the stale one), refuse.
+    #     Taking a person who has reported needing help off the board is
+    #     allowed, but only as an explicit, named act via /resolve — never
+    #     as a by-product of answering a duplicate question.
+    import record_state as _rs
+    _help_ids = await _rs.help_history_ids(db)
+
+    def _needed_help(row) -> bool:
+        return (str(row.get("device_id")) in _help_ids
+                or _rs.ever_needed_help_row(row))
+
+    def _first_seen(r):
+        return str(r.get("created_at") or r.get("updated_at") or "")
+    pair = sorted([by_id[device_id], by_id[other]], key=_first_seen)
+    older, newer = pair[0], pair[-1]
+    if _needed_help(older) != _needed_help(newer):
+        # Keep the record that has reported needing help, whatever its age.
+        if _needed_help(older):
+            older, newer = newer, older
+    if _needed_help(older):
+        raise HTTPException(
+            409,
+            f"{_short_code(older.get('device_id'))} has reported needing help, "
+            "so it will not be taken off the working board by answering a "
+            "duplicate question. If it really is the same person, resolve that "
+            "record directly and record your reason.",
+        )
+    newer_code = _short_code(newer.get("device_id"))
+    # Only now — after the guards have passed — is the operator's answer
+    # written down. A refused confirmation must not leave a decision on
+    # file, or the suggestion would never be shown again.
+    await _record_decision(device_id, kind, principal, other_device_id=other)
+    reason_text = (
+        f"{RESOLVE_REASONS['duplicate']} — confirmed the same person as "
+        f"{newer_code} by {audit_attribution(principal)}"
+    )
+    now = await _record_decision(
+        older.get("device_id"), "record_resolved", principal,
+        other_device_id=newer.get("device_id"),
+        reason_code="duplicate", reason=reason_text,
+    )
+    await db.device_status.update_one(
+        {"device_id": older.get("device_id")},
+        {"$set": {
+            "resolved_at": now,
+            "resolved_by": audit_attribution(principal),
+            "resolved_reason": reason_text,
+            "resolved_as": "duplicate",
+        }},
+    )
+    return {
+        "status": "ok",
+        "decision": decision,
+        "resolved_device_id": older.get("device_id"),
+        "kept_device_id": newer.get("device_id"),
+        "resolved_at": now,
+        "message": (
+            f"Recorded as the same person. {_short_code(older.get('device_id'))} "
+            f"moved off the working board; {newer_code} stays. Nothing was "
+            "deleted or merged."
+        ),
+    }
+
+
 @api_router.post("/mark-rescued")
 async def mark_rescued(
     payload: dict = Body(...),
@@ -2771,13 +3145,16 @@ async def device_registry(
 # current entries... these are all Paul's own repeated test installs...
 # only new registrations from real testers should appear going forward."
 #
-# Deliberately a HARD delete_many({}), unlike _prune_dead_devices in
-# apns.py. That soft-mark exists because IT runs automatically from an
+# Deliberately a delete_many, unlike _prune_dead_devices in apns.py.
+# #268 (2026-08-21) narrowed it: anyone who has EVER reported needing
+# help is kept back, and the whole action is refused while an alert is
+# live. What was removed and what was kept is reported in plain words
+# and written to `record_decisions`.
+# The soft-mark in apns.py exists because IT runs automatically from an
 # unattended background job with no human per call — hard-deleting there
 # risked silently destroying a real device. THIS is the opposite shape:
-# one explicit, admin-only, human-typed-confirmation action, run once,
-# by a human who has already confirmed by hand that every current row
-# is his own test data. There is nothing to preserve.
+# one explicit, admin-only, human-typed-confirmation action, run by a
+# human who has confirmed by hand what the rows are.
 #
 # admin-only (not "admin","operator" like the read/preview endpoints) —
 # wiping the whole registry is a materially bigger blast radius than
@@ -2810,19 +3187,93 @@ async def purge_all_devices(
         )
 
     before = await db.push_devices.count_documents({})
-    res = await db.push_devices.delete_many({})
+
+    # ── #268 (Neo, 2026-08-21 — Paul) ────────────────────────────────
+    # "Refuse to delete any record that has ever reported needing help,
+    #  or that has ever been marked trapped or injured. Refuse entirely
+    #  while an alert is live. Record every wipe in the audit log: who
+    #  did it, when, how many records, and how many were refused and
+    #  why. Tell the person on screen afterwards in plain words what was
+    #  removed and what was kept back."
+    import record_state as _rs
+    if await _rs.incident_is_active(db):
+        raise HTTPException(
+            409,
+            "An earthquake alert is live. Nothing can be wiped while an "
+            "alert is open — stand the alert down first, then try again.",
+        )
+    protected_ids = await _rs.help_history_ids(db)
+    # Anyone whose CURRENT row shows help history too, not just the ledger.
+    for r in await db.device_status.find(
+        {}, {"_id": 0, "device_id": 1, "status": 1, "rescued_at": 1,
+             "trapped_since": 1, "needs_extraction": 1, "pre_rescue_status": 1},
+    ).to_list(10000):
+        if _rs.ever_needed_help_row(r) and r.get("device_id"):
+            protected_ids.add(str(r["device_id"]))
+    kept_rows = await db.push_devices.find(
+        {"user_id": {"$in": sorted(protected_ids)}},
+        {"_id": 0, "user_id": 1},
+    ).to_list(10000) if protected_ids else []
+    kept_ids = [str(r.get("user_id")) for r in kept_rows if r.get("user_id")]
+
+    res = await db.push_devices.delete_many({"user_id": {"$nin": kept_ids}})
     after = await db.push_devices.count_documents({})
 
+    now_iso = _iso(datetime.now(timezone.utc))
+    kept_detail = [
+        {"device_id": d, "short_code": _short_code(d),
+         "why": "This person has reported needing help at some point."}
+        for d in kept_ids
+    ]
+    try:
+        await db.record_decisions.insert_one({
+            "device_id": None,
+            "kind": "device_registry_wipe",
+            "reason": (
+                f"Wiped {res.deleted_count} registered device(s). "
+                f"Kept {len(kept_ids)} back because they have reported "
+                f"needing help at some point."
+            ),
+            "deleted_count": res.deleted_count,
+            "kept_count": len(kept_ids),
+            "kept_device_ids": kept_ids,
+            "decided_by": audit_attribution(principal),
+            "decided_at": now_iso,
+        })
+    except Exception as e:
+        logging.warning(f"Failed to log #268 wipe decision: {e}")
+
     logging.info(
-        f"[admin] #262 pre-pilot purge-all-devices by "
+        f"[admin] #262/#268 purge-all-devices by "
         f"{audit_attribution(principal)}: {before} -> {after} "
-        f"({res.deleted_count} deleted)"
+        f"({res.deleted_count} deleted, {len(kept_ids)} kept back)"
     )
+    if len(kept_ids) == 1:
+        message = (
+            f"Removed {res.deleted_count} registered device(s). 1 was kept "
+            "back because that person has reported needing help at some "
+            "point — records like that are never wiped."
+        )
+    elif kept_ids:
+        message = (
+            f"Removed {res.deleted_count} registered device(s). "
+            f"{len(kept_ids)} were kept back because those people have "
+            "reported needing help at some point — records like that are "
+            "never wiped."
+        )
+    else:
+        message = (
+            f"Removed {res.deleted_count} registered device(s). None had "
+            "ever reported needing help, so nothing was kept back."
+        )
     return {
         "before": before,
         "deleted": res.deleted_count,
         "after": after,
-        "purged_at": _iso(datetime.now(timezone.utc)),
+        "kept_back": len(kept_ids),
+        "kept_back_detail": kept_detail,
+        "message": message,
+        "purged_at": now_iso,
         "purged_by": audit_attribution(principal),
     }
 

@@ -56,6 +56,7 @@ _ROWS: List[Dict[str, Any]] = [
 class _FakeCursor:
     def __init__(self, rows): self._rows = rows
     async def to_list(self, _n): return list(self._rows)
+    def sort(self, *_a, **_k): return self
 
 
 class _FakeCollection:
@@ -63,10 +64,19 @@ class _FakeCollection:
     def find(self, _q=None, _p=None): return _FakeCursor(self._rows)
     async def count_documents(self, q):
         return sum(1 for r in self._rows if all(r.get(k) == v for k, v in q.items()))
+    # #268: the board loader reads push_devices / status_events /
+    # push_events / record_decisions as well as device_status.
+    async def distinct(self, field, _q=None):
+        return [r.get(field) for r in self._rows if r.get(field)]
 
 
 class _FakeDB:
-    def __init__(self, rows): self.device_status = _FakeCollection(rows)
+    def __init__(self, rows):
+        self.device_status = _FakeCollection(rows)
+        self.push_devices = _FakeCollection([])
+        self.status_events = _FakeCollection([])
+        self.push_events = _FakeCollection([])
+        self.record_decisions = _FakeCollection([])
 
 
 # --- the tests --------------------------------------------------------

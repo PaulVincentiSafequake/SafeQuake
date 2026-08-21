@@ -229,6 +229,21 @@ TREMOR_CATEGORY_ID = "TREMOR_INFO"
 # misread response. Not fixed here; flagged, not silently skipped.
 DEAD_TOKEN_REASONS = {"Unregistered", "BadDeviceToken"}
 
+# #268 (Neo, 2026-08-21 — Paul): the two reasons above are equally good
+# grounds for "stop wasting a push on this token", and equally bad
+# grounds for the far stronger claim "the app was removed from this
+# phone". Only `Unregistered` (HTTP 410) is Apple telling us the app is
+# gone. `BadDeviceToken` can be a prod/sandbox mismatch or a malformed
+# token — a configuration error on OUR side — and treating it as a
+# removal would let a config mistake manufacture a phantom "this is not
+# a person" on a rescue board. The classifier in record_state.py
+# therefore reads `dead_token_reason` and honours ONLY this constant;
+# everything else reads as "Phone went dark" with a technical note.
+# The reason string is already persisted below, so nothing changes on
+# the write side — this is the read-side contract, named here so the two
+# stay together.
+APP_REMOVED_REASON = "Unregistered"
+
 
 async def _prune_dead_devices(
     db: AsyncIOMotorDatabase, results: list["ApnsResult"],

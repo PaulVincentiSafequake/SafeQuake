@@ -1125,6 +1125,32 @@ async def export_audit_log_csv(
     # Plain-words coverage line + optional missing-start warning (1c/1d) —
     # someone opening this file next month never saw the screen.
     writer.writerow(_pad(["covers", _covers_line(since_dt, until_dt)]))
+    # ── #268: the counts, and what each one leaves out. A CSV is the
+    # fallback when the dashboard is down, so it carries the same
+    # exclusions the screen does — never a bare figure.
+    from people_counts import load_board as _load_board_csv, moved_by_words as _moved_by_words
+    _board_csv = await _load_board_csv(db, include_test=False)
+    _c = _board_csv.counts
+    writer.writerow(_pad(["people_on_working_board", str(_c.total)]))
+    writer.writerow(_pad(["waiting_for_an_answer", str(_c.waiting_for_answer)]))
+    writer.writerow(_pad(["phone_went_dark", str(_c.phone_went_dark)]))
+    writer.writerow(_pad(["not_on_working_board_app_removed", str(_c.app_removed)]))
+    writer.writerow(_pad(["not_on_working_board_never_used_app", str(_c.never_used)]))
+    writer.writerow(_pad(["not_on_working_board_resolved_by_operator",
+                          str(_c.resolved_by_operator)]))
+    for _n in _board_csv.notes:
+        writer.writerow(_pad(["what_these_numbers_count", _n]))
+    for _r in _board_csv.off_board:
+        _st = _r.get("record_state") or {}
+        writer.writerow(_pad([
+            "not_on_working_board_record",
+            _r.get("short_code") or "",
+            _r.get("display_name") or "",
+            _st.get("label") or "",
+            _r.get("resolved_at") or _st.get("app_removed_at") or "",
+            _moved_by_words(_r),
+            _st.get("off_board_reason") or "",
+        ]))
     _gap = await _window_gap_warning(since_dt)
     if _gap:
         writer.writerow(_pad(["warning", _gap]))
@@ -1643,6 +1669,20 @@ async def casualty_report_operational_pdf(
         ["Status not yet reported",       str(current_counts.unknown)],
         ["Total",                         str(current_counts.total)],
     ]
+    # ── #268 (2026-08-21 — Paul): "Every number must say what it counts
+    # and what it leaves out." These rows are indented and do NOT add
+    # into the Total above: the first two describe silence among the
+    # people already counted above, and the last three are records
+    # deliberately NOT on the working board at all.
+    summary_data[-1:-1] = [
+        ["Silence right now — inside the rows above:", ""],
+        ["  — waiting for an answer",     str(current_counts.waiting_for_answer)],
+        ["  — phone went dark",           str(current_counts.phone_went_dark)],
+        ["Not on the working board — NOT in the rows above:", ""],
+        ["  — app removed from this phone", str(current_counts.app_removed)],
+        ["  — never used the app",          str(current_counts.never_used)],
+        ["  — resolved by an operator",     str(current_counts.resolved_by_operator)],
+    ]
     summary_tbl = Table(summary_data, colWidths=[70*mm, 30*mm])
     summary_tbl.setStyle(TableStyle([
         # Opaque white base so the watermark never bleeds through data rows.
@@ -1656,6 +1696,17 @@ async def casualty_report_operational_pdf(
     ]))
     story.append(summary_tbl)
     story.append(Spacer(0, 8))
+
+    # #268: the exclusions, in words, immediately under the numbers they
+    # qualify. The printed report is the fallback when the dashboard is
+    # down, so it must carry the same wording the screen does.
+    from people_counts import counts_notes as _counts_notes
+    _note_style_b1 = PS("B1CountNote", parent=styles["Normal"], fontSize=8.5,
+                        leading=11, textColor=colors.HexColor("#444444"),
+                        spaceAfter=2)
+    for _n in _counts_notes(current_counts):
+        story.append(Paragraph(_html.escape(_n), _note_style_b1))
+    story.append(Spacer(0, 6))
 
     # #216 (Batch 7): the present-tense narrative sits DIRECTLY UNDER the
     # aggregate table it explains. Same source (compute_counts + latest
@@ -1808,6 +1859,48 @@ async def casualty_report_operational_pdf(
     if counts["total_devices"] == 0:
         story.append(Spacer(0, 20))
         story.append(Paragraph("No one reported in this period.", meta_style))
+
+    # ── #268 appendix: records NOT on the working board ───────────────
+    # "Removed records go to a clearly labelled area an operator can open
+    #  — not hidden, not deleted. Anyone can see what was moved, when,
+    #  and why." The printed report is the fallback when the dashboard is
+    #  down, so the same list has to be here.
+    from people_counts import load_board as _load_board, moved_by_words as _moved_by_words
+    _b = await _load_board(db, include_test=False)
+    story.append(Spacer(0, 14))
+    story.append(Paragraph("Records not on the working board", h2_style))
+    if not _b.off_board:
+        story.append(Paragraph(
+            "None. Every record is on the working board.", meta_style))
+    else:
+        story.append(Paragraph(
+            "These records are deliberately not in the working list above. "
+            "Nothing has been deleted. Each line says what it is, when it "
+            "moved and who moved it.", meta_style))
+        _off_data = [["Code", "Name", "What it is", "When", "Moved by", "Why"]]
+        for _r in _b.off_board:
+            _st = _r.get("record_state") or {}
+            _when = _r.get("resolved_at") or _st.get("app_removed_at")
+            _when_dt = _parse_iso_or_none(_when) if _when else None
+            _off_data.append([
+                cell(_r.get("short_code") or "—"),
+                cell(_r.get("display_name") or "—"),
+                cell(_st.get("label") or "—"),
+                cell(_when_dt.strftime("%d %b %Y, %H:%M") if _when_dt else "—"),
+                cell(_moved_by_words(_r)),
+                cell(_st.get("off_board_reason") or "—"),
+            ])
+        _off_tbl = Table(_off_data, colWidths=[18*mm, 24*mm, 36*mm, 34*mm, 34*mm, 40*mm],
+                         repeatRows=1)
+        _off_tbl.setStyle(TableStyle([
+            ("BACKGROUND",   (0,0), (-1,-1), colors.white),
+            ("BACKGROUND",   (0,0), (-1,0), colors.HexColor("#e6e6ea")),
+            ("FONTNAME",     (0,0), (-1,0), "Helvetica-Bold"),
+            ("FONTSIZE",     (0,0), (-1,-1), 7),
+            ("GRID",         (0,0), (-1,-1), 0.3, colors.HexColor("#c9ccd2")),
+            ("VALIGN",       (0,0), (-1,-1), "TOP"),
+        ]))
+        story.append(_off_tbl)
 
     story.append(Paragraph(
         "END OF TEAM REPORT — For public communications, use the \u201Csafe to share\u201D public report which "
@@ -1993,6 +2086,10 @@ async def casualty_report_public_pdf(
         ["People with status not yet reported",      str(current_counts.unknown)],
         ["Total people accounted for",               str(current_counts.total)],
     ]
+    # #268: B2 is a strict ONE-PAGER (test-enforced, #126) and it is read
+    # by families and journalists, so the exclusions go in as sentences
+    # under the table rather than as extra rows. The operational report
+    # (B1) carries the full indented breakdown.
     summary_tbl = Table(summary_data, colWidths=[110*mm, 30*mm])
     summary_tbl.setStyle(TableStyle([
         # Opaque white base so nothing bleeds through on print.
@@ -2022,6 +2119,18 @@ async def casualty_report_public_pdf(
     for _line in _now_lines:
         story.append(Paragraph(_html.escape(_line), body_style))
 
+    # #268: what the numbers leave out, in one sentence. B2 is a strict
+    # one-pager (#126) with almost no headroom, so this rides at footnote
+    # size — small, but never absent: a bare figure on a public report is
+    # exactly how a set-aside record gets read as a missing person.
+    from people_counts import counts_notes_short as _counts_notes_b2
+    story.append(Paragraph(
+        _html.escape(_counts_notes_b2(current_counts)),
+        PS("B2CountNote", parent=styles["Normal"], fontSize=8,
+           leading=9.5, spaceBefore=2, spaceAfter=0,
+           textColor=colors.HexColor("#555")),
+    ))
+
     # D1 (Batch 7): explicit transition sentence between "right now" and
     # "during this window". A journalist or family member reading the
     # report must understand that the two sections count different
@@ -2050,7 +2159,10 @@ async def casualty_report_public_pdf(
     # the surrounding spacers were trimmed. The chart is still perfectly
     # legible at 38mm — the y-axis is 0..N (whole people), never a fine
     # decimal — and this is the single biggest saving on the page.
-    story.append(Spacer(0, 4))
+    # #268: 4pt -> 1pt. The timeline heading below already has spaceAfter,
+    # so this spacer was pure padding, and #126 keeps B2 to one page —
+    # tightening spacing is how the exclusions note earned its room.
+    story.append(Spacer(0, 1))
     buckets, _hourly = _bucket_timeline(raw_rows, since_dt, until_dt)
     from reportlab.platypus import KeepTogether as _KT
     timeline_block = [Paragraph("What happened during this window", h2_style)]
@@ -2067,7 +2179,7 @@ async def casualty_report_public_pdf(
     )
     story.append(_KT(timeline_block))
 
-    story.append(Spacer(0, 6))
+    story.append(Spacer(0, 2))  # #268: 6pt -> 2pt; the footer has spaceBefore=8
     # D2 (Batch 7): neutral footer wording by default. The "conducted by
     # [authority]" claim is gated behind the same cooperation setting as
     # the issuer line.

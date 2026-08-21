@@ -49,14 +49,28 @@ def test_correct_phrase_purges_and_reports_counts():
     across every #262 test file, including plain TestClient-only
     double-calls). Uses whatever is already in push_devices as the
     "before" state rather than seeding — the invariants checked here
-    (after==0, deleted==before) hold regardless of what was there."""
+    hold regardless of what was there."""
     r = client.post(
         "/api/admin/device-registry/purge-all",
         json={"confirmation_phrase": DEVICE_PURGE_CONFIRMATION},
         headers=HDR,
     )
-    assert r.status_code == 200, r.text
+    assert r.status_code in (200, 409), r.text
+    if r.status_code == 409:
+        # #268: refused outright because an alert is live. That is the
+        # correct answer, and it must say so in plain words.
+        assert "alert is live" in r.json()["detail"]
+        return
     body = r.json()
-    assert body["after"] == 0
-    assert body["deleted"] == body["before"]
+    # #268 (2026-08-21 — Paul): "Refuse to delete any record that has ever
+    # reported needing help... Tell the person on screen afterwards in
+    # plain words what was removed and what was kept back."
+    assert body["after"] == body["kept_back"]
+    assert body["deleted"] == body["before"] - body["kept_back"]
     assert body["purged_by"]  # attributed to a principal, not blank
+    assert "Removed" in body["message"]
+    if body["kept_back"]:
+        assert "reported needing help" in body["message"]
+        for kept in body["kept_back_detail"]:
+            assert kept["short_code"]
+            assert "needing help" in kept["why"]

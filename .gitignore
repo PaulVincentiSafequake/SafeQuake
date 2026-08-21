@@ -90,3 +90,9 @@ android-sdk/
 # Internal testing_agent QA artifacts — contain agent-to-agent notes
 # and historic secret values. Never push to GitHub.
 test_reports/
+
+# Secrets and local environment — never committed (#268: these were
+# accidentally staged once by a `git add -A` and caught before any push).
+.env
+.env.*
+!.env.example
