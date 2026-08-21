@@ -2230,3 +2230,19 @@ this, and neither will we. Two consequences, both now shipped:
   (IMMEDIATE / SERIOUS / MINOR). Those are triage category names, not
   emphasis, and they are what a rescuer reads across a room. Flagged to Paul
   in case he wants them changed too.
+
+### Capitals: the standing exception (agreed with Paul, 2026-08-21)
+
+The rule is still "no capitals for emphasis". These are NOT emphasis and are
+NOT to be tidied away by a future wording sweep:
+
+  * The triage category names — IMMEDIATE, SERIOUS, MINOR — on the group
+    headings, the severity badges and the map key. They are recognised
+    triage signals a rescuer reads across a room, not a raised voice.
+  * DROP. COVER. HOLD ON. on the alert screen, for the same reason.
+
+Paul: "Standard triage category names, the same exception as DROP COVER HOLD
+ON: a recognised signal, not emphasis."
+
+Everything else stays sentence case. If a sweep is tempted to change one of
+the above, the answer is no — read this line instead.
