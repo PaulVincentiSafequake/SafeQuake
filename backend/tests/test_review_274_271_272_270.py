@@ -128,7 +128,9 @@ class TestStandDownPreview:
     def test_counts_add_up(self, preview):
         assert preview["clearing_count"] + preview["staying_count"] >= 0
         assert preview["clearing_count"] <= preview["total"]
-        assert preview["staying_count"] == len(preview["staying_people"])
+        assert preview["staying_real_count"] == len(preview["staying_people"])
+        assert (preview["staying_real_count"] + preview["staying_test_count"]
+                == preview["staying_count"])
 
     def test_every_row_has_the_six_display_fields(self, preview):
         needed = {"device_id", "name", "code", "words", "last_heard", "battery_pct"}

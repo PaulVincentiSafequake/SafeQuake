@@ -3134,7 +3134,6 @@ async def _stand_down_split() -> Dict[str, Any]:
         if (r.get("effective_status") == "trapped") or r.get("needs_extraction")
     ]
     staying_ids = {str(r.get("device_id")) for r in staying_rows}
-
     devices = await db.push_devices.find(
         {"dead_token": {"$ne": True}},
         {"_id": 0, "user_id": 1, "device_token": 1, "platform": 1},
@@ -3167,13 +3166,21 @@ async def _stand_down_split() -> Dict[str, Any]:
         }
 
     people = sorted(
-        (_person(r) for r in staying_rows),
+        (_person(r) for r in staying_rows if not r.get("is_test")),
         key=lambda p: {"Badly hurt": 0, "Hurt": 1}.get(p["words"], 2),
     )
+    # Test entries are held back from the stand-down exactly like anyone
+    # else asking for help — nothing is treated differently behind the
+    # scenes. But they are COUNTED, not listed: seeing thirteen TEST
+    # people in the dialog would bury the one real name in it, which is
+    # the whole point of the list.
+    test_staying = sum(1 for r in staying_rows if r.get("is_test"))
     return {
         "clearing": clearing,
         "clearing_count": len(clearing),
         "staying_count": len(staying_rows),
+        "staying_real_count": len(people),
+        "staying_test_count": test_staying,
         "staying_people": people,
         "staying_phones_held_back": len(held_back),
         "total_phones": len(ios_all),
@@ -3286,6 +3293,8 @@ async def alert_stand_down_preview(
         "total": split["total_phones"],
         "clearing_count": split["clearing_count"],
         "staying_count": split["staying_count"],
+        "staying_real_count": split["staying_real_count"],
+        "staying_test_count": split["staying_test_count"],
         "staying_people": split["staying_people"],
         "confirmation_phrase": STAND_DOWN_CONFIRMATION,
     }

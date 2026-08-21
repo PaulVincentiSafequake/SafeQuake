@@ -56,7 +56,11 @@ class TestStandDownPreviewNamesWhoStays:
             assert key in preview, preview
 
     def test_people_asking_for_help_are_listed_by_name(self, preview):
-        assert preview["staying_count"] == len(preview["staying_people"])
+        # Test entries are held back too, but counted rather than listed,
+        # so thirteen TEST rows cannot bury the one real name (#274).
+        assert preview["staying_real_count"] == len(preview["staying_people"])
+        assert (preview["staying_real_count"] + preview["staying_test_count"]
+                == preview["staying_count"])
         assert preview["staying_count"] >= 1, (
             "seeded trapped record C should be on the staying list"
         )

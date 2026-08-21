@@ -7440,6 +7440,9 @@ window.QuakeAngelRescue = (function () {
     var clearing = Number(preview && preview.clearing_count) || 0;
     var stayingList = (preview && preview.staying_people) || [];
     var staying = Number(preview && preview.staying_count) || stayingList.length;
+    var stayingTests = Number(preview && preview.staying_test_count) || 0;
+    var stayingReal = Number(preview && preview.staying_real_count);
+    if (!isFinite(stayingReal)) stayingReal = stayingList.length;
     if (total === 0) {
       showBanner("err", "No phones are registered on this system. There is nothing to stand down.", 8000);
       return;
@@ -7466,16 +7469,24 @@ window.QuakeAngelRescue = (function () {
         (staying === 1 ? "This person stays" : "These people stay") +
         " on the working board.\n" +
         (staying === 1 ? "Their phone is" : "Their phones are") +
-        " NOT told the alert is over.\n\n" +
-        "Staying on the board:\n";
-      stayingList.forEach(function (p) {
-        var line = "• " + (p.name || "No name given");
-        if (p.code) line += " (" + p.code + ")";
-        line += " — " + (p.words || "Asked for help");
-        if (p.last_heard) line += ", last heard " + p.last_heard;
-        if (p.battery_pct != null) line += ", battery " + p.battery_pct + "%";
-        body += line + "\n";
-      });
+        " NOT told the alert is over.\n\n";
+      if (stayingReal > 0) {
+        body += "Staying on the board:\n";
+        stayingList.forEach(function (p) {
+          var line = "• " + (p.name || "No name given");
+          if (p.code) line += " (" + p.code + ")";
+          line += " — " + (p.words || "Asked for help");
+          if (p.last_heard) line += ", last heard " + p.last_heard;
+          if (p.battery_pct != null) line += ", battery " + p.battery_pct + "%";
+          body += line + "\n";
+        });
+      }
+      if (stayingTests > 0) {
+        body += (stayingReal > 0 ? "\n" : "") +
+          "Also " + stayingTests + " test " +
+          (stayingTests === 1 ? "entry" : "entries") +
+          " stay on the board. Not real people.\n";
+      }
       body += "\nCalling the alert off does not end their rescue.\n\n";
     } else {
       body += "Nobody is asking for help right now.\n\n";
