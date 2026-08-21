@@ -913,6 +913,101 @@ async def send_recheck_prompts(
     }
 
 
+def _build_check_in_request_payload(
+    title: str,
+    body: str,
+    check_id: str,
+    device_id: str,
+    battery_saving: bool = False,
+) -> dict:
+    """#271: an operator asked ONE person to check in. Nothing has happened.
+
+    Paul, 2026-08-21, on the wording and the delivery:
+      "It is not an emergency, it must not siren, and it must not override
+       silent mode. That entitlement is for real earthquakes only."
+      "'No new earthquake' must be the first thing in the body."
+
+    So this is an ORDINARY notification: `active` interruption level, the
+    default sound, priority 5 on the header. It never touches the critical
+    path (#207) and never uses `time-sensitive` either — a routine check
+    has no business breaching someone's Focus.
+
+    `kind: "check_in_request"` routes the tap to the calm check-in screen,
+    which carries the same reassurance and the same I'M SAFE / I NEED HELP
+    buttons as an alert check-in. A help report made from there is a real
+    report and reaches the working board like any other.
+    """
+    body_data: dict = {
+        "kind": "check_in_request",
+        "action_url": "/alert",
+        "check_id": check_id,
+        "device_id": device_id,
+        "battery_saving": bool(battery_saving),
+        # Repeated in the data block so the screen can show the same
+        # sentence the notification did, word for word.
+        "reassurance": "No new earthquake. We are just checking how you are.",
+    }
+    return {
+        "aps": {
+            "alert": {"title": title, "body": body},
+            "sound": "default",
+            "interruption-level": "active",
+            "category": RECHECK_CATEGORY_ID,
+        },
+        "body": body_data,
+    }
+
+
+async def send_check_in_request(
+    db: AsyncIOMotorDatabase,
+    device: dict,               # {user_id, device_token, check_id}
+    idempotency_key: str,
+    battery_saving: bool = False,
+) -> dict:
+    """Ask ONE phone to check in. One device per call, deliberately — a
+    bulk version of this drains every phone in an incident at once and
+    needs its own control and its own confirmation (#47)."""
+    cfg = await load_apns_config(db)
+    if cfg is None:
+        return {
+            "payload": None,
+            "events": [{
+                "user_id": device.get("user_id") or "",
+                "token_fingerprint": _fingerprint(device.get("device_token") or ""),
+                "environment": "n/a",
+                "status_code": None,
+                "apns_id": None,
+                "apns_unique_id": None,
+                "reason": "APNS_NOT_CONFIGURED",
+                "delivered": False,
+                "duration_ms": 0,
+                "error": "APNs auth key not uploaded.",
+                "check_id": device.get("check_id"),
+            }],
+        }
+    payload = _build_check_in_request_payload(
+        title="Are you all right?",
+        body="No new earthquake. Please tap to tell us how you are.",
+        check_id=str(device.get("check_id") or ""),
+        device_id=str(device.get("user_id") or ""),
+        battery_saving=battery_saving,
+    )
+    res = await _send_one(
+        cfg,
+        user_id=device.get("user_id") or "",
+        device_token=device.get("device_token") or "",
+        payload=payload,
+        idempotency_key=idempotency_key,
+        apns_priority="5",
+    )
+    pruned = await _prune_dead_devices(db, [res])
+    return {
+        "payload": payload,
+        "events": [{**res.as_dict(), "check_id": device.get("check_id")}],
+        "pruned_dead_devices": pruned,
+    }
+
+
 # ---------- Silent (data-only) send: reminder kill switch ----------
 async def send_silent_cancel_reminders(
     db: AsyncIOMotorDatabase,

@@ -27,15 +27,35 @@
  *      still knows where the epicentre is and must offer the map
  *      button (§2 #256).
  */
-import type { LocalSearchParams } from "expo-router";
+import type { UnknownOutputParams } from "expo-router";
 
 /** Loose payload shape — any of alert.tsx's `params`, quake/[unid]'s
  *  params, an APNs data blob, or an activeAlert stash. */
 export type EventPayloadLike =
   | Record<string, unknown>
-  | LocalSearchParams<any>
+  | UnknownOutputParams
   | null
   | undefined;
+
+/**
+ * #273 (2026-08-21 — Paul): the alert screen showed "1039.83km".
+ *   "Two decimal places of false precision on an approximate figure.
+ *    Round it honestly."
+ * The figure is a great-circle distance from a reported epicentre whose
+ * own position is only accurate to kilometres, so decimals are noise
+ * dressed up as precision. Under 10 km we keep one decimal, because at
+ * that range the difference between 2 km and 2.4 km matters to someone
+ * deciding whether to move. Both the alert screen and the event detail
+ * screen render through this, so the same event can never show two
+ * different distances.
+ */
+export function roundDistanceKm(km: number | string | null | undefined): string {
+  if (km === null || km === undefined || km === "") return "—";
+  const n = typeof km === "number" ? km : Number(km);
+  if (!Number.isFinite(n)) return "—";
+  if (n < 10) return String(Math.round(n * 10) / 10);
+  return String(Math.round(n));
+}
 
 export type EventReadings = {
   /** Magnitude as a display string ("2.9", "M5.1") or null if missing. */

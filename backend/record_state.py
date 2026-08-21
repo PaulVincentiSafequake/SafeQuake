@@ -64,6 +64,23 @@ from typing import Any, Dict, List, Optional, Sequence, Set
 # label is what an operator reads and what gets spoken over a radio.
 WAITING = "waiting_for_answer"
 DARK = "phone_went_dark"
+# #271 (2026-08-21 — Paul, from the live board): CW7EF read "Phone went
+# dark — nothing from this phone for 14 hours 23 minutes. No contact
+# possible." The phone was switched on, charged, on wifi and perfectly
+# reachable. It had simply not spoken, because nothing had asked it to.
+#
+#   "The system is treating 'has not spoken' as 'cannot be reached'.
+#    Those are different facts and only one of them is alarming."
+#
+# Why this is not a cosmetic bug: in a real incident everyone who checks
+# in as safe slowly turns into an alarming red entry as the hours pass,
+# and within half a day the board is full of red that means nothing.
+# Published alarm-management practice is unambiguous — that is what kills
+# control-room systems, because operators learn the board cries wolf.
+#
+# So DARK now requires an UNANSWERED ASK, and this state carries the
+# honest version: we have not asked, so we do not know.
+NOT_ASKED = "not_asked"
 APP_REMOVED = "app_removed"
 NEVER_USED = "never_used"
 RESOLVED = "resolved_by_operator"
@@ -75,6 +92,11 @@ RESOLVED = "resolved_by_operator"
 LABELS: Dict[str, str] = {
     WAITING: "Waiting for an answer",
     DARK: "Phone went dark",
+    # The label carries the time, because the state describes what WE
+    # have done, not what the person has done (Paul's wording, and his
+    # reason: "'Quiet' invites the reader to imagine something is wrong").
+    # `classify` overrides this with "Not asked since 21:08".
+    NOT_ASKED: "Not asked",
     APP_REMOVED: "App removed from this phone",
     NEVER_USED: "Never used the app",
     RESOLVED: "Resolved by an operator",
@@ -134,7 +156,16 @@ def parse_dt(ts) -> Optional[datetime]:
 
 
 def _clock(dt: Optional[datetime]) -> str:
-    return dt.strftime("%H:%M") if dt else "an unknown time"
+    """#272: Malta time, never UTC. One card must not print one event at
+    two different times. See timefmt.py for the timezone rule and how
+    daylight saving is handled."""
+    import timefmt
+    return timefmt.hhmm(dt)
+
+
+def _day_month(dt: Optional[datetime]) -> str:
+    import timefmt
+    return timefmt.day_month(dt)
 
 
 def dur_words(minutes: Optional[int]) -> str:
@@ -253,29 +284,64 @@ def classify(
             "So we treat this as a phone that went dark."
         )
 
-    is_dark = silent_minutes is not None and silent_minutes > dark_after
-    awaiting = _awaiting_answer(row, last, last_alert_at)
+    # #271: what did WE ask, and when? Two sources: the last broadcast
+    # alert, and any check-in request sent to this one phone (the
+    # re-check ladder, or an operator pressing "Ask them to check in").
+    asks = row.get("asks") or {}
+    last_ask = max(
+        [d for d in (last_alert_at, parse_dt(asks.get("last_at"))) if d],
+        default=None,
+    )
+    rc_missed = int((row.get("recheck") or {}).get("consecutive_missed") or 0)
+    asked_since_last_report = bool(
+        (last_ask and (not last or last < last_ask)) or rc_missed >= 1
+    )
+    _asked_words = f" at {_clock(last_ask)}" if last_ask else ""
+    ask_count = int(asks.get("count") or 0)
+    if ask_count > 1:
+        _asked_words += f", {ask_count} times in total"
+    # The dark clock runs from the ASK, not from their last report. A
+    # person last heard from yesterday who was asked a minute ago has not
+    # gone dark — they have had a minute to answer.
+    unanswered_minutes = (
+        int((now - last_ask).total_seconds() // 60) if last_ask else None
+    )
+    is_dark = bool(
+        asked_since_last_report
+        and unanswered_minutes is not None
+        and unanswered_minutes > dark_after
+    )
+    last_report_words = {
+        "safe": "safe", "trapped": "that they needed help",
+        "rescued": "rescued",
+    }.get(str(row.get("status") or ""), "in")
 
     def _clock_state() -> tuple[Optional[str], str]:
-        """dark / waiting / answering, from the clock alone."""
+        """One of: went dark / waiting for an answer / not asked since /
+        answering. #271: the first two REQUIRE that we actually asked
+        them something. If nothing has asked this phone to speak, we say
+        so — we never claim we cannot reach a phone we have not tried."""
         # Short lines, one idea each — see memory/writing-and-layout-rules.md.
+        if not asked_since_last_report:
+            return NOT_ASKED, (
+                (f"Last reported {last_report_words} at {_clock(last)}, "
+                 f"{dur_words(silent_minutes)} ago. "
+                 if last else "")
+                + "Nothing has asked this phone to check in since. "
+                "We do not know if it can be reached. "
+                "The only way to know is to ask."
+            )
         if is_dark:
             return DARK, (
-                f"No word from this phone for {dur_words(silent_minutes)}. "
+                f"We asked{_asked_words}. No answer for "
+                f"{dur_words(unanswered_minutes)}. "
                 f"Last heard {_clock(last)}. "
-                "We cannot reach them. The status and place shown are the "
-                "last we knew."
+                "The status and place shown are the last we knew."
             )
-        if awaiting:
-            return WAITING, (
-                "We alerted them"
-                + (f" at {_clock(last_alert_at)}" if last_alert_at else "")
-                + ". No reply yet. The phone can still be reached. "
-                + f"Last heard {dur_words(silent_minutes)} ago."
-            )
-        return None, (
-            f"Answering. Last heard {dur_words(silent_minutes)} ago."
-            if silent_minutes is not None else "No word from them yet."
+        return WAITING, (
+            f"We asked{_asked_words}. No reply yet, "
+            f"{dur_words(unanswered_minutes)} so far."
+            + (f" Last heard {_clock(last)}." if last else "")
         )
 
     # 1 ── a human resolved this record, with a reason on the file.
@@ -316,7 +382,7 @@ def classify(
                 "That is not a message saying they are safe."
             )
         return RecordState(
-            state=state, label=LABELS.get(state, "Answering"), detail=detail,
+            state=state, label=_label(state, last), detail=detail,
             on_working_board=True, held_reason=held, off_board_reason=None,
             silent_minutes=silent_minutes, dark_after_minutes=dark_after,
             ever_needed_help=True, app_removed_at=removed_at,
@@ -334,7 +400,7 @@ def classify(
             label=LABELS[NEVER_USED],
             detail=(
                 "This phone gets our alerts"
-                + (f", since {reg.strftime('%d %b')}" if reg else "")
+                + (f", since {_day_month(reg)}" if reg else "")
                 + ". The app has never been opened. "
                 "We have no place for them, so there is nowhere to send a team. "
                 "They got the alert and have not answered."
@@ -356,7 +422,7 @@ def classify(
             state, detail = _clock_state()
             return RecordState(
                 state=state or WAITING,
-                label=LABELS.get(state or WAITING),
+                label=_label(state or WAITING, last),
                 detail=detail,
                 on_working_board=True,
                 held_reason=(
@@ -397,7 +463,7 @@ def classify(
     # 5 ── ordinary case: the clock decides, and nobody leaves the board.
     state, detail = _clock_state()
     return RecordState(
-        state=state, label=LABELS.get(state, "Answering"), detail=detail,
+        state=state, label=_label(state, last), detail=detail,
         on_working_board=True, held_reason=None, off_board_reason=None,
         silent_minutes=silent_minutes, dark_after_minutes=dark_after,
         ever_needed_help=False, app_removed_at=removed_at,
@@ -405,20 +471,14 @@ def classify(
     )
 
 
-def _awaiting_answer(
-    row: Dict[str, Any],
-    last: Optional[datetime],
-    last_alert_at: Optional[datetime],
-) -> bool:
-    """"Alerted, no reply yet, phone still reachable." Two independent
-    sources, either is enough: they have not reported since the last
-    broadcast, or the re-check ladder has an unanswered prompt out."""
-    rc = row.get("recheck") or {}
-    if int(rc.get("consecutive_missed") or 0) >= 1:
-        return True
-    if last_alert_at and last and last < last_alert_at:
-        return True
-    return False
+def _label(state: Optional[str], last: Optional[datetime]) -> str:
+    """#271: "Not asked since 21:08" — the label names the time, because
+    the state describes what WE have done, not what the person has done.
+    Paul: "'Quiet' invites the reader to imagine something is wrong."
+    """
+    if state == NOT_ASKED:
+        return f"Not asked since {_clock(last)}" if last else "Never asked"
+    return LABELS.get(state, "Answering")
 
 
 # ── Mass-dark notice ──────────────────────────────────────────────────
@@ -468,7 +528,7 @@ def detect_mass_dark(
         "last_at": last.isoformat(),
         "text": (
             f"{size} of {reporting_total} phones went quiet at about the same "
-            f"time ({first.strftime('%H:%M')} to {last.strftime('%H:%M')}). "
+            f"time ({_clock(first)} to {_clock(last)}). "
             "That usually means the phone network or the power went down. "
             "It rarely means these people are missing. "
             "Nobody has been moved or relabelled."

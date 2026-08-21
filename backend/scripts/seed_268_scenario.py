@@ -82,19 +82,19 @@ async def main():
          "longitude": lng, "recorded_at": ago(60)},
     ])
     await db.push_devices.insert_many([
-        {"user_id": IDS["A"], "platform": "ios", "token": "neo268a",
+        {"user_id": IDS["A"], "platform": "ios", "device_token": "neo268a",
          "created_at": ago(57), "updated_at": ago(1)},
         # The positive fact: Apple told us the app is gone from this phone.
-        {"user_id": IDS["B"], "platform": "ios", "token": "neo268b",
+        {"user_id": IDS["B"], "platform": "ios", "device_token": "neo268b",
          "created_at": ago(600), "updated_at": ago(60), "dead_token": True,
          "dead_token_reason": "Unregistered", "dead_token_at": ago(55)},
-        {"user_id": IDS["C"], "platform": "ios", "token": "neo268c",
+        {"user_id": IDS["C"], "platform": "ios", "device_token": "neo268c",
          "created_at": ago(240), "updated_at": ago(35), "dead_token": True,
          "dead_token_reason": "Unregistered", "dead_token_at": ago(20)},
         # Registered for alerts, never opened the app: no device_status row.
-        {"user_id": IDS["D"], "platform": "ios", "token": "neo268d",
+        {"user_id": IDS["D"], "platform": "ios", "device_token": "neo268d",
          "created_at": ago(4000), "updated_at": ago(4000)},
-        {"user_id": IDS["E"], "platform": "android", "token": "neo268e",
+        {"user_id": IDS["E"], "platform": "android", "device_token": "neo268e",
          "created_at": ago(900), "updated_at": ago(180)},
     ])
     print("inserted the #268 scenario:")

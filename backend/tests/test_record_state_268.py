@@ -36,6 +36,14 @@ def push(reason=None, at_min=30, **kw):
     return row
 
 
+def asked(minutes, count=1):
+    """#271: "went dark" and "waiting for an answer" both REQUIRE that we
+    actually asked this phone something. A row with no ask on it reads
+    "not asked", which is the honest state. Tests that mean to exercise
+    the silence clock therefore have to put an ask on the row."""
+    return {"asks": {"last_at": ago(minutes), "count": count, "unanswered": count}}
+
+
 def cls(row, push_row=None, **kw):
     kw.setdefault("ever_needed_help", False)
     kw.setdefault("ever_located", True)
@@ -104,14 +112,15 @@ class TestLiveIncidentHoldsEveryone:
 # ── 3. Only Apple's `Unregistered` may claim the app was removed. ─────
 class TestOnlyUnregisteredMeansRemoved:
     def test_bad_device_token_reads_as_phone_went_dark(self):
-        st = cls({"status": "safe", "updated_at": ago(300)}, push("BadDeviceToken"))
+        st = cls({"status": "safe", "updated_at": ago(300), **asked(100)},
+                 push("BadDeviceToken"))
         assert st.state == rs.DARK
         assert st.on_working_board is True
         assert "does not prove the app was removed" in st.token_note
 
     def test_destroyed_phone_produces_no_removal_signal_at_all(self):
         # No APNs reason at all — the safe default is "went dark".
-        st = cls({"status": "safe", "updated_at": ago(300)}, push())
+        st = cls({"status": "safe", "updated_at": ago(300), **asked(100)}, push())
         assert st.state == rs.DARK
         assert st.app_removed_at is None
 
@@ -137,15 +146,19 @@ class TestOnlyUnregisteredMeansRemoved:
 # ── 4. Two thresholds, and the real elapsed time always shown. ────────
 class TestDarkThresholds:
     def test_fifteen_minutes_for_someone_who_needed_help(self):
-        st = cls({"status": "trapped", "updated_at": ago(20)}, ever_needed_help=True)
+        st = cls({"status": "trapped", "updated_at": ago(20), **asked(19)},
+                 ever_needed_help=True)
         assert st.dark_after_minutes == rs.DARK_AFTER_MINUTES_NEEDS_HELP == 15
         assert st.state == rs.DARK
 
     def test_forty_five_minutes_for_everyone_else(self):
-        st = cls({"status": "safe", "updated_at": ago(20)})
+        st = cls({"status": "safe", "updated_at": ago(20), **asked(19)})
         assert st.dark_after_minutes == 45
-        assert st.state is None
-        assert cls({"status": "safe", "updated_at": ago(50)}).state == rs.DARK
+        # Asked 20 minutes ago: still inside the 45-minute window, so we
+        # are waiting for an answer — not dark (#271).
+        assert st.state == rs.WAITING
+        assert cls({"status": "safe", "updated_at": ago(50),
+                    **asked(49)}).state == rs.DARK
 
     def test_the_card_always_carries_the_actual_elapsed_time(self):
         st = cls({"status": "safe", "updated_at": ago(72)})

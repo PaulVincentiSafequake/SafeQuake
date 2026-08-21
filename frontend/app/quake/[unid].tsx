@@ -32,8 +32,8 @@ import { View, Text, ScrollView, StyleSheet, TouchableOpacity, Linking } from "r
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import * as Location from "expo-location";
-import { parseUtc } from "@/src/utils/time";
-import { resolveEventReadings } from "@/src/utils/eventReadings";
+import { maltaTime, parseUtc } from "@/src/utils/time";
+import { resolveEventReadings, roundDistanceKm } from "@/src/utils/eventReadings";
 
 // Fallback reference point when we have no user location: the Malta/Gozo
 // archipelago centre (same coordinates as the MT country_config on the
@@ -175,8 +175,10 @@ export default function QuakeDetailScreen() {
     };
   }, [lat, lon, readings.distance_km]);
 
+  // #273: one rounding rule for distance, shared with the alert screen,
+  // so the same event can never show two different distances.
   const distanceLabel = distance
-    ? `${Math.round(distance.km)} km from ${distance.from}`
+    ? `${roundDistanceKm(distance.km)} km from ${distance.from}`
     : null;
 
   // Sets the expectation BEFORE the tap — "you'll return to the map", not
@@ -263,7 +265,7 @@ export default function QuakeDetailScreen() {
           <View style={styles.missingNotice}>
             <Ionicons name="information-circle-outline" size={16} color={colors.textDim} />
             <Text style={styles.missingNoticeText}>
-              Some details didn't arrive with this notification. Anything
+              Some details didn&apos;t arrive with this notification. Anything
               below marked &ldquo;Unknown&rdquo; is missing, not zero.
             </Text>
           </View>
@@ -296,8 +298,8 @@ export default function QuakeDetailScreen() {
           />
           {observedAtValid && (
             <Row
-              label="Time"
-              value={(observedAt as Date).toLocaleString()}
+              label="Time (Malta)"
+              value={maltaTime(observedAt as Date)}
             />
           )}
         </View>
@@ -323,8 +325,8 @@ export default function QuakeDetailScreen() {
           <View style={styles.noCoordsNotice}>
             <Ionicons name="map-outline" size={18} color={colors.textDim} />
             <Text style={styles.noCoordsText}>
-              The notification didn't include an epicentre location, so
-              there's nothing to show on the map.
+              The notification didn&apos;t include an epicentre location, so
+              there&apos;s nothing to show on the map.
             </Text>
           </View>
         )}

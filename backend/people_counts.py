@@ -405,6 +405,10 @@ async def _load_rows(db) -> List[Dict[str, Any]]:
             "pre_rescue_status": 1, "pre_rescue_severity": 1, "pre_rescue_mobility": 1,
             "synthetic": 1,
             "recheck": 1, "deteriorating": 1, "reports_improving": 1,
+            # #271: what WE have asked this phone, and when. record_state
+            # reads this to tell "we asked and heard nothing" apart from
+            # "nothing has asked them anything".
+            "asks": 1,
             # #268: help history and the human-resolution fields. Both are
             # needed by record_state.classify — without them the "status
             # outranks device state" guarantee cannot be evaluated.

@@ -488,7 +488,9 @@ def _bucket_timeline(raw_rows: list[dict], since_dt: datetime, until_dt: datetim
     index: dict = {}
     t = start
     while t <= until_dt:
-        label = t.strftime("%d %b %H:%M") if hourly else t.strftime("%d %b")
+        import timefmt as _tf
+        _tl = _tf.local(t) or t
+        label = _tl.strftime("%d %b %H:%M") if hourly else _tl.strftime("%d %b")
         index[t] = len(buckets)
         buckets.append({"t": t, "label": label, "trapped": 0, "safe": 0, "rescued": 0})
         t += step
@@ -776,9 +778,21 @@ def _plain_language_progress(raw_rows: list[dict], latest_events: list[dict],
 
 
 def _fmt_dt_plain(dt: datetime) -> str:
-    """'13 August 2026, 15:02' — unambiguous between British and American
-    date conventions, 24-hour clock. Timezone is stated once by the caller."""
-    return dt.strftime("%d %B %Y, %H:%M").lstrip("0")
+    """'13 Aug 2026, 15:02 (Malta time, UTC+02:00)'.
+
+    #272 (2026-08-21 — Paul): every time a person reads is Malta time, and
+    on a legal record the offset is printed beside it, because an inquiry
+    may read this in another country. The instant itself is always stored
+    in UTC — see timefmt.py for how daylight saving is handled."""
+    import timefmt
+    return timefmt.legal(dt)
+
+
+def _fmt_when(ts) -> str:
+    """'21 Aug 2026, 21:08' in Malta time, for table cells where the
+    heading already names the clock (#272). '—' when we have nothing."""
+    import timefmt
+    return timefmt.human(ts) if ts else "—"
 
 
 def _duration_words(td: timedelta) -> str:
@@ -805,7 +819,7 @@ def _covers_line(since_dt: datetime, until_dt: datetime) -> str:
     """Every export states the period it covers in absolute terms — 'Last
     7 days' is meaningless when the document is read next month or in an
     inquiry next year (1c, 2026-08-13)."""
-    return (f"Covers {_fmt_dt_plain(since_dt)} to {_fmt_dt_plain(until_dt)} (UTC) — "
+    return (f"Covers {_fmt_dt_plain(since_dt)} to {_fmt_dt_plain(until_dt)} — "
             f"{_duration_words(until_dt - since_dt)}.")
 
 
@@ -1122,6 +1136,14 @@ async def export_audit_log_csv(
     writer.writerow(_pad(["generated_at_utc", datetime.now(timezone.utc).isoformat()]))
     writer.writerow(_pad(["generated_by", generated_by]))
     writer.writerow(_pad(["row_count", str(len(events))]))
+    # #272: say which clock each time column uses. The "at" column is the
+    # exact instant with its offset; "at_simple" is the same instant in
+    # Malta time, which is what the dashboard and the radio log show.
+    writer.writerow(_pad([
+        "times_note",
+        "Column 'at' is the exact time with its offset. "
+        "Column 'at_simple' is the same time shown in Malta time.",
+    ]))
     # Plain-words coverage line + optional missing-start warning (1c/1d) —
     # someone opening this file next month never saw the screen.
     writer.writerow(_pad(["covers", _covers_line(since_dt, until_dt)]))
@@ -1165,11 +1187,13 @@ async def export_audit_log_csv(
                 v = ev.get("at")
                 if isinstance(v, datetime):
                     v = v.isoformat()
-                try:
-                    dtv = datetime.fromisoformat(str(v).replace("Z", "+00:00"))
-                    row.append(dtv.strftime("%Y-%m-%d %H:%M"))
-                except (ValueError, TypeError):
-                    row.append("")
+                # #272: the human-readable column is Malta time; the
+                # precise ISO column beside it keeps UTC with its offset.
+                # Format kept sortable (YYYY-MM-DD HH:MM) so a spreadsheet
+                # can still order by it.
+                import timefmt as _tf
+                _lv = _tf.local(v)
+                row.append(_lv.strftime("%Y-%m-%d %H:%M") if _lv else "")
                 continue
             v = ev.get(col)
             if isinstance(v, datetime):
@@ -1287,13 +1311,14 @@ async def export_audit_log_pdf(
             return Paragraph("&nbsp;", cell_style)
         return Paragraph(_html.escape(str(s)), cell_style)
 
-    header = ["Time (UTC)", "Kind", "Actor / Device", "Details", "Location / Meta"]
+    # #272: Malta time on every row, named in the heading. The full ISO
+    # timestamp with its offset stays in the CSV's machine columns.
+    header = ["Time (Malta)", "Kind", "Actor / Device", "Details", "Location / Meta"]
 
     data: list = [header]
     for e in events:
-        at = e.get("at") or ""
-        if isinstance(at, datetime):
-            at = at.isoformat()
+        import timefmt as _tf
+        at = _tf.human(e.get("at")) if e.get("at") else ""
         kind_str = e.get("kind", "?")
         if kind_str == "trigger":
             actor = e.get("triggered_by") or "?"
@@ -1636,7 +1661,7 @@ async def casualty_report_operational_pdf(
                 if current_counts.total == 1 else
                 f"{current_counts.total} people are on the system in total."
             )
-            + f" &nbsp;·&nbsp; Generated: {datetime.now(timezone.utc).isoformat()}"
+            + f" &nbsp;·&nbsp; Generated: {_fmt_dt_plain(datetime.now(timezone.utc))}"
             + f" &nbsp;·&nbsp; By: {generated_by}",
             meta_style,
         ),
@@ -1755,7 +1780,7 @@ async def casualty_report_operational_pdf(
 
     if detail == "full":
         story.append(Paragraph("Per-device detail", h2_style))
-        header = ["Latest status", "Sev", "Name / code", "Latest at (UTC)", "Location", "Battery", "Platform", "Notes"]
+        header = ["Latest status", "Sev", "Name / code", "Latest at (Malta)", "Location", "Battery", "Platform", "Notes"]
 
         def _sort_key(e):
             # Sort: trapped > rescued > safe; within status, red > yellow > green > unknown; then newest first.
@@ -1827,7 +1852,7 @@ async def casualty_report_operational_pdf(
                 status_para,
                 cell((e.get("severity") or "—")),
                 name_para,
-                cell(e.get("recorded_at") or ""),
+                cell(_fmt_when(e.get("recorded_at"))),
                 cell(loc),
                 cell(batt),
                 cell(e.get("platform") or "—"),
@@ -1886,7 +1911,7 @@ async def casualty_report_operational_pdf(
                 cell(_r.get("short_code") or "—"),
                 cell(_r.get("display_name") or "—"),
                 cell(_st.get("label") or "—"),
-                cell(_when_dt.strftime("%d %b %Y, %H:%M") if _when_dt else "—"),
+                cell(_fmt_when(_when)),
                 cell(_moved_by_words(_r)),
                 cell(_st.get("off_board_reason") or "—"),
             ])
@@ -2026,7 +2051,7 @@ async def casualty_report_public_pdf(
             "B2Covers", parent=body_style, fontSize=10, spaceAfter=4,
         )),
         Paragraph(
-            f"Issued: {datetime.now(timezone.utc).strftime('%d %B %Y, %H:%M').lstrip('0')} (UTC)",
+            f"Issued: {_fmt_dt_plain(datetime.now(timezone.utc))}",
             meta_style,
         ),
         # Issuer line (3a, 2026-08-13): names the SYSTEM and authority so

@@ -327,17 +327,21 @@ class TestTimeWindowsAndCodes:
         _, _, all_rows, hdr_i = _parse(r.text)
         covers = [row for row in all_rows[:hdr_i] if row[0] == "covers"]
         assert covers, "CSV missing plain-words 'covers' metadata row"
-        assert "Covers " in covers[0][1] and "(UTC)" in covers[0][1]
-        # unambiguous date form: month written out
+        # #272: human-readable times are Malta time, with the offset printed
+        # beside them on legal records. UTC lives in the machine columns only.
+        assert "Covers " in covers[0][1] and "Malta time" in covers[0][1]
+        # unambiguous date form: the month is named, never a bare number,
+        # so 21/08 can never be read as 8 August by an American reader.
+        # #272 renders "21 Aug 2026, 21:08 (Malta time, UTC+02:00)".
         assert any(m in covers[0][1] for m in (
-            "January", "February", "March", "April", "May", "June", "July",
-            "August", "September", "October", "November", "December"))
+            "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul",
+            "Aug", "Sep", "Oct", "Nov", "Dec"))
 
     def test_pdfs_carry_covers_line(self, seeded):
         for url in (B1_URL, B2_URL, PDF_URL):
             r = requests.get(url, headers=HEADERS, params=_window(), timeout=30)
             text = _pdf_text(r.content)
-            assert "Covers " in text and "(UTC)" in text, f"{url} missing Covers line"
+            assert "Covers " in text and "Malta time" in text, f"{url} missing Covers line"
 
     def test_gap_warning_everywhere(self, seeded):
         """Seed an alert older than the window start → every document must

@@ -2003,3 +2003,109 @@ board" sits on every off-board card.
   the human path.
 - **Production backend still carries the pre-plain-language wording** of
   the count notes. The short-line version needs Paul to redeploy.
+
+## 2026-08-21 (evening) — #273 verified, #274, #271, #272, #270
+
+### Build unblocked
+Three TypeScript errors left the app failing to compile: `sirenPlayer.stop()`
+(expo-audio has no `stop` — now `loop=false; volume=0; pause()`), a missing
+`Alert` import in `app/index.tsx`, and a removed `LocalSearchParams` type in
+`src/utils/eventReadings.ts` (now `UnknownOutputParams`). `npx tsc --noEmit`
+is clean, eslint clean.
+
+### #273 — the siren must obey what the notification SAYS it is
+Verified in code and by test: the tap router in `app/_layout.tsx` decides on
+`kind` only. `kind === "critical_alert"` is the ONLY thing that can start the
+siren. A payload with no `kind` but `action_url === "/alert"` still routes to
+the check-in screen, with the siren withheld. `magnitude` is consulted
+nowhere in routing. Preview notices carry `kind: "emsc_preview"`
+(`apns.py _build_preview_payload`), so a preview tap lands on the
+informational screen. Paul still to confirm on TestFlight after redeploying.
+
+### #274 — a stand-down never clears someone still asking for help
+`_stand_down_split()` in server.py is the one place that decides. Anyone on
+the working board whose effective status is `trapped` (or who needs
+extraction) is held back: their phone is NOT told the alert is over, and
+they stay on the board. Everyone else is cleared.
+`GET /api/admin/alert/stand-down/preview` now returns `clearing_count`,
+`staying_count` and `staying_people[]` — name, rescue code, how bad in
+words, when last heard (Malta time) and battery — and the dashboard dialog
+lists every one of them BEFORE the operator types STANDDOWN. The same split
+(`cleared_count`, `kept_on_board_count`, `kept_on_board[]`) is written to the
+`alert_stood_down` audit row and returned to the dashboard banner.
+
+### #271 — "Ask them to check in"
+One button per card, one person at a time. No bulk ask anywhere — that is a
+separate control with its own confirmation (#47), deliberately not built here.
+- Gap: **60 minutes** per person. **180 minutes** if battery <= 20% —
+  "their phone is their lifeline, and every wake-up spends it" (#189).
+- Cap: 2 unanswered asks, then the button refuses in words and points at the
+  radio. A fresh answer resets the counter.
+- History is printed under the button, always: "Asked twice. Last asked 40
+  minutes ago, no answer." When we may not ask yet, the button greys out AND
+  says why. One decision function, `server._ask_state`, feeds both the button
+  and the endpoint, so the button can never offer what the server refuses.
+- The push is an ORDINARY notification: `sound: "default"`,
+  `interruption-level: "active"`, priority 5, `kind: "check_in_request"`.
+  Never the critical path (#207), never `time-sensitive`.
+- Wording Paul chose: title **"Are you all right?"**, body **"No new
+  earthquake. Please tap to tell us how you are."** Reassurance first, always.
+  Explicitly rejected: anything implying a rescue team is watching the
+  dashboard — an operator pressed a button, which is not the same thing, and
+  we do not say it until it is contractually true.
+- Tapping it opens `/alert?siren=0&checkin=1` — the SAME check-in screen and
+  the SAME submit path as a real alert, in calm form: blue not red, "No new
+  earthquake." as the first line, no EARTHQUAKE DETECTED, no Drop-Cover-Hold
+  on, no readings strip. "I need help" from here is a real report and reaches
+  the working board exactly as one made during an alert.
+- Someone already trapped gets the re-check prompt instead ("Are you still
+  OK?"), because "has anything changed?" is the right question for them.
+
+### #272 — one clock, named
+- Screens: Malta time everywhere. Backend renders through `timefmt.py`; the
+  dashboard renders through `window.qgTime` / `window.qgWhen`, which pin
+  `Europe/Malta` explicitly so a laptop set to another country still shows the
+  operations clock. "All times on this page are Malta time." sits with the
+  counts.
+- Legal records (audit feed, a person's full history, both PDFs): the offset
+  is printed beside the local time — "21 Aug 2026, 21:08 (Malta time,
+  UTC+02:00)". The dashboard maps the browser's "GMT+02:00" to "UTC+02:00" so
+  two records of one instant read identically.
+- Machine-readable: export filenames keep the UTC `...Z` stamp; the CSV `at`
+  column keeps the full ISO timestamp with its offset; `at_simple` is the same
+  instant in Malta time, kept sortable (`YYYY-MM-DD HH:MM`); a `times_note`
+  row in the CSV header says which column is which.
+- App: `maltaTime()` in `src/utils/time.ts`; the event detail row is labelled
+  "Time (Malta)".
+
+### #270 — no developer boxes, no developer words
+Every yes/no question in the dashboard now draws OUR dialog through
+`window.qgAsk` (backed by `confirmPlain`), so no operator sees a grey browser
+box with the site address above our words. Rewritten in short lines with a
+verb on the button: preview distance (3 dialogs), both confidential
+downloads, add/remove test people, remove logo, mark as test, duplicate
+"same person", stop reminders, take off the board, and the two typed
+confirmations (SIREN, WIPE) plus the user-management ones. Dialog text now
+renders line breaks (`white-space: pre-line`) — before this every dialog was
+folded into one block of prose, which is the hardest thing to read at 4am.
+The only remaining browser boxes are unreachable fallbacks behind a
+`typeof window.confirmPlain === "function"` guard.
+
+### Tests
+- New: `backend/tests/test_stand_down_split_274.py` (12) and
+  `backend/tests/test_review_274_271_272_270.py` (22, written by the testing
+  agent). `test_273_regression.py` rewritten to be order-independent.
+- Updated to the #271 doctrine ("went dark" REQUIRES an unanswered ask):
+  `test_record_state_268.py`, `test_268_end_to_end.py`.
+- `test_export_hardening.py` now pins "Malta time" in the Covers line
+  instead of "(UTC)".
+- Testing agent round: 45/45 backend cases pass; both frontend flows
+  verified (calm check-in screen, and the red alert screen unchanged).
+
+### Still to do
+- Paul to redeploy (Publish) for the backend/app changes, and push
+  `memory/dashboard_build/index.html` to GitHub for the dashboard.
+- #190 (an alert after a stand-down re-opening an incident), #189 (ask the
+  lowest batteries least), #47 (a deliberate "ask everyone" control),
+  #25 (cluster map markers), #188 (group triage by place), #258 (home screen
+  redesign — only on request).

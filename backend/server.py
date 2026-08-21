@@ -10,7 +10,7 @@ import httpx
 import html as _html
 from pathlib import Path
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -369,7 +369,7 @@ async def post_status(payload: StatusInPayload):
     # recorded so the board's history explains itself.
     prior = await db.device_status.find_one(
         {"device_id": doc["device_id"]},
-        {"_id": 0, "resolved_at": 1, "resolved_reason": 1},
+        {"_id": 0, "resolved_at": 1, "resolved_reason": 1, "asks": 1},
     )
     returning = bool((prior or {}).get("resolved_at"))
     # Upsert latest state.
@@ -386,6 +386,20 @@ async def post_status(payload: StatusInPayload):
                     "app_removed_at": "", "app_removed_source": ""}},
         upsert=True,
     )
+    # #271: they answered. The unanswered-ask counter resets — a fresh
+    # answer is a fresh conversation, not a third ask — and the audit row
+    # for the last ask is marked answered, so "we asked and heard nothing"
+    # can never be claimed about a person who did answer.
+    if (prior or {}).get("asks", {}).get("unanswered"):
+        await db.device_status.update_one(
+            {"device_id": doc["device_id"]},
+            {"$set": {"asks.unanswered": 0, "asks.answered_at": now}},
+        )
+        await db.record_decisions.update_many(
+            {"device_id": doc["device_id"], "kind": "asked_to_check_in",
+             "answered": False},
+            {"$set": {"answered": True, "answered_at": now}},
+        )
     # #268: a check-in is positive evidence that the app exists on that
     # phone, so a stale "Unregistered" mark on its registration is cleared
     # too — otherwise the record stays set aside even though the person is
@@ -552,6 +566,9 @@ async def get_devices(
             "record_state": r.get("record_state"),
             "ever_needed_help": bool(r.get("ever_needed_help")),
             "possible_duplicate": r.get("possible_duplicate"),
+            # #271: the ask history the operator reads BEFORE they ask
+            # again, plus whether they may ask now and, if not, why not.
+            "ask_state": _ask_state(r),
         }
 
     def off(r: dict) -> dict:
@@ -2523,6 +2540,242 @@ async def duplicate_decision(
     }
 
 
+# ── #271: "Ask them to check in" ──────────────────────────────────────
+# Paul, 2026-08-21: "It turns a guess into a fact, which is exactly what a
+# rescue service does with silence. But it has a cost and the button must
+# say so. Every ask spends that person's battery and attention. On a
+# trapped person, their battery is their lifeline."
+#
+# The limits, and why each number:
+#   MAX 2 unanswered asks. The re-check ladder already prompts twice
+#     before it escalates, so two is the policy this product already
+#     follows; a third ask adds no information and drains the battery we
+#     need alive. Refused in plain words, with what to do instead.
+#   60 MINUTE gap between asks (Paul, 2026-08-21: "once per person per
+#     hour as the cap"). Anything tighter cannot produce information the
+#     phone has not already had a chance to send.
+#   LOW BATTERY (<=20%) WIDENS the gap to 3 hours, and the button says
+#     why it is greyed out. Paul: "For a trapped person, their phone
+#     battery is their lifeline, and every wake-up spends it." (#189.)
+#     Even after the wait, the operator confirms the battery cost.
+#   ONE PERSON AT A TIME. There is no bulk ask here, deliberately — a
+#     broadcast to everyone drains every phone in the incident at once
+#     and needs its own control and its own confirmation (#47).
+#   NEVER the critical-alert path (#207). This uses the ordinary
+#     re-check prompt. That entitlement is for real earthquake alerts,
+#     and misusing it risks Apple withdrawing it.
+# A fresh answer resets the counter: a new conversation, not a third ask.
+ASK_MAX_UNANSWERED = 2
+ASK_COOLDOWN_MINUTES = 60
+ASK_COOLDOWN_MINUTES_LOW_BATTERY = 180
+ASK_LOW_BATTERY_PCT = 20
+
+
+def _ask_state(row: dict, now: Optional[datetime] = None) -> dict:
+    """The ask history an operator sees, and whether they may ask now.
+
+    Paul, 2026-08-21: "Show the operator the history before they ask.
+    An operator who can see that will make a better decision than any
+    rule I set from here. Never make them guess whether someone has
+    already been chased."
+
+    The dashboard button and the endpoint both read this, so the button
+    can never offer something the server will refuse, and the reason it
+    is greyed out is the same sentence the server would have said.
+    """
+    from record_state import dur_words
+
+    now = now or datetime.now(timezone.utc)
+    asks = row.get("asks") or {}
+    count = int(asks.get("count") or 0)
+    unanswered = int(asks.get("unanswered") or 0)
+    last_at = _parse_iso_or_none_safe(asks.get("last_at"))
+    since = int((now - last_at).total_seconds() // 60) if last_at else None
+
+    battery = row.get("battery_pct")
+    low_battery = isinstance(battery, (int, float)) and battery <= ASK_LOW_BATTERY_PCT
+    gap = ASK_COOLDOWN_MINUTES_LOW_BATTERY if low_battery else ASK_COOLDOWN_MINUTES
+
+    if count == 0:
+        history = "Not asked yet."
+    else:
+        times = "once" if count == 1 else ("twice" if count == 2 else f"{count} times")
+        history = f"Asked {times}."
+        if since is not None:
+            history += f" Last asked {dur_words(since)} ago"
+            history += ", no answer." if unanswered > 0 else ", and they answered."
+
+    can_ask, blocked = True, None
+    if unanswered >= ASK_MAX_UNANSWERED:
+        can_ask = False
+        blocked = (
+            f"Already asked {unanswered} times with no answer. "
+            "Asking again is unlikely to help. Try the radio, or send a team."
+        )
+    elif since is not None and since < gap:
+        can_ask = False
+        wait = max(1, gap - since)
+        blocked = (
+            f"Asked {dur_words(since)} ago. Wait {dur_words(wait)}."
+            + (" Their battery is low, so we leave a longer gap."
+               if low_battery else "")
+        )
+    return {
+        "count": count,
+        "unanswered": unanswered,
+        "last_at": asks.get("last_at"),
+        "last_by": asks.get("last_by"),
+        "history_words": history,
+        "can_ask": can_ask,
+        "blocked_reason": blocked,
+        "low_battery": bool(low_battery),
+        "gap_minutes": gap,
+    }
+
+
+@api_router.post("/admin/records/{device_id}/ask-to-check-in")
+async def ask_to_check_in(
+    device_id: str,
+    payload: dict = Body(default={}),
+    request: Request = None,
+    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
+):
+    """Ask ONE phone to check in, and record that we asked.
+
+    This is what turns "we have not heard from them" into either "they
+    answered" or "we asked and heard nothing" — two facts, where before
+    there was one guess.
+    """
+    principal = await resolve_principal(request, x_admin_token, ADMIN_TRIGGER_PASSWORD, db)
+    require_role(principal, "admin", "operator")
+
+    row = await db.device_status.find_one({"device_id": device_id}, {"_id": 0})
+    if not row:
+        raise HTTPException(404, "We have no record with that rescue code.")
+
+    asks = row.get("asks") or {}
+    unanswered = int(asks.get("unanswered") or 0)
+    now = datetime.now(timezone.utc)
+    code = _short_code(device_id)
+    state = _ask_state(row, now)
+    battery = row.get("battery_pct")
+
+    if not state["can_ask"]:
+        # 429 when it is only a matter of waiting, 409 when asking again
+        # will never help. Same sentence the button already showed.
+        status = 429 if state["unanswered"] < ASK_MAX_UNANSWERED else 409
+        raise HTTPException(status, f"{code}: {state['blocked_reason']}")
+    if state["low_battery"] and not payload.get("acknowledge_low_battery"):
+        raise HTTPException(
+            409,
+            f"{code} has {int(battery)}% battery left. "
+            "Asking uses some of it, and their battery may be their lifeline. "
+            "Confirm again if you still want to ask.",
+        )
+
+    dev = await db.push_devices.find_one(
+        {"user_id": device_id}, {"_id": 0, "device_token": 1, "platform": 1},
+    )
+    # Platform first: "we cannot ask an Android phone yet" is a truer and
+    # more useful sentence than "this phone is not registered", and an
+    # Android row often has no usable token either.
+    if dev and (dev.get("platform") or "").lower() != "ios":
+        raise HTTPException(
+            409,
+            f"{code} is an Android phone. We cannot ask a single Android "
+            "phone to check in yet. Try the radio, or send a team.",
+        )
+    if not dev or not dev.get("device_token"):
+        raise HTTPException(
+            409,
+            f"We cannot reach {code}. This phone is not registered for "
+            "messages any more, so there is no way to ask it anything. "
+            "Try the radio, or send a team.",
+        )
+
+    check_id = f"ask-{uuid.uuid4().hex[:12]}"
+    low_batt = bool(state["low_battery"])
+    if (row.get("status") or "") == "trapped" and not row.get("rescued_at"):
+        # Already on the board asking for help. The right question for them
+        # is "has anything changed?", which is the re-check prompt they
+        # already know — not "are you all right?".
+        from apns import send_recheck_prompts as _send_recheck
+        result = await _send_recheck(
+            db,
+            [{"user_id": device_id, "device_token": dev["device_token"],
+              "check_id": check_id}],
+            title="Are you still OK?",
+            body="No new earthquake. Please tap to tell us how you are.",
+            idempotency_key=check_id,
+            battery_saving=low_batt,
+        )
+    else:
+        # #271: ordinary notification, ordinary sound, no siren, no Focus
+        # breach, and "No new earthquake" as the first words they read.
+        from apns import send_check_in_request as _send_ask
+        result = await _send_ask(
+            db,
+            {"user_id": device_id, "device_token": dev["device_token"],
+             "check_id": check_id},
+            idempotency_key=check_id,
+            battery_saving=low_batt,
+        )
+    sent = any((e.get("status_code") or 0) == 200 for e in (result.get("events") or []))
+    now_iso = _iso(now)
+    who = audit_attribution(principal)
+
+    await db.device_status.update_one(
+        {"device_id": device_id},
+        {"$set": {
+            "asks": {
+                "count": int(asks.get("count") or 0) + (1 if sent else 0),
+                "unanswered": unanswered + (1 if sent else 0),
+                "last_at": now_iso if sent else asks.get("last_at"),
+                "last_by": who,
+                "last_check_id": check_id,
+            },
+        }},
+    )
+    await db.record_decisions.insert_one({
+        "device_id": device_id,
+        "kind": "asked_to_check_in",
+        "reason": (
+            f"Asked {code} to check in."
+            + ("" if sent else " The message did not get through.")
+        ),
+        "answered": False,
+        "check_id": check_id,
+        "decided_by": who,
+        "decided_at": now_iso,
+    })
+
+    if not sent:
+        raise HTTPException(
+            502,
+            f"We could not get a message through to {code} just now. "
+            "Nothing was lost — try again in a moment, or use the radio.",
+        )
+    return {
+        "status": "ok",
+        "device_id": device_id,
+        "asked_at": now_iso,
+        "asked_by": who,
+        "message": (
+            f"Asked {code} to check in. If they answer, their card will "
+            "update. If they do not, the card will say we asked and heard "
+            "nothing."
+        ),
+    }
+
+
+def _parse_iso_or_none_safe(s):
+    try:
+        from timefmt import parse as _p
+        return _p(s)
+    except Exception:
+        return None
+
+
 @api_router.post("/mark-rescued")
 async def mark_rescued(
     payload: dict = Body(...),
@@ -2853,6 +3106,80 @@ class StandDownBody(BaseModel):
 STAND_DOWN_CONFIRMATION = "STANDDOWN"
 
 
+async def _stand_down_split() -> Dict[str, Any]:
+    """Who a stand-down clears, and who is deliberately left on the board.
+
+    Paul, 2026-08-21: "A stand-down must only clear the people who said
+    they were safe. Anyone still asking for help stays, and you must show
+    me exactly who is being left behind before I confirm."
+
+    Before this, the stand-down push went to EVERY registered phone —
+    including a trapped person's, whose check-in screen would be replaced
+    by a calm "alert called off" message while they were still waiting for
+    a team. That is the same class of failure as the phantom casualty:
+    the board and the phone quietly disagreeing with the truth.
+
+    "Asking for help" = effective status `trapped` (rescued wins over
+    trapped in people_counts.effective_status, so someone already marked
+    rescued is cleared like anyone else). Help history alone does NOT keep
+    a phone out of the clear list — a person who reported trapped and has
+    since reported safe is safe.
+    """
+    from people_counts import load_board
+    import timefmt
+
+    board = await load_board(db, include_test=True)
+    staying_rows = [
+        r for r in board.board
+        if (r.get("effective_status") == "trapped") or r.get("needs_extraction")
+    ]
+    staying_ids = {str(r.get("device_id")) for r in staying_rows}
+
+    devices = await db.push_devices.find(
+        {"dead_token": {"$ne": True}},
+        {"_id": 0, "user_id": 1, "device_token": 1, "platform": 1},
+    ).to_list(20000)
+    ios_all = [
+        d for d in devices
+        if (d.get("platform") or "").lower() == "ios" and d.get("device_token")
+    ]
+    clearing = [
+        {"user_id": d.get("user_id") or "", "device_token": d.get("device_token") or ""}
+        for d in ios_all
+        if str(d.get("user_id") or "") not in staying_ids
+    ]
+    held_back = [d for d in ios_all if str(d.get("user_id") or "") in staying_ids]
+
+    def _person(r: Dict[str, Any]) -> Dict[str, Any]:
+        sev = (r.get("severity") or "").lower()
+        sev_words = {
+            "red": "Badly hurt",
+            "yellow": "Hurt",
+            "green": "Not hurt, but stuck",
+        }.get(sev, "Asked for help")
+        return {
+            "device_id": str(r.get("device_id")),
+            "name": r.get("display_name") or "No name given",
+            "code": r.get("short_code"),
+            "words": sev_words,
+            "last_heard": timefmt.human(r.get("updated_at")),
+            "battery_pct": r.get("battery_pct"),
+        }
+
+    people = sorted(
+        (_person(r) for r in staying_rows),
+        key=lambda p: {"Badly hurt": 0, "Hurt": 1}.get(p["words"], 2),
+    )
+    return {
+        "clearing": clearing,
+        "clearing_count": len(clearing),
+        "staying_count": len(staying_rows),
+        "staying_people": people,
+        "staying_phones_held_back": len(held_back),
+        "total_phones": len(ios_all),
+    }
+
+
 @api_router.post("/admin/alert/stand-down")
 async def alert_stand_down(
     body: StandDownBody,
@@ -2891,15 +3218,13 @@ async def alert_stand_down(
             ),
         )
 
-    devices = await db.push_devices.find(
-        {"dead_token": {"$ne": True}},
-        {"_id": 0, "user_id": 1, "device_token": 1, "platform": 1},
-    ).to_list(20000)
-    ios = [
-        {"user_id": d.get("user_id") or "", "device_token": d.get("device_token") or ""}
-        for d in devices
-        if (d.get("platform") or "").lower() == "ios" and d.get("device_token")
-    ]
+    # #274 (2026-08-21 — Paul): the stand-down used to go to every phone,
+    # so a person who had reported they were trapped had their check-in
+    # screen replaced with "the alert has been called off" while they were
+    # still waiting for a team. Only people who are NOT asking for help
+    # are cleared now. See _stand_down_split for the rule.
+    split = await _stand_down_split()
+    ios = split["clearing"]
 
     idempotency_key = f"stand-down-{uuid.uuid4().hex}"
     from apns import send_stand_down as _send_stand_down
@@ -2925,12 +3250,20 @@ async def alert_stand_down(
         "apns_payload": stand_result.get("payload"),
         "confirmation_expected": STAND_DOWN_CONFIRMATION,
         "confirmation_typed": body.confirmation_phrase or "",
+        # #274: the exact split, in the record, so an inquiry can see who
+        # was cleared and who was deliberately left on the working board.
+        "cleared_count": len(ios),
+        "kept_on_board_count": split["staying_count"],
+        "kept_on_board": split["staying_people"],
     })
 
     return {
         "ok": True,
         "recipients": len(ios),
         "reason": body.reason or "false_alarm",
+        "cleared_count": len(ios),
+        "kept_on_board_count": split["staying_count"],
+        "kept_on_board": split["staying_people"],
     }
 
 
@@ -2939,15 +3272,21 @@ async def alert_stand_down_preview(
     request: Request,
     x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
 ):
-    """Count the operator sees before confirming a stand-down.
+    """What the operator is shown before they confirm a stand-down.
 
-    Same shape as /trigger-alert/preview so the dashboard modal has
-    one code path for both."""
+    #274: a bare total was not enough. The dialog must name the people who
+    stay on the working board, because standing an incident down while
+    somebody is still asking for help is the single most costly mistake
+    an operator can make on this screen.
+    """
     principal = await resolve_principal(request, x_admin_token, ADMIN_TRIGGER_PASSWORD, db)
     require_role(principal, "admin", "operator")
-    ios = await db.push_devices.count_documents({"platform": "ios"})
+    split = await _stand_down_split()
     return {
-        "total": ios,
+        "total": split["total_phones"],
+        "clearing_count": split["clearing_count"],
+        "staying_count": split["staying_count"],
+        "staying_people": split["staying_people"],
         "confirmation_phrase": STAND_DOWN_CONFIRMATION,
     }
 

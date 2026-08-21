@@ -380,8 +380,26 @@ export default function RootLayout() {
       const kind = String(data.kind || data.type || "").trim();
       const actionUrl = typeof data.action_url === "string" ? data.action_url : "";
       const hasCheckId = data.check_id != null && String(data.check_id).length > 0;
+      // #273 sweep: `check_id` is the one presence test kept, and it is
+      // now fenced. Only re-check prompts carry a check_id (apns.py
+      // send_recheck_prompts), and the failure direction is safe — it
+      // routes a trapped person to the screen where they can answer, and
+      // it can never start the siren. But it must never be able to
+      // capture a notification that has already said what it is, so any
+      // payload carrying a DIFFERENT explicit kind is excluded outright.
+      const NON_RECHECK_KINDS = [
+        "critical_alert", "emsc_preview", "tremor_notice",
+        "quakeguard-reminder", "alert_stood_down", "incident_closed",
+        "cancel_reminders",
+        // #271: an operator's check-in request carries a check_id too, but
+        // it belongs on the calm check-in screen, not the four-button
+        // "has anything changed?" screen for someone already trapped.
+        "check_in_request",
+      ];
       const looksLikeRecheck =
-        kind === "recheck" || actionUrl === "/recheck" || hasCheckId;
+        kind === "recheck" ||
+        actionUrl === "/recheck" ||
+        (hasCheckId && !NON_RECHECK_KINDS.includes(kind));
       const unid = data.unid ? String(data.unid) : null;
 
       // Re-check prompt (C1). Tapping the BODY opens the four-button screen;
@@ -405,35 +423,62 @@ export default function RootLayout() {
       // The `siren=1` param signals the alert screen that it should play
       // the siren on mount. Missing `siren=1` = no siren (fail-safe).
       //
-      // #208 (R4 defence-in-depth, 2026-08-19): a critical earthquake
-      // alert MUST reach the check-in screen. Symmetric with the recheck
-      // guard above: we route to /alert if ANY of these are true —
-      //   - kind === "critical_alert"
-      //   - action_url === "/alert"
-      //   - a magnitude field is present (only earthquake alerts carry it
-      //     at the top level of the payload — see _build_critical_payload
-      //     in backend/apns.py)
-      // Falling through to the seismic detail screen when someone has
-      // been sirened awake is exactly the failure Paul screenshotted on
-      // build 130.
-      const hasMagnitude = data.magnitude != null && data.magnitude !== "";
-      const looksLikeAlert =
-        kind === "critical_alert" || actionUrl === "/alert" || hasMagnitude;
-      if (looksLikeAlert) {
+      // #273 (2026-08-21 — Paul, verified live on production): THE SIREN
+      // MUST BE ROUTED ON WHAT THE NOTIFICATION SAYS IT IS, NEVER ON WHAT
+      // FIELDS HAPPEN TO BE PRESENT.
+      //
+      // What happened: Paul tapped a "PREVIEW · Seismic activity" notice
+      // whose own text said "Test notification, no action needed" and got
+      // the full red EARTHQUAKE DETECTED screen with the siren playing.
+      //
+      // His diagnosis was exactly right. The rule below used to be:
+      //     kind === "critical_alert" || action_url === "/alert" || hasMagnitude
+      // and preview payloads DO carry a magnitude (apns.py
+      // _build_preview_payload). It only ever looked safe because iOS was
+      // delivering empty data — the #208 payload fix made the data arrive,
+      // so every preview tap started matching on magnitude. The presence
+      // test was unsafe from the day it was written; broken data was
+      // hiding it.
+      //
+      // Why this is not cosmetic: the critical-alert entitlement is
+      // granted for genuine emergencies (#207). Sirening a routine notice
+      // risks losing it, and without it the app cannot wake a locked
+      // silenced phone — which is the entire product. It also teaches
+      // people to distrust the siren. Same fault as #109, by a new route.
+      //
+      // The rule now:
+      //   * kind === "critical_alert"  → /alert, siren ON. Nothing else
+      //     may turn the siren on, ever.
+      //   * no kind at all AND action_url === "/alert" → /alert, siren
+      //     OFF. Routing is preserved for a malformed real alert (that is
+      //     the #208 guarantee) but the siren is withheld, because a
+      //     missed siren is recoverable and a false siren is not.
+      //   * any other kind → never the alert screen, whatever fields the
+      //     payload happens to carry.
+      // `magnitude` is no longer consulted for routing anywhere.
+      const isCriticalAlert = kind === "critical_alert";
+      const isUnlabelledAlertRoute = kind === "" && actionUrl === "/alert";
+      if (isCriticalAlert || isUnlabelledAlertRoute) {
         // Persist the alert as "unanswered" so opening the app later —
         // via the home screen, not the notification — still lands the
         // person on the check-in screen. Cleared when they submit safe
         // or trapped. Non-blocking.
-        markAlertActive({
-          kind: "critical_alert",
-          magnitude: data.magnitude != null ? Number(data.magnitude) : null,
-          distance_km: data.distance_km != null ? Number(data.distance_km) : null,
-          intensity: data.intensity != null ? String(data.intensity) : null,
-          region: data.region != null ? String(data.region) : null,
-          unid: data.unid != null ? String(data.unid) : null,
-        }).catch(() => {});
+        //
+        // #273: ONLY a genuine critical alert may write this. Before the
+        // fix, a preview tap wrote it too, so the phone went on forcing
+        // the check-in screen for an incident that never existed.
+        if (isCriticalAlert) {
+          markAlertActive({
+            kind: "critical_alert",
+            magnitude: data.magnitude != null ? Number(data.magnitude) : null,
+            distance_km: data.distance_km != null ? Number(data.distance_km) : null,
+            intensity: data.intensity != null ? String(data.intensity) : null,
+            region: data.region != null ? String(data.region) : null,
+            unid: data.unid != null ? String(data.unid) : null,
+          }).catch(() => {});
+        }
         const params = new URLSearchParams();
-        params.set("siren", "1");
+        params.set("siren", isCriticalAlert ? "1" : "0");
         if (data.magnitude != null)   params.set("magnitude", String(data.magnitude));
         if (data.distance_km != null) params.set("distance_km", String(data.distance_km));
         if (data.intensity != null)   params.set("intensity", String(data.intensity));
@@ -441,6 +486,24 @@ export default function RootLayout() {
         if (data.region != null)      params.set("region", String(data.region));
         if (data.unid != null)        params.set("unid", String(data.unid));
         const route = "/alert?" + params.toString();
+        logChoice(route);
+        router.push(route as any);
+        return;
+      }
+
+      // #271: an operator pressed "Ask them to check in". This is NOT an
+      // alert — nothing has happened. It opens the same check-in screen,
+      // with the same I'M SAFE / I NEED HELP buttons and the same submit
+      // path (so a help report from here reaches the working board exactly
+      // as one made during an alert), but in its calm form and with the
+      // siren firmly off. It never writes the unanswered-alert marker:
+      // there is no incident to force anyone back to.
+      if (kind === "check_in_request") {
+        const p = new URLSearchParams();
+        p.set("siren", "0");
+        p.set("checkin", "1");
+        if (data.check_id != null) p.set("check_id", String(data.check_id));
+        const route = "/alert?" + p.toString();
         logChoice(route);
         router.push(route as any);
         return;

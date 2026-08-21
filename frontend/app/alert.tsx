@@ -48,9 +48,11 @@ import {
   scheduleCheckInReminders,
 } from "@/src/utils/reminders";
 import { clearActiveAlert } from "@/src/utils/activeAlert";
-import { resolveEventReadings } from "@/src/utils/eventReadings";
+import { resolveEventReadings, roundDistanceKm } from "@/src/utils/eventReadings";
 
 const SIREN_SOURCE = require("../assets/audio/siren.mp3");
+
+
 
 type Status = "idle" | "sending" | "sent" | "error";
 type OutcomeKind = "safe" | "trapped";
@@ -71,6 +73,10 @@ export default function AlertScreen() {
     unid?: string;
     siren?: string;
     reminder?: string;
+    // #271: an operator pressed "Ask them to check in". Same screen, same
+    // buttons, same submit path as a real alert — but nothing on it may
+    // suggest a new earthquake has happened, because none has.
+    checkin?: string;
     test?: string;
     rehearse?: string;
   }>();
@@ -96,6 +102,15 @@ export default function AlertScreen() {
   // an earlier alert" without changing the tap-routing contract.
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const isReminderContext = params.reminder === "1";
+  // #271 (2026-08-21 — Paul): "Someone tapping that notification is
+  // anxious. The screen they land on must say plainly, before anything
+  // else: no new earthquake." So this screen keeps every one of its
+  // check-in controls — I'M SAFE, I NEED HELP, the triage sheets, the
+  // same submit — and replaces ONLY the earthquake framing: no red, no
+  // EARTHQUAKE DETECTED, no Drop-Cover-Hold-on, no magnitude strip.
+  // A help report from here is a real report and lands on the working
+  // board exactly as one made during an alert (same submitCheckIn call).
+  const isCheckInRequest = params.checkin === "1";
   const insets = useSafeAreaInsets();
   // Short-screen mode (batch 5, B2). iPhone SE/mini class devices can't fit
   // the 220pt pulse graphic + 40pt headline + data strip + two large action
@@ -318,7 +333,11 @@ export default function AlertScreen() {
       // gone. Silent auto-nav in a stress situation reads as a bug.
       if (event && event.stood_down) {
         shouldPlayRef.current = false;
-        try { sirenPlayer.stop(); } catch { /* non-fatal */ }
+        try {
+          sirenPlayer.loop = false;
+          sirenPlayer.volume = 0;
+          sirenPlayer.pause();
+        } catch { /* non-fatal */ }
         setStoodDown({
           reason:
             typeof event.stood_down_reason === "string"
@@ -809,9 +828,13 @@ export default function AlertScreen() {
     <View style={styles.root} testID="alert-screen">
       <StatusBar style="light" />
 
-      {/* Red gradient background */}
+      {/* Red gradient background — calm blue instead when this is only a
+          check-in request (#271). Colour never carries the meaning on its
+          own: the words above say it too. */}
       <LinearGradient
-        colors={["#3B0A08", "#7A0E10", "#3B0A08", "#0F1115"]}
+        colors={isCheckInRequest
+          ? ["#0B1220", "#132038", "#101A2C", "#0F1115"]
+          : ["#3B0A08", "#7A0E10", "#3B0A08", "#0F1115"]}
         locations={[0, 0.35, 0.7, 1]}
         style={StyleSheet.absoluteFill}
       />
@@ -819,8 +842,10 @@ export default function AlertScreen() {
       <SafeAreaView edges={["top", "bottom"]} style={styles.content}>
         {/* Top banner */}
         <View style={styles.topBanner}>
-          <View style={styles.liveDot} />
-          <Text style={styles.liveText}>LIVE ALERT · {mm}:{ss}</Text>
+          {!isCheckInRequest && <View style={styles.liveDot} />}
+          <Text style={styles.liveText}>
+            {isCheckInRequest ? "CHECK-IN REQUEST" : `LIVE ALERT · ${mm}:${ss}`}
+          </Text>
         </View>
 
         {/* Aftershock notice. Deliberately a NOTICE, not a navigation: the
@@ -865,24 +890,44 @@ export default function AlertScreen() {
             number were visible). `overflow: hidden` is the belt-and-braces
             guarantee that nothing from here can ever paint over the strip. */}
         <View style={styles.center}>
-          <View style={[styles.pulseWrap, compact && styles.pulseWrapCompact]}>
-            <Animated.View style={[styles.pulseRing, ringStyle]} />
-            <Animated.View style={[styles.pulseRing, styles.pulseRingInner, ringStyle]} />
-            <Animated.View
-              style={[styles.iconBubble, compact && styles.iconBubbleCompact, iconStyle]}
-            >
-              <Ionicons
-                name="warning"
-                size={compact ? 48 : 72}
-                color={colors.onBrandPrimary}
-              />
-            </Animated.View>
-          </View>
+          {isCheckInRequest ? (
+            /* #271: reassurance first, question second, nothing else.
+               "No new earthquake" is the FIRST thing on the screen,
+               because a person opening an earthquake app fears the
+               worst for a second before they read on. */
+            <View style={styles.checkinPanel} testID="checkin-request-panel">
+              <View style={styles.checkinBadge}>
+                <Ionicons name="heart-outline" size={44} color="#BFD3F2" />
+              </View>
+              <Text style={styles.checkinLead}>No new earthquake.</Text>
+              <Text style={styles.checkinLead}>
+                We are just checking how you are.
+              </Text>
+              <Text style={styles.checkinHeading}>Are you all right?</Text>
+              <Text style={styles.checkinBody}>
+                Tap one button below. That is all we need.
+              </Text>
+            </View>
+          ) : (
+            <>
+              <View style={[styles.pulseWrap, compact && styles.pulseWrapCompact]}>
+                <Animated.View style={[styles.pulseRing, ringStyle]} />
+                <Animated.View style={[styles.pulseRing, styles.pulseRingInner, ringStyle]} />
+                <Animated.View
+                  style={[styles.iconBubble, compact && styles.iconBubbleCompact, iconStyle]}
+                >
+                  <Ionicons
+                    name="warning"
+                    size={compact ? 48 : 72}
+                    color={colors.onBrandPrimary}
+                  />
+                </Animated.View>
+              </View>
 
-          <Text style={[styles.heading, compact && styles.headingCompact]}>
-            EARTHQUAKE{"\n"}DETECTED
-          </Text>
-          {/* #253 (Batch 7 R4): the two-sentence safety instruction was
+              <Text style={[styles.heading, compact && styles.headingCompact]}>
+                EARTHQUAKE{"\n"}DETECTED
+              </Text>
+              {/* #253 (Batch 7 R4): the two-sentence safety instruction was
               rendered with a hard `\n` inside a single <Text>, and when
               the aftershock banner pushed the layout down "stops" got
               clipped — turning "move to open space WHEN SHAKING STOPS"
@@ -906,29 +951,34 @@ export default function AlertScreen() {
               `adjustsFontSizeToFit`, never a bare `numberOfLines` that
               can cut a word off. See #253 sweep list below in this
               file's comment. */}
-          <View style={styles.safetyInstruction}>
-            <Text
-              style={[styles.subheading, compact && styles.subheadingCompact]}
-              numberOfLines={1}
-              adjustsFontSizeToFit
-              minimumFontScale={0.7}
-              accessibilityRole="text"
-            >
-              Drop. Cover. Hold on.
-            </Text>
-            <Text
-              style={[styles.subheading, compact && styles.subheadingCompact, styles.safetyInstructionSecond]}
-              numberOfLines={2}
-              adjustsFontSizeToFit
-              minimumFontScale={0.7}
-              accessibilityRole="text"
-            >
-              Move to open space when shaking stops.
-            </Text>
-          </View>
+              <View style={styles.safetyInstruction}>
+                <Text
+                  style={[styles.subheading, compact && styles.subheadingCompact]}
+                  numberOfLines={1}
+                  adjustsFontSizeToFit
+                  minimumFontScale={0.7}
+                  accessibilityRole="text"
+                >
+                  Drop. Cover. Hold on.
+                </Text>
+                <Text
+                  style={[styles.subheading, compact && styles.subheadingCompact, styles.safetyInstructionSecond]}
+                  numberOfLines={2}
+                  adjustsFontSizeToFit
+                  minimumFontScale={0.7}
+                  accessibilityRole="text"
+                >
+                  Move to open space when shaking stops.
+                </Text>
+              </View>
+            </>
+          )}
         </View>
 
-        {/* Data strip — own row, never overlapped by the buttons below. */}
+        {/* Data strip — own row, never overlapped by the buttons below.
+            Hidden for a check-in request: there is no event to describe,
+            and empty readings would read as missing data (#205 rule 9.4). */}
+        {!isCheckInRequest && (
         <View style={styles.metricsRow}>
           <View style={styles.metric}>
             <Text style={[styles.metricLabel, compact && styles.metricLabelCompact]}>
@@ -945,7 +995,8 @@ export default function AlertScreen() {
             </Text>
             <Text style={styles.metricValue} numberOfLines={1} adjustsFontSizeToFit>
               {eventReadings.distance_km != null ? (
-                <>{eventReadings.distance_km}<Text style={styles.metricUnit}>km</Text></>
+                <>{roundDistanceKm(eventReadings.distance_km)}
+                  <Text style={styles.metricUnit}>km</Text></>
               ) : "—"}
             </Text>
           </View>
@@ -954,11 +1005,22 @@ export default function AlertScreen() {
             <Text style={[styles.metricLabel, compact && styles.metricLabelCompact]}>
               INTENSITY
             </Text>
-            <Text style={styles.metricValue} numberOfLines={1} adjustsFontSizeToFit>
-              {eventReadings.intensity ?? "—"}
+            {/* #273 (2026-08-21 — Paul): a bare dash beside a filled-in
+                magnitude and distance reads like a missing reading. EMSC
+                often publishes no intensity at all for small or distant
+                events. Say that, in words, rather than showing nothing
+                and calling it data (#205, rule 9.4). */}
+            <Text
+              style={[styles.metricValue,
+                      eventReadings.intensity == null && styles.metricValueMissing]}
+              numberOfLines={2}
+              adjustsFontSizeToFit
+            >
+              {eventReadings.intensity ?? "Not reported"}
             </Text>
           </View>
         </View>
+        )}
 
         {/* Bottom action */}
         <View style={[styles.bottomWrap, { paddingBottom: Math.max(insets.bottom, spacing.md) }]}>
@@ -1103,11 +1165,22 @@ export default function AlertScreen() {
               behaviour matches the wording on the dashboard exactly. */}
           {status !== "sent" && !stoodDown && (
             <Text style={styles.unansweredNote} testID="alert-unanswered-note">
-              If you don&apos;t answer, we mark you as{" "}
-              <Text style={styles.unansweredNoteBold}>not responding</Text>
-              {" "}— never as trapped. The siren stops when you tap I&apos;m
-              safe or I need help, when someone else calls off the alert, or
-              about a minute after it started if neither has happened.
+              {isCheckInRequest ? (
+                <>
+                  If you don&apos;t answer, we mark you as{" "}
+                  <Text style={styles.unansweredNoteBold}>not responding</Text>
+                  {" "}— never as trapped. There is no alert running and no
+                  siren. You can close this and answer later.
+                </>
+              ) : (
+                <>
+                  If you don&apos;t answer, we mark you as{" "}
+                  <Text style={styles.unansweredNoteBold}>not responding</Text>
+                  {" "}— never as trapped. The siren stops when you tap I&apos;m
+                  safe or I need help, when someone else calls off the alert, or
+                  about a minute after it started if neither has happened.
+                </>
+              )}
             </Text>
           )}
 
@@ -1429,6 +1502,43 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
+  // #271 check-in request: calm, short lines, one idea each.
+  checkinPanel: {
+    alignItems: "center",
+    paddingHorizontal: spacing.lg,
+    gap: 8,
+  },
+  checkinBadge: {
+    width: 88,
+    height: 88,
+    borderRadius: 44,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(191,211,242,0.12)",
+    marginBottom: spacing.md,
+  },
+  checkinLead: {
+    color: "#DCE6F7",
+    fontSize: 19,
+    lineHeight: 27,
+    fontWeight: "700",
+    textAlign: "center",
+  },
+  checkinHeading: {
+    color: "#FFFFFF",
+    fontSize: 30,
+    lineHeight: 36,
+    fontWeight: "900",
+    textAlign: "center",
+    marginTop: spacing.md,
+  },
+  checkinBody: {
+    color: "#9FB3D1",
+    fontSize: 16,
+    lineHeight: 23,
+    textAlign: "center",
+  },
+
   pulseWrap: {
     width: 220,
     height: 220,
@@ -1550,6 +1660,13 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: "600",
     color: "rgba(255,255,255,0.7)",
+  },
+  // #273: "Not reported" is a sentence, not a reading — it must not be
+  // styled like one, or the eye reads it as a value.
+  metricValueMissing: {
+    fontSize: 15,
+    fontWeight: "600",
+    color: "rgba(255,255,255,0.75)",
   },
   metricDivider: {
     width: 1,
