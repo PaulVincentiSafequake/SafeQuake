@@ -247,10 +247,14 @@ async def on_status_change(
     return raised
 
 
-async def sweep_silence(db, rows: List[Dict[str, Any]], now: Optional[datetime] = None) -> None:
+async def sweep_silence(db, rows: List[Dict[str, Any]], now: Optional[datetime] = None) -> List[Dict[str, Any]]:
     """Raise GONE_QUIET for anyone who asked for help and has stopped
     answering. Called while the board is being read, because silence is
     measured by the clock and nothing arrives to announce it.
+
+    Returns the people who are quiet but too old to sound (#306) — quiet
+    for a day does not mean resolved, and Paul's rule is that they must
+    never become wallpaper: "no sound, but they must never be invisible."
 
     `rows` are working-board rows that already carry `record_state` and
     `ever_needed_help` from record_state.classify — one classifier, so the
@@ -259,6 +263,7 @@ async def sweep_silence(db, rows: List[Dict[str, Any]], now: Optional[datetime] 
     from record_state import DARK, NO_ANSWER
 
     n = _now(now)
+    long_quiet: List[Dict[str, Any]] = []
     for r in rows:
         try:
             if not r.get("ever_needed_help"):
@@ -276,15 +281,24 @@ async def sweep_silence(db, rows: List[Dict[str, Any]], now: Optional[datetime] 
             # on the working board, with their own card saying they are
             # quiet; they simply do not sound.
             fresh = False
+            quiet_hours = None
             try:
                 last = r.get("updated_at")
                 if last:
                     ts = datetime.fromisoformat(str(last).replace("Z", "+00:00"))
                     if ts.tzinfo is None:
                         ts = ts.replace(tzinfo=timezone.utc)
-                    fresh = (n - ts) <= timedelta(hours=24)
+                    quiet_hours = (n - ts).total_seconds() / 3600.0
+                    fresh = quiet_hours <= 24
             except Exception:
                 fresh = False
+            if state in (DARK, NO_ANSWER) and not fresh:
+                # #306: no sound, never invisible.
+                long_quiet.append({
+                    "device_id": device_id,
+                    "who": _who(r),
+                    "hours": int(quiet_hours) if quiet_hours is not None else None,
+                })
             if state in (DARK, NO_ANSWER) and fresh:
                 label = (r.get("record_state") or {}).get("label") or "has gone quiet"
                 await raise_alarm(
@@ -307,6 +321,17 @@ async def sweep_silence(db, rows: List[Dict[str, Any]], now: Optional[datetime] 
                 )
         except Exception as e:  # one bad row must never stop the sweep
             logging.warning(f"board_alarms sweep row failed: {e}")
+
+    # Stored so the strip can print it on every read without re-deriving it.
+    try:
+        await db.board_meta.update_one(
+            {"_id": "long_quiet"},
+            {"$set": {"people": long_quiet, "generated_at": _iso(n)}},
+            upsert=True,
+        )
+    except Exception as e:
+        logging.warning(f"board_alarms long-quiet write failed: {e}")
+    return long_quiet
 
 
 async def resolve_for_device(
@@ -364,6 +389,15 @@ async def list_open(db, now: Optional[datetime] = None) -> Dict[str, Any]:
         rows = []
 
     unacked = [r for r in rows if not r.get("ack_at")]
+    # #306 (Paul, 2026-08-23): "quiet for a day does not mean resolved...
+    # no sound, but they must never be invisible." A permanent line, always
+    # in view, whether or not anything is sounding.
+    long_quiet: List[Dict[str, Any]] = []
+    try:
+        meta = await db.board_meta.find_one({"_id": "long_quiet"}, {"_id": 0})
+        long_quiet = (meta or {}).get("people") or []
+    except Exception as e:
+        logging.warning(f"board_alarms long-quiet read failed: {e}")
     window_start = _iso(n - timedelta(minutes=FLOOD_WINDOW_MINUTES))
     recent = [r for r in rows if str(r.get("created_at") or "") >= window_start]
     flood = len(recent) > FLOOD_LIMIT
@@ -430,8 +464,20 @@ async def list_open(db, now: Optional[datetime] = None) -> Dict[str, Any]:
         out.append(g)
 
     out.sort(key=lambda g: str(g.get("at") or ""), reverse=True)
+    n_lq = len(long_quiet)
     return {
         "generated_at": _iso(n),
+        "long_quiet": {
+            "count": n_lq,
+            "words": (
+                (f"{n_lq} person asked for help and has been quiet for more than a day."
+                 if n_lq == 1 else
+                 f"{n_lq} people asked for help and have been quiet for more than a day.")
+                + " They are still on the board. They do not sound, because a day-old"
+                + " silence is not news — but they are still missing."
+            ) if n_lq else None,
+            "people": long_quiet,
+        },
         "unacknowledged": len(unacked),
         "open": len(rows),
         "flood": flood,

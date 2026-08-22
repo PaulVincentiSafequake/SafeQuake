@@ -3124,7 +3124,11 @@
           <span class="qg-annun-headline" id="qg-annun-headline"></span>
           <button type="button" class="qg-annun-mute" id="qg-annun-mute">Silence the sound for 5 minutes</button>
         </div>
-        <div class="qg-annun-note" id="qg-annun-note" hidden></div>
+          <div class="qg-annun-note" id="qg-annun-note" hidden></div>
+        <!-- #306: quiet for a day is not resolved. No sound, never
+             invisible — this line stays in view whether anything is
+             sounding or not. -->
+        <div class="qg-annun-note" id="qg-annun-quiet" hidden></div>
         <div id="qg-annun-rows"></div>
       </div>
       <!-- #297: any filter that is on must be obvious. An operator must
@@ -7908,6 +7912,26 @@ window.QuakeAngelRescue = (function () {
     }
     noteEl.hidden = notes.length === 0;
     noteEl.textContent = notes.join(" ");
+
+    // #306 — the day-old silences. Always in view, never a sound, and it
+    // names them on request so nobody has to scroll and notice.
+    var quietEl = document.getElementById("qg-annun-quiet");
+    var lq = (alarmData && alarmData.long_quiet) || {count: 0};
+    if (quietEl) {
+      if (lq.count > 0) {
+        quietEl.hidden = false;
+        quietEl.innerHTML = "<span>\u25A0 " + window.qgEsc(lq.words || "") + "</span>" +
+          '<details class="qg-alarm-names"><summary>Show me who (' + lq.count + ')</summary>' +
+          (lq.people || []).map(function (p) {
+            return "<div>" + window.qgEsc(p.who || "") +
+              (p.hours != null ? " — quiet for " + Math.floor(p.hours / 24) + " day" +
+                (Math.floor(p.hours / 24) === 1 ? "" : "s") : "") + "</div>";
+          }).join("") + "</details>";
+      } else {
+        quietEl.hidden = true;
+        quietEl.innerHTML = "";
+      }
+    }
     muteEl.textContent = muteLeft > 0
       ? "Turn the sound back on now"
       : "Silence the sound for 5 minutes";
