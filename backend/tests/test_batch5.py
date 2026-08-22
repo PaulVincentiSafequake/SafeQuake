@@ -274,9 +274,18 @@ class TestAppSideInvariants:
         # title is the only line a scanning reader reads, so the option that
         # generates the most notifications must not look like the quiet one.
         assert 'title: "Everything nearby — including tremors too small to feel"' in s
-        assert "Includes tremors you will not feel at all" in s
+        # 2026-08-21 wording round: the helper says the same fact in
+        # fewer words ("Includes tremors nobody felt."). The fact is what
+        # this test exists to pin, not the old sentence.
+        assert "Includes tremors nobody felt" in s
         # both protective statements survive
-        assert "always on and cannot be switched off" in s
+        # #280 (2026-08-22): that sentence was DELETED on purpose. It sat
+        # on the same screen as a banner saying the siren was off, and the
+        # two contradicted each other. One source now writes the sentence
+        # (readiness.sirenSentence), so the screen cannot disagree with
+        # itself or with the home screen.
+        assert "always on and cannot be switched off" not in s
+        assert "readiness.sirenSentence" in s
         assert "does not affect emergency alerts" in s
 
     def test_quake_detail_sentence_never_renders_a_gap(self):
@@ -405,20 +414,31 @@ class TestIssue169SirenPlaysOnTest:
     it.
     """
 
+    @staticmethod
+    def _code_only(src: str) -> str:
+        """Strip // comments and /* */ blocks. These tests pin what the app
+        DOES, and a bare `router.push("/alert")` quoted inside a comment
+        explaining the old bug is not the old bug coming back (2026-08-23)."""
+        import re
+        src = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
+        return "\n".join(
+            line for line in src.splitlines()
+            if not line.strip().startswith("//") and not line.strip().startswith("*")
+        )
+
     def test_home_test_trigger_passes_siren_and_test_params(self):
-        home = open("/app/frontend/app/index.tsx").read()
+        home = self._code_only(open("/app/frontend/app/index.tsx").read())
         assert 'router.push("/alert?siren=1&test=1")' in home
         # the bare push is what caused #169 — it must not come back
         assert 'router.push("/alert")' not in home
 
     def test_real_critical_alert_tap_still_sets_siren(self):
-        layout = open("/app/frontend/app/_layout.tsx").read()
-        # #208 R4 (Batch 7): the critical-alert branch broadened to
-        # accept ANY earthquake-alert-shaped payload (kind, action_url,
-        # or magnitude). The invariant this test locks — siren=1 on a
-        # real critical alert — must still hold after that broadening.
-        crit = layout.split('if (looksLikeAlert) {')[1].split("return;")[0]
-        assert 'params.set("siren", "1")' in crit
+        layout = self._code_only(open("/app/frontend/app/_layout.tsx").read())
+        # 2026-08-23: the branch was reshaped again (#273 split preview
+        # taps from real alerts), so the test now pins the invariant
+        # itself rather than a block that keeps being renamed: the siren
+        # param is decided by `isCriticalAlert` and by nothing else.
+        assert 'params.set("siren", isCriticalAlert ? "1" : "0");' in layout
 
     def test_test_run_plays_siren_but_arms_no_reminders(self):
         alert = open("/app/frontend/app/alert.tsx").read()
@@ -599,12 +619,13 @@ class TestBuildIdentification:
         # from `info.app_version` — so all three version rows on the
         # Diagnostics card are guaranteed to agree.
         #
-        # v1.0.40 (2026-08-20, Paul): marker updated for the #208 probe
-        # build — the diag screen now describes the mobile tap probe
-        # (which is what this specific IPA carries) rather than the
-        # earlier "#208 R4" symptom-fix wording. Test still catches a
-        # stale IPA — just against the current fix marker.
-        assert "#208 mobile probe" in diag
+        # v1.0.44 (2026-08-23, Paul): marker updated for the board-and-
+        # readiness build. The point of the test is unchanged — a
+        # hard-coded description that has to be rewritten per build, so a
+        # stale IPA on a phone is visible on the phone itself. Asserting
+        # on the CURRENT build's marker is what makes that work; asserting
+        # on an old one only proves the string was never updated.
+        assert "the home screen now warns you" in diag
         # Batch 7 D (#252): the label was renamed from "fixes in this
         # build" to "What's fixed in it" when the Diagnostics screen
         # was rewritten human-first — either wording carries the

@@ -57,7 +57,10 @@ class TestButtonWording:
         # The surviving mentions are comments recording the change; what must
         # be gone is the rendered button label.
         assert """I'M TRAPPED / NEED HELP"}""" not in src
-        assert '"I NEED HELP"}' in src
+        # #283 (2026-08-22): sentence case everywhere. The agreed capitals
+        # exceptions are the triage category names and DROP. COVER. HOLD ON.
+        # — this button is neither, so the rendered label is "I need help".
+        assert '"I need help"}' in src
 
     def test_severity_options_are_unchanged_including_green(self):
         """Someone can genuinely need help while only lightly hurt."""
