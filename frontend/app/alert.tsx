@@ -48,6 +48,7 @@ import {
   scheduleCheckInReminders,
 } from "@/src/utils/reminders";
 import { clearActiveAlert } from "@/src/utils/activeAlert";
+import { recordHeardOnWrist } from "@/src/utils/watchReminder";
 import { resolveEventReadings, roundDistanceKm } from "@/src/utils/eventReadings";
 
 const SIREN_SOURCE = require("../assets/audio/siren.mp3");
@@ -111,6 +112,8 @@ export default function AlertScreen() {
   // A help report from here is a real report and lands on the working
   // board exactly as one made during an alert (same submitCheckIn call).
   const isCheckInRequest = params.checkin === "1";
+  // #286: only used on a practice run — where the siren actually came out.
+  const [wristAnswer, setWristAnswer] = useState<null | "phone" | "wrist">(null);
   const insets = useSafeAreaInsets();
   // Short-screen mode (batch 5, B2). iPhone SE/mini class devices can't fit
   // the 220pt pulse graphic + 40pt headline + data strip + two large action
@@ -538,9 +541,15 @@ export default function AlertScreen() {
     // For "trapped", stay on this screen — the user needs a persistent
     // "help is coming" confirmation, not an automatic redirect.
     if (outcome !== "safe") return;
+    // #286: never on a practice run. The practice run ends with a question
+    // only the person can answer — did the siren come out of the phone or
+    // the watch? — and an automatic bounce to home raced that panel and
+    // won, so the question could never be seen. A practice run now waits
+    // for them.
+    if (isTestRun) return;
     const nav = setTimeout(() => router.replace("/"), 1200);
     return () => clearTimeout(nav);
-  }, [status, outcome, router]);
+  }, [status, outcome, router, isTestRun]);
 
   const submitCheckIn = async (
     kind: OutcomeKind,
@@ -959,7 +968,7 @@ export default function AlertScreen() {
                   minimumFontScale={0.7}
                   accessibilityRole="text"
                 >
-                  Drop. Cover. Hold on.
+                  DROP. COVER. HOLD ON.
                 </Text>
                 <Text
                   style={[styles.subheading, compact && styles.subheadingCompact, styles.safetyInstructionSecond]}
@@ -1033,7 +1042,62 @@ export default function AlertScreen() {
           {status === "sent" && outcome === "safe" && (
             <View style={styles.successToast} testID="alert-success-toast">
               <Ionicons name="checkmark-circle" size={22} color={colors.onSuccess} />
-              <Text style={styles.successText}>Report received. Stay safe.</Text>
+              <Text style={styles.successText}>
+                {isTestRun
+                  ? "Practice finished. Nothing was sent to anyone."
+                  : "Your report has been sent."}
+              </Text>
+            </View>
+          )}
+          {/* #286 (2026-08-22 — Paul): "if the practice siren plays on the
+              Watch instead of the phone, the app has just discovered the
+              problem itself and should say so." We cannot detect where the
+              sound came out — iOS does not tell us, and WCSession needs a
+              watchOS app we do not have — so we ask the person, once, at
+              the only moment they can possibly know. Their answer restarts
+              the Watch reminder however they answered it before. */}
+          {isTestRun && status === "sent" && !wristAnswer && (
+            <View style={styles.wristAsk} testID="rehearsal-wrist-ask">
+              <Text style={styles.wristAskTitle}>
+                Where did the siren come from?
+              </Text>
+              <View style={styles.wristAskRow}>
+                <Pressable
+                  onPress={() => setWristAnswer("phone")}
+                  style={styles.wristAskBtn}
+                  testID="rehearsal-wrist-phone"
+                >
+                  <Ionicons name="phone-portrait" size={18} color="#0F1115" />
+                  <Text style={styles.wristAskBtnText}>My phone</Text>
+                </Pressable>
+                <Pressable
+                  onPress={async () => {
+                    setWristAnswer("wrist");
+                    await recordHeardOnWrist();
+                  }}
+                  style={styles.wristAskBtn}
+                  testID="rehearsal-wrist-watch"
+                >
+                  <Ionicons name="watch" size={18} color="#0F1115" />
+                  <Text style={styles.wristAskBtnText}>My watch</Text>
+                </Pressable>
+              </View>
+            </View>
+          )}
+          {isTestRun && wristAnswer === "wrist" && (
+            <View style={styles.wristWarn} testID="rehearsal-wrist-warning">
+              <Text style={styles.wristWarnText}>
+                Your watch took the sound, so your phone may stay quiet in a
+                real earthquake. Turn watch notifications for Quake Angel off.
+                We have put the reminder back on your home screen.
+              </Text>
+            </View>
+          )}
+          {isTestRun && wristAnswer === "phone" && (
+            <View style={styles.wristOk} testID="rehearsal-wrist-ok">
+              <Text style={styles.wristOkText}>
+                Good — your phone made the sound. That is what you want.
+              </Text>
             </View>
           )}
           {status === "sent" && outcome === "trapped" && (
@@ -1044,7 +1108,11 @@ export default function AlertScreen() {
               <Ionicons name="megaphone" size={28} color="#fff" />
               <View style={{ flex: 1 }}>
                 <Text style={styles.trappedToastText}>
-                  Rescuers alerted. Stay calm. Conserve battery.
+                  {/* #283: never imply somebody is watching the board. It
+                      says what happened and what to do next, nothing more. */}
+                  {isTestRun
+                    ? "Practice finished. Nothing was sent to anyone."
+                    : "Your report has been sent. Stay calm. Save your battery."}
                 </Text>
                 {chosenEgress ? (
                   <Text style={styles.trappedToastMeta} testID="trapped-egress-summary">
@@ -1121,10 +1189,10 @@ export default function AlertScreen() {
               />
               <Text style={styles.safeBtnText}>
                 {status === "sending" && outcome === "safe"
-                  ? "SENDING…"
+                  ? "Sending…"
                   : status === "sent" && outcome === "safe"
-                    ? "MARKED SAFE"
-                    : "I'M SAFE"}
+                    ? "Marked safe"
+                    : "I'm safe"}
               </Text>
             </Pressable>
           )}
@@ -1152,8 +1220,8 @@ export default function AlertScreen() {
               <Ionicons name="warning" size={22} color="#fff" />
               <Text style={styles.trappedBtnText}>
                 {status === "sending" && outcome === "trapped"
-                  ? "SENDING…"
-                  : "I NEED HELP"}
+                  ? "Sending…"
+                  : "I need help"}
               </Text>
             </Pressable>
           )}
@@ -1189,7 +1257,7 @@ export default function AlertScreen() {
               looks identical to silence on the dashboard. The only way off
               this screen is to answer (I'M SAFE / I NEED HELP). After a
               trapped report is confirmed, a plain "Back to home" remains. */}
-          {status === "sent" && outcome === "trapped" && (
+          {status === "sent" && (outcome === "trapped" || isTestRun) && (
             <Pressable
               onPress={() => {
                 stopSiren();
@@ -1491,7 +1559,6 @@ const styles = StyleSheet.create({
   liveText: {
     color: colors.onSurface,
     fontSize: 14,
-    letterSpacing: 3,
     fontWeight: "800",
   },
   center: {
@@ -1502,6 +1569,53 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
+  // #286 practice-run question: where did the sound come from?
+  wristAsk: {
+    marginTop: spacing.md,
+    padding: spacing.lg,
+    borderRadius: radius.lg,
+    backgroundColor: "rgba(255,255,255,0.08)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.2)",
+  },
+  wristAskTitle: {
+    color: "#FFFFFF",
+    fontSize: 16,
+    fontWeight: "700",
+    marginBottom: spacing.md,
+    textAlign: "center",
+  },
+  wristAskRow: { flexDirection: "row", gap: spacing.md },
+  wristAskBtn: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+    minHeight: 48,
+    borderRadius: radius.md,
+    backgroundColor: "#E7EDF5",
+  },
+  wristAskBtnText: { color: "#0F1115", fontSize: 15, fontWeight: "700" },
+  wristWarn: {
+    marginTop: spacing.md,
+    padding: spacing.lg,
+    borderRadius: radius.lg,
+    backgroundColor: "#4A0E0E",
+    borderWidth: 1,
+    borderColor: "#E64545",
+  },
+  wristWarnText: { color: "#FFE1E1", fontSize: 15, lineHeight: 22 },
+  wristOk: {
+    marginTop: spacing.md,
+    padding: spacing.lg,
+    borderRadius: radius.lg,
+    backgroundColor: "#0F2818",
+    borderWidth: 1,
+    borderColor: "#1F8A3A",
+  },
+  wristOkText: { color: "#B3E5C4", fontSize: 15, lineHeight: 22 },
+
   // #271 check-in request: calm, short lines, one idea each.
   checkinPanel: {
     alignItems: "center",
@@ -1587,14 +1701,12 @@ const styles = StyleSheet.create({
     color: colors.onSurface,
     fontSize: 40,
     fontWeight: "900",
-    letterSpacing: 3,
     textAlign: "center",
     lineHeight: 44,
   },
   headingCompact: {
     fontSize: 30,
     lineHeight: 34,
-    letterSpacing: 2,
   },
   subheading: {
     marginTop: spacing.md,
@@ -1642,19 +1754,16 @@ const styles = StyleSheet.create({
   metricLabel: {
     color: "rgba(255,255,255,0.65)",
     fontSize: 12,
-    letterSpacing: 1.5,
     fontWeight: "700",
     marginBottom: 4,
   },
   metricLabelCompact: {
     fontSize: 10,
-    letterSpacing: 0.3,
   },
   metricValue: {
     color: colors.onSurface,
     fontSize: 28,
     fontWeight: "900",
-    letterSpacing: 1,
   },
   metricUnit: {
     fontSize: 14,
@@ -1727,7 +1836,6 @@ const styles = StyleSheet.create({
     color: "#EAF7F0",
     fontSize: 20,
     fontWeight: "800",
-    letterSpacing: 0.3,
   },
   stoodDownBody: {
     marginTop: 6,
@@ -1751,7 +1859,6 @@ const styles = StyleSheet.create({
     color: "#0B1F16",
     fontSize: 16,
     fontWeight: "800",
-    letterSpacing: 0.3,
   },
 
   safeBtn: {
@@ -1775,7 +1882,6 @@ const styles = StyleSheet.create({
     color: colors.onSuccess,
     fontSize: 22,
     fontWeight: "900",
-    letterSpacing: 3,
   },
   dismissBtn: {
     alignItems: "center",
@@ -1785,7 +1891,6 @@ const styles = StyleSheet.create({
     color: "rgba(255,255,255,0.7)",
     fontSize: 15,
     fontWeight: "700",
-    letterSpacing: 1,
   },
   // #250 (Batch 7 D1): "if you don't answer" note. Small enough not
   // to compete with the buttons, prominent enough to read at a
@@ -1822,7 +1927,6 @@ const styles = StyleSheet.create({
     color: "#fff",
     fontSize: 20,
     fontWeight: "900",
-    letterSpacing: 1.5,
     flexShrink: 1,
     textAlign: "center",
   },
@@ -1923,6 +2027,5 @@ const styles = StyleSheet.create({
     color: "rgba(255,255,255,0.75)",
     fontSize: 16,
     fontWeight: "700",
-    letterSpacing: 1,
   },
 });

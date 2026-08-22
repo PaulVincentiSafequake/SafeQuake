@@ -161,17 +161,17 @@ if (Platform.OS !== "web") {
   Notifications.setNotificationCategoryAsync(RECHECK_CATEGORY_ID, [
     {
       identifier: ACTION_RECHECK_WORSE,
-      buttonTitle: "WORSE",
+      buttonTitle: "Worse",
       options: { opensAppToForeground: false },
     },
     {
       identifier: ACTION_RECHECK_MUCH_WORSE,
-      buttonTitle: "MUCH WORSE",
+      buttonTitle: "Much worse",
       options: { opensAppToForeground: false, isDestructive: true },
     },
     {
       identifier: ACTION_RECHECK_SAME,
-      buttonTitle: "SAME",
+      buttonTitle: "No change",
       options: { opensAppToForeground: false },
     },
   ]).catch(() => {});

@@ -2246,3 +2246,139 @@ ON: a recognised signal, not emphasis."
 
 Everything else stays sentence case. If a sweep is tempted to change one of
 the above, the answer is no — read this line instead.
+
+## 2026-08-22 — #280 to #287, after Paul's setup/settings/home review (v1.0.43)
+
+### #280 — the app contradicted itself about whether alerts were on (CAUSE)
+Red banner: "Critical Alerts turned OFF". Directly beneath, green panel:
+"Alerts for dangerous earthquakes are always on and cannot be switched off."
+Paul: "Both cannot be true, and the green one is the dangerous falsehood."
+
+THREE places each decided this for themselves: the banner read the live iOS
+permission, the green panel was a hard-coded sentence, and the tremor-preset
+helper text was a third hard-coded sentence. The duplication WAS the bug.
+`src/utils/readiness.ts` now owns it: one `sirenWillSound` boolean and one
+`sirenSentence`, and every screen prints those. Count of places that had
+asserted the false promise: **3** — settings panel, preset helper, and (a
+fourth, related) the Focus panel line "An earthquake alert is different. It
+always comes through."  All four now read the one source.
+A first attempt at this fix still left TWO conditions (the banner asked
+`!notifications || !critical`, the sentence asked the same but only
+`if (Platform.OS === "ios")`), and the live check caught the reassurance
+still printing under the warning. That is why `sirenWillSound` exists as a
+single computed boolean rather than a condition repeated per consumer.
+
+### #281 — a warning nobody would ever find
+"Someone who declined the permission at setup will never go to the
+Notifications screen. They will believe they are protected and they are not."
+`src/components/ReadinessBanner.tsx` is now the first thing on the home
+screen, above the rescue code, with NO dismiss control. It covers every
+state where the app cannot do its job, which is the wider rule Paul asked
+for: siren off, notifications refused entirely, location refused, and no
+successful contact with us for 12 hours. It never prints a reassurance — no
+problems found renders nothing, because "we found no problem" is not "you
+are protected".
+
+### #282 — the home layout, third recurrence (#209, #253, now this) — CAUSE
+The footer was `position: absolute` OVER the scroll area and the scroll area
+reserved room for it: first a magic number (#209), then a measured height
+(#253). Both are guesses about a box whose height depends on the system text
+size, and a guess one line short puts a red button on top of "Hold on".
+THE RULE NOW: a footer or header over scrollable text must be a flex
+sibling, never absolutely positioned. Absolute positioning is for decoration
+(glows, rings, gradients) and for overlays on a map canvas only.
+Screens checked: **10** (index, alert, onboarding, map, recheck, diag,
+quake/[unid], settings/notifications, settings/places, +html).
+Screens affected: **2** — index.tsx and onboarding.tsx. Both fixed by
+deleting the reserve, not by tuning it. The hero also had `height: 340`
+which clipped the rescue code under the status bar at large text; now
+`minHeight`. Verified live at 390x844 and 320x568, top/middle/bottom.
+
+### #284 — early-warning wording sweep
+"Hear it before it happens" → "Hear what a real alert sounds like".
+Places found and changed: **3** — that title, and the two tremor-preset
+lines that read as future tense ("Only what I'd likely feel" → "Only shakes
+I would have felt"; "tremors you will not feel" → "tremors nobody felt…
+already happened"). The dashboard, both PDFs and the map copy were swept and
+carried none.
+
+### #285 — setup split, one screen one decision
+Step 1 "Let the siren sound": how rare it is (Paul's words, verbatim on the
+rarity of Malta earthquakes), the siren and tremor notices are separate
+things and the notices can be switched off without touching the siren, and a
+heads-up that iPhone will ask twice and why. Step 2: the Apple Watch check,
+on its own. Step 3: the rehearsal.
+
+### #286 — the Apple Watch question. TECHNICAL ANSWER FIRST.
+Paul asked whether a paired Watch is detectable. It is not, from this app:
+`WCSession.isPaired` exists, but WCSession requires a companion watchOS
+target in the same bundle, and Quake Angel has no Watch app — every RN/Expo
+bridge (react-native-watch-connectivity, expo-watch-connectivity) depends on
+that target existing. There is no other public iOS API and no entitlement.
+Detection would mean building and shipping an actual Apple Watch app.
+So ROUTE B, as he specified: "I don't have one" is a 90-DAY SNOOZE, never
+permanent; we re-ask after any major iOS version change (that is when the
+mirroring toggle resets anyway); the reminder stays findable; and after the
+practice siren we ask "Where did the siren come from? My phone / My watch" —
+if they answer My watch, the app has discovered the problem itself, says so,
+and puts the reminder back whatever they answered before.
+All of it lives in `src/utils/watchReminder.ts`; home, settings and
+onboarding read it rather than each keeping their own copy of the rule.
+
+### #287 — "no tremor notices since yesterday" — WHAT THE LOGS ACTUALLY SAY
+Not the world being quiet, and not the feed. Production poller healthy, both
+providers, last poll seconds before I looked. Preview mode is on for his two
+devices with the 5,000 km test radius valid to 25 Aug. In the last 17 hours
+**8 tremor notices were sent to his phone**, most recently 11:13 Malta the
+same morning (M2.9, 2,805 km). The other 190 candidates were skipped for one
+honest reason: `beyond_country_radius`, 9,800–12,000 km away (Washington,
+Sulawesi, Nicaragua, Flores). So they were sent and Apple accepted them.
+Two reasons he may not have seen them, one of which was ours: they went out
+with `apns-expiration: 0` — attempt once, never store — the same fault as
+#276, now 20 minutes; and at `interruption-level: active` a Focus mode
+silences them into a collapsed group (#279, accepted).
+
+### #283 — plain language and capitals
+Removed: **40** `letterSpacing` declarations and every
+`textTransform: "uppercase"` in the app (0 remain in frontend/app and
+frontend/src). Sentence case on every button Paul listed plus the ones the
+sweep found: Marked safe, Sending…, Save, Skip, Remove my name, Practise the
+alert, Allow the siren, Play the practice siren, I have checked this, and the
+lock-screen re-check buttons (No change / Worse / Much worse / Better — "SAME"
+was code-speak in the same way he flagged in the history).
+Jargon replaced: "bypass the ringer switch and Focus/DND" → "The siren sounds
+even if your phone is on silent or set to Do Not Disturb"; "Uses Apple's push
+infrastructure for lowest latency" → "Arrives straight away, by the fastest
+route Apple provides"; "Same sound file used for a genuine earthquake alert"
+→ "The same siren you would hear in a real earthquake"; "DASHBOARD SHOWS" →
+"If you ask for help, this is what appears".
+Also caught and fixed while in there: the trapped confirmation said
+"Rescuers alerted", which breaks the standing rule about implying anyone is
+watching the board. It now says "Your report has been sent."
+Kept in capitals, per the agreed exception: DROP. COVER. HOLD ON. and the
+triage category names.
+
+### #7 — what happens when someone declines (answered plainly)
+Before: `registerForPushNotifications()` wrote a "permission_denied" note to
+storage and returned. Nothing on the home screen. The only warning was
+inside a settings screen they had no reason to open, and it only covered
+Critical Alerts being revoked later — not a plain refusal at setup.
+Now: the home banner says "Your phone will not sound the siren. Tap to fix
+this." permanently, tapping asks again if iOS still allows it and otherwise
+opens Settings, and the panel states in one line what to tap when it gets
+there — "Tap Notifications, then turn on Allow Notifications and Critical
+Alerts. iPhone does not let an app open that page directly." That last
+sentence is there because it is true: iOS has no public deep link to an
+app's notification settings page, so we say so rather than leaving someone
+hunting.
+
+### Verified live (rule 4a), not from source
+Home at 390x844 and 320x568 at top/middle/bottom; the three setup steps;
+the settings screen with BOTH boxes agreeing (checked with a temporary probe
+that forced the siren-off state on web, then reverted); the practice run
+stopping on the wrist question with the watch warning and a working Back to
+home; the red alert screen with readings and DROP. COVER. HOLD ON.; the calm
+check-in screen; and a real "I need help" report reaching /api/devices.
+Testing agent rounds 43 and 44: two regressions found in 43 (both mine —
+the caps exception and an auto-redirect that made the wrist question
+unreachable), both fixed and confirmed in 44. 32/32 backend tests pass.

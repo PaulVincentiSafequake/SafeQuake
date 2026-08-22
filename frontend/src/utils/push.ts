@@ -4,6 +4,8 @@ import * as Application from "expo-application";
 import { Platform } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
+import { markBackendContact } from "@/src/utils/readiness";
+
 import { getDeviceId } from "@/src/utils/checkin";
 
 const BACKEND_URL =
@@ -207,6 +209,8 @@ export async function registerForPushNotifications(): Promise<void> {
         }),
       });
       statusLabel = `HTTP ${resp.status}`;
+      // #281: registering successfully is a real round trip to us.
+      if (resp.ok) markBackendContact();
       // #266 / #260 (Neo, 2026-08-20 — Paul): if the server refused us
       // (any non-2xx), read the plain-English `detail` back so we can
       // show it verbatim on the Diag screen. Without this we'd have

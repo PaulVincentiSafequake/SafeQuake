@@ -819,6 +819,18 @@ async def send_preview_alerts(
                 payload=payload,
                 idempotency_key=idempotency_key,
                 apns_priority="5",   # regular / power-efficient delivery
+                # #287 (2026-08-22 — Paul: "no tremor notices since
+                # yesterday morning, check this is not our fault"). The feed
+                # was healthy and the notices WERE sent — but they went out
+                # with `apns-expiration: 0`, which tells Apple to attempt
+                # delivery once and never store it. At priority 5 Apple is
+                # also free to delay them. Delay plus "do not store" is how
+                # a notice disappears with a 200 on our side; the same fault
+                # as #276 on the check-in question and the re-checks.
+                # 20 minutes: long enough to survive a locked phone or a
+                # tunnel, short enough that a stale tremor notice can never
+                # pop up hours later as if it had just happened.
+                apns_expiration=str(int(time.time()) + 1200),
             )
 
     results = await asyncio.gather(*(_guarded(d) for d in devices))

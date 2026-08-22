@@ -844,8 +844,6 @@ const styles = StyleSheet.create({
     color: "#8a94a6",
     fontSize: 12,
     fontWeight: "600",
-    textTransform: "uppercase",
-    letterSpacing: 0.5,
     marginBottom: 8,
     marginLeft: 4,
   },

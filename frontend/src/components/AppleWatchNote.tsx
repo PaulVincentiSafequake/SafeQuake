@@ -113,7 +113,6 @@ const onboardingStyles = StyleSheet.create({
     color: colors.onSurface,
     fontSize: 18,
     fontWeight: "800",
-    letterSpacing: 0.3,
   },
   body: {
     color: colors.onSurfaceSecondary,
@@ -164,8 +163,6 @@ const onboardingStyles = StyleSheet.create({
     color: "#E28A2B",
     fontSize: 12,
     fontWeight: "800",
-    letterSpacing: 0.5,
-    textTransform: "uppercase",
     marginBottom: 4,
   },
   updateNoteText: {
@@ -252,8 +249,6 @@ const compactStyles = StyleSheet.create({
     color: "#E28A2B",
     fontSize: 11,
     fontWeight: "800",
-    letterSpacing: 0.5,
-    textTransform: "uppercase",
     marginBottom: 2,
   },
   updateNoteText: {

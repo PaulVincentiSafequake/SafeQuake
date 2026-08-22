@@ -44,8 +44,8 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
-import * as Notifications from "expo-notifications";
 import { getDeviceId } from "@/src/utils/checkin";
+import { useReadiness } from "@/src/utils/readiness";
 
 const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL ?? "";
 
@@ -69,19 +69,21 @@ const PRESET_OPTIONS: {
     value: "off",
     title: "Off",
     subtitle: "No tremor notifications",
-    helper: "You'll still receive critical earthquake alerts — those cannot be switched off.",
+    helper: "This only turns off the quiet tremor notices.",
   },
   {
     value: "noticeable",
-    title: "Only what I'd likely feel",
-    subtitle: "Tremors you'd probably notice",
-    helper: "Recommended. You'll hear about tremors strong enough that most people indoors would notice.",
+    // #284: every line here describes a tremor that has ALREADY happened.
+    // Nothing in this app may read as a warning ahead of an earthquake.
+    title: "Only shakes I would have felt",
+    subtitle: "Tremors most people would have noticed",
+    helper: "Recommended. You hear about a tremor after it happens, if it was strong enough that most people indoors would have felt it.",
   },
   {
     value: "everything",
     title: "Everything nearby — including tremors too small to feel",
     subtitle: "Every recorded tremor in the region",
-    helper: "Includes tremors you will not feel at all. Expect a few notifications a day.",
+    helper: "Includes tremors nobody felt. Each one is a shake that has already happened. Expect a few messages a day.",
   },
 ];
 
@@ -90,7 +92,9 @@ export default function NotificationSettingsScreen() {
   const [preset, setPreset] = useState<Choice>("noticeable");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState<Choice | null>(null);
-  const [criticalAlertsRevoked, setCriticalAlertsRevoked] = useState(false);
+  // #280: one source for every claim about the siren on this screen.
+  const readiness = useReadiness();
+  const sirenOff = !readiness.loading && !readiness.sirenWillSound;
 
   // Load current preset + check OS-level Critical Alerts permission.
   useEffect(() => {
@@ -112,18 +116,9 @@ export default function NotificationSettingsScreen() {
           }
         }
       } catch { /* offline is fine — keep default */ }
-      // Check OS-level notification permission and specifically whether
-      // Critical Alerts have been revoked. iOS-only concept.
-      try {
-        const perm = await Notifications.getPermissionsAsync();
-        // On iOS `allowsCriticalAlerts` reflects whether the user has
-        // toggled it OFF in iOS Settings even though we still have
-        // basic notification permission.
-        const iosPerm = (perm as any).ios;
-        if (iosPerm && iosPerm.allowsCriticalAlerts === false) {
-          setCriticalAlertsRevoked(true);
-        }
-      } catch { /* non-iOS or permissions API changed — quietly ignore */ }
+      // #280: the permission read used to live here as well. It does not
+      // any more — useReadiness() owns it, so this screen cannot drift from
+      // the home screen or from the panel three lines below.
       setLoading(false);
     })();
   }, []);
@@ -165,8 +160,12 @@ export default function NotificationSettingsScreen() {
 
       <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
 
-        {/* Critical-alerts sticky banner — persistent, non-dismissable */}
-        {criticalAlertsRevoked && (
+        {/* #280: this banner and the panel below it read the SAME source
+            (useReadiness). Before, the banner read the live iOS permission
+            and the panel printed a hard-coded promise, so the screen could
+            say "the siren is off" and "the siren cannot be switched off"
+            one under the other. */}
+        {sirenOff && (
           <TouchableOpacity
             style={styles.criticalBanner}
             onPress={() => Linking.openSettings()}
@@ -176,24 +175,29 @@ export default function NotificationSettingsScreen() {
             <Ionicons name="warning" size={22} color="#8A0F0F" />
             <View style={{flex: 1, marginLeft: 10}}>
               <Text style={styles.criticalBannerTitle}>
-                Critical Alerts turned OFF
+                Your phone will not sound the siren
               </Text>
               <Text style={styles.criticalBannerBody}>
-                You&apos;ll miss earthquake alerts even in silent mode. Tap to re-enable in iOS Settings.
+                An earthquake alert will arrive quietly, or not at all. Tap
+                here, then tap Notifications and turn on Allow Notifications
+                and Critical Alerts.
               </Text>
             </View>
             <Ionicons name="chevron-forward" size={20} color="#8A0F0F" />
           </TouchableOpacity>
         )}
 
-        {/* The always-on rule — first thing users see, plain language */}
-        <View style={styles.rulePanel}>
-          <Ionicons name="shield-checkmark" size={22} color="#1F8A3A" />
-          <Text style={styles.ruleText}>
-            These settings control informational notifications about nearby tremors.{"\n"}
-            <Text style={styles.ruleTextBold}>
-              Alerts for dangerous earthquakes are always on and cannot be switched off.
-            </Text>
+        {/* #280: one sentence about the siren, written in
+            src/utils/readiness.ts, printed here and nowhere else invented. */}
+        <View style={[styles.rulePanel, sirenOff && styles.rulePanelOff]}>
+          <Ionicons
+            name={sirenOff ? "alert-circle" : "shield-checkmark"}
+            size={22}
+            color={sirenOff ? "#F4C842" : "#1F8A3A"}
+          />
+          <Text style={[styles.ruleText, sirenOff && styles.ruleTextOff]}>
+            These settings control the quiet notices about nearby tremors.{"\n"}
+            <Text style={styles.ruleTextBold}>{readiness.sirenSentence}</Text>
           </Text>
         </View>
 
@@ -213,7 +217,9 @@ export default function NotificationSettingsScreen() {
               After an earthquake we may ask you to check in. That question is
               not an alarm, so a Focus mode can hide it without a sound.
               {"\n\n"}
-              An earthquake alert is different. It always comes through.
+              {sirenOff
+                ? "An earthquake alert should come through anything — but not on this phone until you fix the warning above."
+                : "An earthquake alert is different. It always comes through."}
               {"\n\n"}
               To let check-in questions through, turn on Time Sensitive
               Notifications for Quake Angel.
@@ -318,7 +324,9 @@ const styles = StyleSheet.create({
     backgroundColor: "#0F2818", borderColor: "#1F8A3A", borderWidth: 1,
     borderRadius: 12, padding: 14, marginBottom: 20,
   },
+  rulePanelOff: { backgroundColor: "#2A2216", borderColor: "#8A6B0F" },
   ruleText: { flex: 1, color: "#B3E5C4", fontSize: 14, lineHeight: 20 },
+  ruleTextOff: { color: "#F7E7B8" },
   ruleTextBold: { fontWeight: "700", color: "#E7EDF5" },
 
   // #279 Focus disclosure.

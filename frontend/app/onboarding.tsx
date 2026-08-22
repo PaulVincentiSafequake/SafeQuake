@@ -18,6 +18,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { AppleWatchNote } from "@/src/components/AppleWatchNote";
 import { colors, radius, spacing } from "@/src/theme";
 import { registerForPushNotifications } from "@/src/utils/push";
+import { confirmWatchChecked, snoozeWatchReminder } from "@/src/utils/watchReminder";
 
 const ONBOARDING_DONE_KEY = "quakeguard_onboarding_done";
 
@@ -30,7 +31,12 @@ export default function OnboardingScreen() {
   // user's first encounter with the alarm isn't a real 4am earthquake.
   // "permission" = the existing Critical Alerts ask (unchanged).
   // "rehearsal" = the new demo step, reached after Enable OR Skip.
-  const [step, setStep] = useState<"permission" | "rehearsal">("permission");
+  // #285 (2026-08-22 — Paul): "The setup screen is doing too much... Split
+  // the critical alerts screen into two steps. One screen, one decision."
+  //   permission = allow the siren (and the two iOS prompts that follow)
+  //   watch      = the Apple Watch check, on its own screen
+  //   rehearsal  = hear the real siren, safely
+  const [step, setStep] = useState<"permission" | "watch" | "rehearsal">("permission");
   // ?preview=1 forces the iOS layout to render on web/Android — used by
   // devs to visually inspect the screen without a real iPhone. Has no
   // effect on real iOS devices.
@@ -61,20 +67,29 @@ export default function OnboardingScreen() {
     }
     await markDone();
     setBusy(false);
-    // §6 #144: go to the rehearsal step instead of home — granting the
-    // permission is not the end of setup any more.
-    setStep("rehearsal");
+    // #285: the Watch question gets its own screen, before the rehearsal.
+    setStep("watch");
   }, [busy, markDone]);
 
   const onSkip = useCallback(async () => {
     if (busy) return;
     await markDone();
-    // §6 #144: "Not now" on the permission ask still leads to the
-    // rehearsal offer — the two are independent decisions. Someone who
-    // declines Critical Alerts still benefits from knowing what the
-    // siren sounds and feels like inside the app.
-    setStep("rehearsal");
+    // §6 #144: "Not now" still leads on through setup — these are
+    // independent decisions. Someone who declines still benefits from
+    // knowing what the siren sounds and feels like inside the app, and the
+    // home screen will tell them, permanently, that it cannot sound (#281).
+    setStep("watch");
   }, [busy, markDone]);
+
+  const onWatchChecked = useCallback(async () => {
+    await confirmWatchChecked();
+    setStep("rehearsal");
+  }, []);
+
+  const onWatchSnooze = useCallback(async () => {
+    await snoozeWatchReminder();
+    setStep("rehearsal");
+  }, []);
 
   // §6 #144 — the rehearsal itself.
   //
@@ -122,6 +137,75 @@ export default function OnboardingScreen() {
     );
   }
 
+  // #285 — step 2: the Apple Watch check, on its own screen, one decision.
+  //
+  // #286 (2026-08-22 — Paul) on the answer we accept here:
+  //   "'I don't own an Apple Watch — don't show this again' is a decision
+  //    someone makes today about a phone they may pair to a Watch next
+  //    Christmas... Never let a safety reminder be permanently dismissed on
+  //    the basis of something that can change."
+  // So there is no permanent no on this screen either — see
+  // src/utils/watchReminder.ts for the technical answer on detection and
+  // why we ask rather than detect.
+  if (step === "watch") {
+    return (
+      <View style={styles.root}>
+        <StatusBar style="light" />
+        <Stack.Screen
+          options={{ headerShown: false, gestureEnabled: false, animation: "fade" }}
+        />
+        <SafeAreaView style={styles.safe} edges={["top"]}>
+          <ScrollView
+            style={{ flex: 1 }}
+            contentContainerStyle={styles.body}
+            showsVerticalScrollIndicator={false}
+          >
+            <View style={styles.brandRow}>
+              <View style={styles.brandDot} />
+              <Text style={styles.brandLabel}>Quake Angel · setup · step 2 of 3</Text>
+            </View>
+            <Text style={styles.h1}>Do you wear an Apple Watch?</Text>
+            <Text style={styles.subtitle}>
+              If you do, your iPhone can send the alert to your wrist instead of
+              sounding out loud. A tap on the wrist is easy to sleep through.
+            </Text>
+            <View style={{ marginTop: spacing.lg }}>
+              <AppleWatchNote variant="onboarding" />
+            </View>
+          </ScrollView>
+
+          <View
+            style={[
+              styles.ctaBar,
+              { paddingBottom: Math.max(insets.bottom, spacing.lg) },
+            ]}
+          >
+            <Pressable
+              onPress={onWatchChecked}
+              style={({ pressed }) => [
+                styles.primaryBtn,
+                pressed && { opacity: 0.9, transform: [{ scale: 0.98 }] },
+              ]}
+              testID="onboarding-watch-checked-btn"
+            >
+              <Ionicons name="checkmark-circle" size={20} color={colors.onBrandPrimary} />
+              <Text style={styles.primaryBtnText}>I have checked this</Text>
+            </Pressable>
+            <Pressable
+              onPress={onWatchSnooze}
+              style={styles.secondaryBtn}
+              testID="onboarding-watch-snooze-btn"
+            >
+              <Text style={styles.secondaryBtnText}>
+                I don&apos;t have one — ask me again in a few months
+              </Text>
+            </Pressable>
+          </View>
+        </SafeAreaView>
+      </View>
+    );
+  }
+
   // §6 #144 (Neo round 2) — rehearsal step, reached after either Enable
   // or Not now on the permission ask. Same Stack.Screen options (no
   // gesture-dismiss, fade transition) so the two steps feel like one
@@ -139,17 +223,15 @@ export default function OnboardingScreen() {
         />
         <SafeAreaView style={styles.safe} edges={["top"]}>
           <ScrollView
-            contentContainerStyle={[
-              styles.body,
-              { paddingBottom: 200 + insets.bottom },
-            ]}
+            style={{ flex: 1 }}
+            contentContainerStyle={styles.body}
             showsVerticalScrollIndicator={false}
           >
             <View style={styles.brandRow}>
               <View style={styles.brandDot} />
-              <Text style={styles.brandLabel}>QUAKE ANGEL · SETUP</Text>
+              <Text style={styles.brandLabel}>Quake Angel · setup · step 3 of 3</Text>
             </View>
-            <Text style={styles.h1}>Hear it before it happens</Text>
+            <Text style={styles.h1}>Hear what a real alert sounds like</Text>
             <Text style={styles.subtitle}>
               This plays the exact siren and vibration you&apos;ll get during
               a real alert — right now, safely. Nothing is sent to anyone,
@@ -160,7 +242,7 @@ export default function OnboardingScreen() {
               <BulletRow
                 icon="volume-high"
                 title="The real siren"
-                body="Same sound file used for a genuine earthquake alert, at full volume."
+                body="The same siren you would hear in a real earthquake, at full volume."
               />
               <BulletRow
                 icon="phone-portrait"
@@ -170,13 +252,13 @@ export default function OnboardingScreen() {
               <BulletRow
                 icon="shield-checkmark"
                 title="Practice what to do"
-                body="Try tapping I'M SAFE or I NEED HELP — exactly like the real thing."
+                body="Try tapping I'm safe or I need help — exactly like the real thing."
               />
             </View>
 
             <Text style={styles.footnote}>
               You can run this again anytime — look for{" "}
-              <Text style={styles.footnoteBold}>TRIGGER TEST ALERT</Text> on
+              <Text style={styles.footnoteBold}>Practise the alert</Text> on
               the Home screen.
             </Text>
           </ScrollView>
@@ -196,7 +278,7 @@ export default function OnboardingScreen() {
               testID="onboarding-rehearsal-play-btn"
             >
               <Ionicons name="play" size={20} color={colors.onBrandPrimary} />
-              <Text style={styles.primaryBtnText}>PLAY THE DEMO</Text>
+              <Text style={styles.primaryBtnText}>Play the practice siren</Text>
             </Pressable>
             <Pressable
               onPress={onSkipRehearsal}
@@ -223,30 +305,55 @@ export default function OnboardingScreen() {
       />
       <SafeAreaView style={styles.safe} edges={["top"]}>
         <ScrollView
-          contentContainerStyle={[
-            styles.body,
-            { paddingBottom: 200 + insets.bottom },
-          ]}
+          style={{ flex: 1 }}
+          contentContainerStyle={styles.body}
           showsVerticalScrollIndicator={false}
         >
           {/* Header */}
           <View style={styles.brandRow}>
             <View style={styles.brandDot} />
-            <Text style={styles.brandLabel}>QUAKE ANGEL · SETUP</Text>
+            <Text style={styles.brandLabel}>Quake Angel · setup · step 1 of 3</Text>
           </View>
-          <Text style={styles.h1}>Turn on Critical Alerts</Text>
+          <Text style={styles.h1}>Let the siren sound</Text>
           <Text style={styles.subtitle}>
-            An earthquake alert must be able to sound on your phone even when
-            it&apos;s on silent or in a Focus mode. Grant Critical Alerts so
-            Quake Angel can do that.
+            An earthquake alert has to be able to sound even when your phone is
+            on silent. That needs your permission.
           </Text>
+
+          {/* #285 (2026-08-22 — Paul): "a reader could reasonably conclude
+              they will be sirened by every tremor, and nobody grants that
+              permission." Specific, not vague. No promise to wake anyone,
+              and nothing that could be read as warning before a quake. */}
+          <View style={styles.reassurePanel}>
+            <Text style={styles.reassureTitle}>How rare this is</Text>
+            <Text style={styles.reassureBody}>
+              The siren is only for a real earthquake close enough to be felt
+              where you are. Small or distant tremors never siren.
+              {"\n\n"}
+              This is rare. Malta goes years between earthquakes strong enough
+              to trigger it.
+            </Text>
+          </View>
+
+          {/* #285: the reader has no way to know these are two separate
+              things unless we say so here. */}
+          <View style={styles.reassurePanel}>
+            <Text style={styles.reassureTitle}>Two separate things</Text>
+            <Text style={styles.reassureBody}>
+              The siren is for a dangerous earthquake.
+              {"\n\n"}
+              Tremor notices are quiet messages about small shakes nearby. You
+              can turn those off completely, or see only the bigger ones, and
+              the siren is not affected either way.
+            </Text>
+          </View>
 
           {/* Bullet list of what the permission enables */}
           <View style={styles.bulletList}>
             <BulletRow
               icon="volume-high"
               title="Loud siren, even on Silent"
-              body="Alerts bypass the ringer switch and Focus/DND."
+              body="The siren sounds even if your phone is on silent or set to Do Not Disturb."
             />
             <BulletRow
               icon="phone-portrait"
@@ -256,7 +363,7 @@ export default function OnboardingScreen() {
             <BulletRow
               icon="lock-open"
               title="Delivered instantly"
-              body="Uses Apple's push infrastructure for lowest latency."
+              body="Arrives straight away, by the fastest route Apple provides."
             />
             {/* #279 (2026-08-21 — Paul): said at setup, not discovered in an
                 earthquake. His own check-in question arrived inside a Focus
@@ -271,13 +378,19 @@ export default function OnboardingScreen() {
             />
           </View>
 
-          {/* Apple Watch caveat — shown right next to the permission ask */}
-          <View style={{ marginTop: spacing.xl }}>
-            <AppleWatchNote variant="onboarding" />
+          {/* #285: "Before Apple's permission boxes appear, tell them what
+              is coming." */}
+          <View style={styles.headsUpPanel}>
+            <Ionicons name="information-circle" size={20} color="#5DB1FF" />
+            <Text style={styles.headsUpText}>
+              Your iPhone will now ask twice. The first is ordinary permission
+              to send you anything at all. The second is the one that lets the
+              siren sound when your phone is silent. Both are needed.
+            </Text>
           </View>
 
           <Text style={styles.footnote}>
-            You can change these settings later in{" "}
+            You can change this later in{" "}
             <Text style={styles.footnoteBold}>Settings › Notifications › Quake Angel</Text>
             . To let check-in questions through a Focus mode, turn on{" "}
             <Text style={styles.footnoteBold}>Time Sensitive Notifications</Text>
@@ -312,7 +425,7 @@ export default function OnboardingScreen() {
               />
             )}
             <Text style={styles.primaryBtnText}>
-              {busy ? "REQUESTING…" : "ENABLE CRITICAL ALERTS"}
+              {busy ? "Asking your phone…" : "Allow the siren"}
             </Text>
           </Pressable>
           <Pressable
@@ -388,7 +501,6 @@ const styles = StyleSheet.create({
     color: colors.onBrandPrimary,
     fontSize: 14,
     fontWeight: "700",
-    letterSpacing: 1,
   },
   safe: {
     flex: 1,
@@ -412,14 +524,12 @@ const styles = StyleSheet.create({
   brandLabel: {
     color: colors.onSurfaceTertiary,
     fontSize: 11,
-    letterSpacing: 2,
     fontWeight: "700",
   },
   h1: {
     color: colors.onSurface,
     fontSize: 30,
     fontWeight: "900",
-    letterSpacing: 0.3,
     marginBottom: spacing.md,
   },
   subtitle: {
@@ -471,11 +581,46 @@ const styles = StyleSheet.create({
     color: colors.onSurfaceSecondary,
     fontWeight: "700",
   },
+  reassurePanel: {
+    marginTop: spacing.xl,
+    backgroundColor: "#131A26",
+    borderColor: "#25324A",
+    borderWidth: 1,
+    borderRadius: radius.lg,
+    padding: spacing.lg,
+  },
+  reassureTitle: {
+    color: colors.onSurface,
+    fontSize: 16,
+    fontWeight: "700",
+    marginBottom: 6,
+  },
+  reassureBody: {
+    color: colors.onSurfaceSecondary,
+    fontSize: 15,
+    lineHeight: 22,
+  },
+  headsUpPanel: {
+    flexDirection: "row",
+    gap: 10,
+    alignItems: "flex-start",
+    marginTop: spacing.xl,
+    backgroundColor: "#0F2540",
+    borderColor: "#2A4A6B",
+    borderWidth: 1,
+    borderRadius: radius.lg,
+    padding: spacing.lg,
+  },
+  headsUpText: {
+    flex: 1,
+    color: "#CFE4FA",
+    fontSize: 15,
+    lineHeight: 22,
+  },
   ctaBar: {
-    position: "absolute",
-    left: 0,
-    right: 0,
-    bottom: 0,
+    // #282: a flex sibling of the ScrollView, never over it. The old
+    // absolute bar plus a magic `200 + insets.bottom` reserve buried the
+    // last line of the body at large system text sizes.
     paddingHorizontal: spacing.xl,
     paddingTop: spacing.lg,
     backgroundColor: colors.surface,
@@ -496,7 +641,6 @@ const styles = StyleSheet.create({
     color: colors.onBrandPrimary,
     fontSize: 15,
     fontWeight: "800",
-    letterSpacing: 1.5,
   },
   secondaryBtn: {
     height: 44,

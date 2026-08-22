@@ -411,7 +411,6 @@ const styles = StyleSheet.create({
     color: "#0B1220",
     fontSize: 11,
     fontWeight: "800",
-    letterSpacing: 1.2,
   },
   title: {
     color: colors.text,

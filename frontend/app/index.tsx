@@ -27,7 +27,17 @@ import {
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { AppleWatchNote } from "@/src/components/AppleWatchNote";
+import {
+  WATCH_CONFIRMED_AT_KEY,
+  WATCH_SNOOZE_DAYS,
+  confirmWatchChecked as confirmWatch,
+  snoozeWatchReminder,
+  watchReminderDue,
+  watchReminderWhy,
+  type WatchReminderReason,
+} from "@/src/utils/watchReminder";
 import EntitlementBanner from "@/src/components/EntitlementBanner";
+import ReadinessBanner from "@/src/components/ReadinessBanner";
 // #208 R4 — `shouldRedirectToAlert`/`toAlertQuery` moved to _layout.tsx
 // so the unanswered-alert redirect fires from every screen, not just
 // this one. Keeping the imports here would be dead weight.
@@ -45,28 +55,6 @@ import {
   ensureNotificationSetup,
 } from "@/src/utils/reminders";
 
-// Legacy: pre-1.0.22 we only recorded the last-seen version and cleared the
-// banner on "Dismiss". Kept for one-shot migration.
-const LEGACY_LAST_SEEN_VERSION_KEY = "quakeguard_last_seen_version";
-
-// New (1.0.22+) sticky-reminder keys. Together these let us decide, on every
-// app open / foreground, whether to show the full banner or the "already
-// checked" mini pill.
-const WATCH_CONFIRMED_AT_KEY = "quakeguard_watch_confirmed_at";
-const WATCH_CONFIRMED_VERSION_KEY = "quakeguard_watch_confirmed_version";
-
-// Re-nag interval — even without an app update, the Watch's own software
-// updates can independently re-enable notification mirroring. Two weeks is
-// short enough that a user who checks once will likely still remember the
-// steps; long enough not to feel spammy.
-const WATCH_RECHECK_DAYS = 14;
-const WATCH_RECHECK_MS = WATCH_RECHECK_DAYS * 24 * 60 * 60 * 1000;
-
-// Self-declared "I have no Apple Watch" opt-out (batch 5, B6). iOS gives JS
-// no way to read Watch pairing — there is no Expo API and no entitlement for
-// it — so the only honest gate is the user's own answer. One tap silences
-// the whole feature permanently for people it can never help.
-const WATCH_NOT_APPLICABLE_KEY = "quakeangel_no_apple_watch";
 
 const HERO_IMG =
   "https://images.unsplash.com/photo-1772050137595-0116f8dba498?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjY2NjV8MHwxfHNlYXJjaHwxfHxlYXJ0aHF1YWtlJTIwc2Vpc21vZ3JhcGglMjBkYXJrfGVufDB8fHx8MTc4NDcwNTQ2MHww&ixlib=rb-4.1.0&q=85";
@@ -95,7 +83,10 @@ const TIPS: Tip[] = [
   },
   {
     icon: "medkit",
-    title: "AFTER",
+    // #283: DROP / COVER / HOLD ON stay in capitals — the recognised
+    // international phrase, the one agreed exception. "Afterwards" is not
+    // part of that phrase, so it is sentence case like everything else.
+    title: "Afterwards",
     body: "Check for injuries. Expect aftershocks. Stay away from damaged areas.",
   },
 ];
@@ -104,10 +95,6 @@ export default function HomeScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const [triggering, setTriggering] = useState(false);
-  // #253 / #209 (Batch 7 R4): measured height of the sticky bottom bar.
-  // Fallback of 140 covers the pre-layout first paint without leaving
-  // safety text under the button.
-  const [stickyBarHeight, setStickyBarHeight] = useState(140);
   // ?preview=1 forces the iOS-only update-reminder banner to render on web
   // during development — has no effect on real devices.
   const { preview } = useLocalSearchParams<{ preview?: string }>();
@@ -125,7 +112,7 @@ export default function HomeScreen() {
   const [watchState, setWatchState] = useState<
     | { kind: "loading" }
     | { kind: "hidden" } // non-iOS, or web without preview flag
-    | { kind: "nag"; reason: "never" | "version-change" | "stale" }
+    | { kind: "nag"; reason: WatchReminderReason }
     | { kind: "confirmed"; confirmedAt: number; daysAgo: number; daysUntilNext: number }
   >({ kind: "loading" });
   const [watchModalOpen, setWatchModalOpen] = useState(false);
@@ -161,52 +148,33 @@ export default function HomeScreen() {
       return;
     }
     try {
-      const [confirmedAtRaw, confirmedVersion, legacySeen, noWatch] = await Promise.all([
-        AsyncStorage.getItem(WATCH_CONFIRMED_AT_KEY),
-        AsyncStorage.getItem(WATCH_CONFIRMED_VERSION_KEY),
-        AsyncStorage.getItem(LEGACY_LAST_SEEN_VERSION_KEY),
-        AsyncStorage.getItem(WATCH_NOT_APPLICABLE_KEY),
-      ]);
-
-      // User has told us they don't own an Apple Watch — never show any of
-      // this again. Pure noise for them.
-      if (noWatch === "1" && !forcePreview) {
+      // #286: one rule, in src/utils/watchReminder.ts. This screen no longer
+      // decides for itself — a second copy of the rule is how "don't show
+      // this again" became permanent in the first place.
+      const due = await watchReminderDue();
+      if (due.due) {
+        setWatchState({ kind: "nag", reason: due.reason });
+        return;
+      }
+      const confirmedAtRaw = await AsyncStorage.getItem(WATCH_CONFIRMED_AT_KEY);
+      const confirmedAt = confirmedAtRaw ? new Date(confirmedAtRaw).getTime() : NaN;
+      if (!Number.isFinite(confirmedAt)) {
         setWatchState({ kind: "hidden" });
         return;
       }
-
-      // First-launch heuristic: if BOTH new keys are empty AND legacy key is
-      // empty, this is a truly fresh install — do NOT nag on first launch
-      // (they haven't done anything wrong yet). Seed legacy key so the
-      // NEXT launch triggers the nag if they've ignored the setup step.
-      if (!confirmedAtRaw && !confirmedVersion && !legacySeen && !forcePreview) {
-        await AsyncStorage.setItem(LEGACY_LAST_SEEN_VERSION_KEY, currentVersion);
-        setWatchState({ kind: "nag", reason: "never" });
-        return;
-      }
-
-      const confirmedAt = confirmedAtRaw ? Number(confirmedAtRaw) : NaN;
-      if (!Number.isFinite(confirmedAt) || !confirmedVersion) {
-        setWatchState({ kind: "nag", reason: "never" });
-        return;
-      }
-      if (confirmedVersion !== currentVersion) {
-        setWatchState({ kind: "nag", reason: "version-change" });
-        return;
-      }
-      const now = Date.now();
-      const elapsed = now - confirmedAt;
-      if (elapsed > WATCH_RECHECK_MS) {
-        setWatchState({ kind: "nag", reason: "stale" });
-        return;
-      }
-      const daysAgo = Math.max(0, Math.floor(elapsed / (24 * 60 * 60 * 1000)));
-      const daysUntilNext = Math.max(0, WATCH_RECHECK_DAYS - daysAgo);
-      setWatchState({ kind: "confirmed", confirmedAt, daysAgo, daysUntilNext });
+      const elapsed = Date.now() - confirmedAt;
+      const daysAgo = Math.max(0, Math.floor(elapsed / 86_400_000));
+      setWatchState({
+        kind: "confirmed",
+        confirmedAt,
+        daysAgo,
+        daysUntilNext: Math.max(0, WATCH_SNOOZE_DAYS - daysAgo),
+      });
     } catch (e) {
       console.log("[QuakeGuard] watch-state eval failed:", (e as Error)?.message);
-      // Fail-safe: nag rather than hide.
-      setWatchState({ kind: "nag", reason: "never" });
+      // Fail-safe: ask rather than hide. A tap costs nothing; an unheard
+      // siren costs everything.
+      setWatchState({ kind: "nag", reason: "never_answered" });
     }
   }, [currentVersion, forcePreview]);
 
@@ -278,57 +246,46 @@ export default function HomeScreen() {
   }, []);
 
   const confirmWatchChecked = useCallback(async () => {
-    if (!currentVersion) return;
-    const now = Date.now();
-    try {
-      await Promise.all([
-        AsyncStorage.setItem(WATCH_CONFIRMED_AT_KEY, String(now)),
-        AsyncStorage.setItem(WATCH_CONFIRMED_VERSION_KEY, currentVersion),
-        // Keep legacy key in sync so any lingering old reads see a matching
-        // version and don't spuriously nag.
-        AsyncStorage.setItem(LEGACY_LAST_SEEN_VERSION_KEY, currentVersion),
-      ]);
-    } catch (e) {
-      console.log("[QuakeGuard] confirm-watch persist failed:", (e as Error)?.message);
-    }
+    await confirmWatch();   // src/utils/watchReminder.ts — one place
     setWatchState({
       kind: "confirmed",
-      confirmedAt: now,
+      confirmedAt: Date.now(),
       daysAgo: 0,
-      daysUntilNext: WATCH_RECHECK_DAYS,
+      daysUntilNext: WATCH_SNOOZE_DAYS,
     });
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
-  }, [currentVersion]);
+  }, []);
 
   const openWatchModal = () => {
     setWatchModalOpen(true);
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
   };
 
-  // "I don't use an Apple Watch" — permanent opt-out (batch 5, B6).
+  // #286 (2026-08-22 — Paul): there is no permanent no here any more.
   //
-  // This must mean "I don't OWN an Apple Watch", never "stop telling me".
-  // Anyone who does own one has to keep getting this notice after every
-  // update, because iOS re-enables the Watch notification toggle every
-  // time — so the confirm dialog spells out the difference and defaults to
-  // keeping the notice.
-  const dismissWatchForever = useCallback(() => {
+  //   "That is a decision someone makes today about a phone they may pair to
+  //    a Watch next Christmas. The moment they do, they fall into exactly the
+  //    trap this notice exists to prevent, and nothing will ever tell them."
+  //
+  // "I don't have one" now means "ask me again in a few months", and we ask
+  // sooner if iOS has had a major update or if the practice siren was heard
+  // on a wrist. The rule and the reasons live in one place:
+  // src/utils/watchReminder.ts — which also records the technical answer on
+  // why we ask instead of detecting a paired Watch.
+  const snoozeWatch = useCallback(() => {
     Alert.alert(
-      "Do you own an Apple Watch?",
-      "This notice only matters if you do. Apple can switch your Watch " +
-        "notifications back on after every update, and a quiet tap on your " +
-        "wrist is easy to miss — so if you own one, keep the reminder.\n\n" +
-        "Only turn it off if you don't have an Apple Watch at all.",
+      "Do you have an Apple Watch?",
+      "This only matters if you do. Your iPhone can send the alert to your " +
+        "wrist instead of sounding out loud, and Apple switches that back on " +
+        "after updates.\n\n" +
+        "If you do not have one, we will stop asking for a few months, then " +
+        "check again in case that has changed.",
       [
-        { text: "I own one — keep reminding me", style: "cancel" },
+        { text: "I have one — keep reminding me", style: "cancel" },
         {
-          text: "I don't own one",
+          text: "I don't have one",
           onPress: async () => {
-            try {
-              await AsyncStorage.setItem(WATCH_NOT_APPLICABLE_KEY, "1");
-            } catch {
-              // ignore — worst case they see the card again next launch
-            }
+            await snoozeWatchReminder();
             setWatchState({ kind: "hidden" });
             Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
           },
@@ -520,21 +477,43 @@ export default function HomeScreen() {
     <View style={styles.root}>
       <StatusBar style="light" />
 
-      {/* #253 / #209 root-cause fix (Batch 7 R4): reserve exactly the
-          sticky bar's real measured height as the ScrollView's bottom
-          padding, so scrolling content is never covered by the trigger
-          button. Previously a magic `120 + insets.bottom` was reserved,
-          which under-reserved on taller devices (the button + shadow +
-          insets can exceed that) and left the "AFTER — check for
-          injuries" step of the earthquake safety card partly obscured.
-          Measuring with onLayout removes the magic number entirely —
-          the reserve grows with the bar, not with a guess. */}
+      {/* #282 (2026-08-22 — Paul, third time) THE LAYOUT RULE, FIXED AT
+          THE CAUSE.
+
+          "The red TRIGGER TEST ALERT button is sitting on top of the safety
+           steps... the rescue code and name are overlapping the phone's
+           status bar. This is #209 and #253 again, worse than before. Do
+           not patch this screen. Find the layout rule that allows a fixed
+           element to sit over content, fix it once at the cause."
+
+          The cause was the pattern itself, not the numbers. The footer was
+          `position: absolute` OVER the scroll area, and the scroll area
+          reserved space for it — first with a magic number (#209), then
+          with a measured height (#253). Both are guesses about a box whose
+          height depends on the system text size, and a guess that is one
+          line short puts a button on top of "Hold on".
+
+          There is no reserve any more. The footer is an ordinary sibling in
+          a flex column: ScrollView takes the space that is left, the footer
+          takes what it needs, and overlap is not expressible in this
+          layout. No measuring, no padding arithmetic, nothing to get wrong
+          at a larger text size.
+
+          THE RULE, for every screen: a footer or header that sits over
+          scrollable text must be a flex sibling, never absolutely
+          positioned. Absolute positioning is only for decoration (glows,
+          rings, gradients) and for overlays on a map canvas, where there is
+          no text underneath to bury. Applied here and in onboarding.tsx;
+          alert.tsx and map.tsx were checked and are decoration/canvas
+          only. */}
       <ScrollView
-        contentContainerStyle={{
-          paddingBottom: stickyBarHeight + spacing.md,
-        }}
+        style={{ flex: 1 }}
+        contentContainerStyle={{ paddingBottom: spacing.md }}
         showsVerticalScrollIndicator={false}
       >
+        {/* #281: the very first thing, above the hero and the rescue code,
+            and only when something is actually wrong. */}
+        <ReadinessBanner />
         {/* Hero */}
         <View style={styles.hero}>
           <Image
@@ -561,7 +540,8 @@ export default function HomeScreen() {
               <View style={{ flex: 1 }}>
                 <Text style={styles.statusText}>Connected and ready.</Text>
                 <Text style={styles.statusSubText}>
-                  We&apos;ll alert you, and you can tell rescuers how you are and where you are.
+                  If an earthquake happens near you, this phone sounds the
+                  siren. You then tell us if you are safe or need help.
                 </Text>
               </View>
             </View>
@@ -589,12 +569,12 @@ export default function HomeScreen() {
                 ]}
               >
                 <View style={styles.rescuePillLeft}>
-                  <Text style={styles.rescuePillLabel}>RESCUE CODE</Text>
+                  <Text style={styles.rescuePillLabel}>Rescue code</Text>
                   <Text style={styles.rescuePillCode}>{shortCode}</Text>
                 </View>
                 <View style={styles.rescuePillDivider} />
                 <View style={styles.rescuePillRight}>
-                  <Text style={styles.rescuePillLabel}>NAME</Text>
+                  <Text style={styles.rescuePillLabel}>Name</Text>
                   <View style={styles.rescuePillNameRow}>
                     <Text
                       style={[
@@ -632,43 +612,24 @@ export default function HomeScreen() {
                   <Ionicons name="watch-outline" size={20} color={colors.warning} />
                 </View>
                 <Text style={styles.updateReminderTitle}>
-                  {watchState.reason === "stale"
-                    ? "Time to re-check your Apple Watch"
-                    : watchState.reason === "version-change"
-                      ? "You've just updated Quake Angel"
-                      : "Check your Apple Watch settings"}
+                  {watchState.reason === "heard_on_wrist"
+                    ? "Your siren played on your watch"
+                    : watchState.reason === "new_ios"
+                      ? "Your iPhone software has changed"
+                      : watchState.reason === "snooze_expired"
+                        ? "Checking again about an Apple Watch"
+                        : "Do you wear an Apple Watch?"}
                 </Text>
               </View>
+              {/* #286: the reason is written in one place, so the card and
+                  the settings screen can never explain it differently. */}
               <Text style={styles.updateReminderBody}>
-                {watchState.reason === "stale" ? (
-                  <>
-                    It&apos;s been more than {WATCH_RECHECK_DAYS} days since you
-                    last confirmed. Watch software updates can silently reset
-                    the notification-mirroring toggle — please re-verify it&apos;s
-                    still <Text style={styles.updateReminderBold}>off</Text> so
-                    critical alerts ring your iPhone, not just the Watch.
-                  </>
-                ) : watchState.reason === "version-change" ? (
-                  <>
-                    Apple sometimes switches your Apple Watch notifications back
-                    on after an update. We can&apos;t change that setting for you.
-                    {"\n\n"}
-                    <Text style={styles.updateReminderBold}>Why this matters:</Text>{" "}
-                    if your watch handles the alert, your phone may not ring out
-                    loud. A quiet tap on your wrist is easy to miss. In an
-                    earthquake you want the siren.
-                    {"\n\n"}
-                    Take a moment to check now.
-                  </>
-                ) : (
-                  <>
-                    If you wear an Apple Watch, iOS may forward critical alerts
-                    to the Watch instead of ringing your iPhone. Turn the Watch
-                    notification-mirroring toggle{" "}
-                    <Text style={styles.updateReminderBold}>off</Text> to make
-                    sure the phone always rings.
-                  </>
-                )}
+                {watchReminderWhy(watchState.reason)}
+                {"\n\n"}
+                If your watch takes the alert, your phone may not sound out
+                loud, and a tap on the wrist is easy to sleep through. Turn
+                watch notifications for Quake Angel off, so the phone always
+                sounds.
               </Text>
               <View style={styles.updateReminderActions}>
                 <Pressable
@@ -681,7 +642,7 @@ export default function HomeScreen() {
                 >
                   <Ionicons name="checkmark-circle" size={18} color="#1B1005" />
                   <Text style={styles.updateReminderPrimaryText}>
-                    I&apos;ve checked this
+                    I have checked this
                   </Text>
                 </Pressable>
                 <Pressable
@@ -696,18 +657,18 @@ export default function HomeScreen() {
                 </Pressable>
               </View>
               <Text style={styles.updateReminderFootnote}>
-                We&apos;ll re-check with you every {WATCH_RECHECK_DAYS} days, since
-                Watch updates can reset this toggle too. The app can&apos;t
-                detect or control the toggle directly.
+                We ask again after an iPhone software update, because that can
+                switch watch notifications back on. The app cannot see or
+                change that setting itself.
               </Text>
               <Pressable
-                onPress={dismissWatchForever}
+                onPress={snoozeWatch}
                 style={styles.updateReminderOptOut}
                 testID="update-reminder-no-watch"
                 hitSlop={6}
               >
                 <Text style={styles.updateReminderOptOutText}>
-                  I don&apos;t own an Apple Watch — don&apos;t show this again
+                  I don&apos;t have one — ask me again in a few months
                 </Text>
               </Pressable>
             </View>
@@ -730,7 +691,9 @@ export default function HomeScreen() {
                   : ` · ${watchState.daysAgo} day${watchState.daysAgo === 1 ? "" : "s"} ago`}
               </Text>
               <Text style={styles.watchOkPillMeta}>
-                next in {watchState.daysUntilNext}d
+                {watchState.daysUntilNext > 0
+                  ? `we ask again in ${watchState.daysUntilNext} days`
+                  : "due for a check"}
               </Text>
               <Ionicons name="chevron-forward" size={14} color={colors.onSurfaceTertiary} />
             </Pressable>
@@ -787,8 +750,9 @@ export default function HomeScreen() {
           <View style={styles.infoCard}>
             <Ionicons name="information-circle" size={20} color={colors.brandSecondary} />
             <Text style={styles.infoText}>
-              This is a test tool. Tapping below simulates an earthquake alert so
-              you can practise reporting yourself safe.
+              The button below is practice. It plays the real siren on this
+              phone so you know what it sounds like, and lets you try saying
+              you are safe.
             </Text>
           </View>
         </View>
@@ -831,18 +795,13 @@ export default function HomeScreen() {
         </Pressable>
       </ScrollView>
 
-      {/* Sticky trigger */}
+      {/* Footer — a flex sibling of the ScrollView, never over it (#282). */}
       <View
-        onLayout={(e) => setStickyBarHeight(e.nativeEvent.layout.height)}
         style={[
-          styles.stickyBar,
+          styles.footerBar,
           { paddingBottom: Math.max(insets.bottom, spacing.lg) },
         ]}
       >
-        <LinearGradient
-          colors={["rgba(15,17,21,0)", colors.surface]}
-          style={[styles.stickyScrim, { pointerEvents: "none" }]}
-        />
         <Pressable
           onPress={handleTrigger}
           disabled={triggering}
@@ -858,7 +817,7 @@ export default function HomeScreen() {
             <Ionicons name="warning" size={22} color={colors.onBrandPrimary} />
           )}
           <Text style={styles.triggerText}>
-            {triggering ? "TRIGGERING…" : "TRIGGER TEST ALERT"}
+            {triggering ? "Starting the practice…" : "Practise the alert"}
           </Text>
         </Pressable>
         {/* #244 (Batch 7 D): honest wording about what this test does
@@ -868,8 +827,8 @@ export default function HomeScreen() {
             tested the alert and it works" reading from concealing
             the fact that the network path was never exercised. */}
         <Text style={styles.triggerHonestyNote}>
-          Plays the siren and check-in screen on THIS phone. It does not send
-          a real notification to anyone.
+          Plays the siren and the check-in screen on this phone only. Nothing
+          is sent to anyone, and no report is filed.
         </Text>
       </View>
 
@@ -907,7 +866,7 @@ export default function HomeScreen() {
               testID="watch-modal-got-it"
             >
               <Ionicons name="checkmark-circle" size={20} color="#1B1005" />
-              <Text style={styles.watchModalGotItText}>I&apos;VE CHECKED THIS</Text>
+              <Text style={styles.watchModalGotItText}>I have checked this</Text>
             </Pressable>
           </View>
         </View>
@@ -1001,7 +960,7 @@ export default function HomeScreen() {
             {/* Live preview so the user can see how their name will appear
                 next to the rescue code on the dashboard. */}
             <View style={styles.namePreviewRow}>
-              <Text style={styles.namePreviewLabel}>Dashboard shows:</Text>
+              <Text style={styles.namePreviewLabel}>If you ask for help, this is what appears:</Text>
               <View style={styles.namePreviewChip}>
                 <Text style={styles.namePreviewChipName} numberOfLines={1}>
                   {sanitizeDisplayName(nameDraft) ?? "—"}
@@ -1034,12 +993,12 @@ export default function HomeScreen() {
               )}
               <Text style={styles.nameModalPrimaryText}>
                 {nameSaving
-                  ? "SAVING…"
+                  ? "Saving…"
                   : nameDraft.trim().length > 0
-                    ? "SAVE"
+                    ? "Save"
                     : displayName
-                      ? "REMOVE MY NAME"
-                      : "SKIP"}
+                      ? "Remove my name"
+                      : "Skip"}
               </Text>
             </Pressable>
 
@@ -1068,8 +1027,11 @@ const styles = StyleSheet.create({
     backgroundColor: colors.surface,
   },
   hero: {
-    height: 340,
-    overflow: "hidden",
+    // #282: minHeight, not height. At the largest system text size the
+    // status line, the name and the rescue code are taller than 340pt, and
+    // a fixed height pushed them up under the phone's status bar and
+    // clipped them. The box grows with the words now.
+    minHeight: 340,
   },
   heroContent: {
     flex: 1,
@@ -1093,14 +1055,12 @@ const styles = StyleSheet.create({
     color: colors.onSurface,
     // §7 #257 (Neo round 2): body-size (was 13).
     fontSize: 14,
-    letterSpacing: 0.5,
     fontWeight: "700",
   },
   statusSubText: {
     // §7 #257 (Neo 2026-08-20): body-size (was 12).
     color: colors.onSurfaceSecondary,
     fontSize: 14,
-    letterSpacing: 0.2,
     fontWeight: "500",
     marginTop: 4,
     lineHeight: 20,
@@ -1109,7 +1069,6 @@ const styles = StyleSheet.create({
     color: colors.onSurface,
     fontSize: 44,
     fontWeight: "900",
-    letterSpacing: 2,
     marginBottom: spacing.sm,
   },
   tagline: {
@@ -1125,7 +1084,6 @@ const styles = StyleSheet.create({
     color: colors.onSurface,
     fontSize: 20,
     fontWeight: "800",
-    letterSpacing: 1.5,
   },
   sectionSub: {
     color: colors.onSurfaceTertiary,
@@ -1154,7 +1112,6 @@ const styles = StyleSheet.create({
     color: colors.brandPrimary,
     fontSize: 20,
     fontWeight: "800",
-    letterSpacing: 1,
   },
   tipIcon: {
     width: 40,
@@ -1168,7 +1125,6 @@ const styles = StyleSheet.create({
     color: colors.onSurface,
     fontSize: 15,
     fontWeight: "800",
-    letterSpacing: 1.5,
     marginBottom: 2,
   },
   tipBody: {
@@ -1195,27 +1151,25 @@ const styles = StyleSheet.create({
     fontSize: 14,
     lineHeight: 19,
   },
-  stickyBar: {
-    position: "absolute",
-    left: 0,
-    right: 0,
-    bottom: 0,
+  footerBar: {
+    // #282: an ordinary row at the bottom of the column. No absolute
+    // positioning, so it cannot sit on top of the safety steps however
+    // tall the person's text is.
     paddingHorizontal: spacing.xl,
     paddingTop: spacing.lg,
-  },
-  stickyScrim: {
-    position: "absolute",
-    left: 0,
-    right: 0,
-    top: -40,
-    height: 60,
+    backgroundColor: colors.surface,
+    borderTopWidth: 1,
+    borderTopColor: colors.divider,
   },
   triggerBtn: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
     gap: spacing.md,
-    height: 60,
+    // #282: minHeight so the label can wrap at a large text size instead
+    // of spilling out of a fixed 60pt box and over the note below it.
+    minHeight: 60,
+    paddingVertical: spacing.md,
     borderRadius: radius.lg,
     backgroundColor: colors.brandPrimary,
     shadowColor: colors.brandPrimary,
@@ -1228,7 +1182,6 @@ const styles = StyleSheet.create({
     color: colors.onBrandPrimary,
     fontSize: 16,
     fontWeight: "800",
-    letterSpacing: 2,
   },
   // #244 (Batch 7 D): honest disclaimer under the test button.
   // §7 #257 (Neo round 2): 11 → 13 → 14 for readability under stress.
@@ -1254,8 +1207,6 @@ const styles = StyleSheet.create({
     // §7 #257 (Neo round 2): body-size (was 12).
     fontSize: 14,
     fontWeight: "600",
-    letterSpacing: 1,
-    textTransform: "uppercase",
   },
 
   /* Post-update Apple Watch reminder */
@@ -1316,7 +1267,6 @@ const styles = StyleSheet.create({
     color: "#1B1005",
     fontSize: 14,
     fontWeight: "800",
-    letterSpacing: 0.5,
   },
   updateReminderSecondary: {
     height: 44,
@@ -1370,7 +1320,6 @@ const styles = StyleSheet.create({
     // §7 #257 (Neo round 2): body-size (was 12).
     fontSize: 14,
     fontWeight: "700",
-    letterSpacing: 0.2,
   },
   watchOkPillMeta: {
     color: colors.onSurfaceTertiary,
@@ -1415,7 +1364,6 @@ const styles = StyleSheet.create({
     color: "#1B1005",
     fontSize: 15,
     fontWeight: "800",
-    letterSpacing: 2,
   },
 
   /* ─── Rescue-code pill (hero) ────────────────────────────────────── */
@@ -1447,14 +1395,12 @@ const styles = StyleSheet.create({
     color: colors.onSurfaceTertiary,
     fontSize: 10,
     fontWeight: "700",
-    letterSpacing: 1.5,
     marginBottom: 2,
   },
   rescuePillCode: {
     color: colors.onSurface,
     fontSize: 22,
     fontWeight: "900",
-    letterSpacing: 3,
     // Monospaced feel — matters when a responder reads it off the screen
     // out loud over radio.
     fontVariant: ["tabular-nums"],
@@ -1494,7 +1440,6 @@ const styles = StyleSheet.create({
     color: colors.onSurface,
     fontSize: 22,
     fontWeight: "800",
-    letterSpacing: 0.2,
     marginTop: spacing.sm,
   },
   nameModalBody: {
@@ -1534,10 +1479,10 @@ const styles = StyleSheet.create({
   },
   namePreviewLabel: {
     color: colors.onSurfaceTertiary,
-    fontSize: 12,
+    // #283: was 12pt uppercase. Sentence case, body size — this line
+    // explains what a stranger would see, so it has to be readable.
+    fontSize: 14,
     fontWeight: "700",
-    letterSpacing: 0.5,
-    textTransform: "uppercase",
   },
   namePreviewChip: {
     flexDirection: "row",
@@ -1565,7 +1510,6 @@ const styles = StyleSheet.create({
     color: colors.brandPrimary,
     fontSize: 14,
     fontWeight: "900",
-    letterSpacing: 2,
   },
   nameModalPrimary: {
     marginTop: spacing.sm,
@@ -1581,7 +1525,6 @@ const styles = StyleSheet.create({
     color: colors.onBrandPrimary,
     fontSize: 15,
     fontWeight: "800",
-    letterSpacing: 2,
   },
   nameModalSecondary: {
     height: 44,
@@ -1592,6 +1535,5 @@ const styles = StyleSheet.create({
     color: colors.onSurfaceTertiary,
     fontSize: 14,
     fontWeight: "700",
-    letterSpacing: 1,
   },
 });

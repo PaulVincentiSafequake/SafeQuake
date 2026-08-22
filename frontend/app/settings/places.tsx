@@ -658,7 +658,7 @@ const styles = StyleSheet.create({
     backgroundColor: "#151E2F", borderRadius: 12, padding: 16,
     borderWidth: 1, borderColor: "#25324A", gap: 10,
   },
-  inputLabel: { color: "#8FA0BC", fontSize: 12, fontWeight: "700", letterSpacing: 0.5 },
+  inputLabel: { color: "#8FA0BC", fontSize: 12, fontWeight: "700" },
   searchRow: { flexDirection: "row", gap: 10, alignItems: "center" },
   input: {
     flex: 1, minHeight: 48,
@@ -682,8 +682,7 @@ const styles = StyleSheet.create({
     borderWidth: 1.5,
   },
   resolvedHeader: {
-    color: "#B3E5C4", fontSize: 11, fontWeight: "800",
-    letterSpacing: 0.5, textTransform: "uppercase", marginBottom: 4,
+    color: "#B3E5C4", fontSize: 12, fontWeight: "800", marginBottom: 4,
   },
   resolvedAddress: {
     color: "#E7EDF5", fontSize: 15, fontWeight: "700", marginBottom: 2,

@@ -1,4 +1,6 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
+
+import { markBackendContact } from "@/src/utils/readiness";
 import Constants from "expo-constants";
 
 import { SAFE_ENDPOINT } from "@/src/theme";
@@ -241,6 +243,11 @@ export async function postStatus(opts: {
     })
       .then((r) => {
         console.log("[QuakeGuard] backend /api/status →", r.status);
+        // #281: the home screen tells people when this phone has not
+        // reached us for a long time. This is where "reached us" is
+        // recorded — one place, on a real round trip, not on a hopeful
+        // assumption.
+        if (r.ok) markBackendContact();
       })
       .catch((e: Error) => {
         console.log("[QuakeGuard] backend /api/status failed:", e?.message);
