@@ -1,12 +1,26 @@
 """Tests for the browser-openable /api/admin/purge-test-devices (GET) plus
-regression on the POST variant and neighbouring endpoints."""
+regression on the POST variant and neighbouring endpoints.
+
+Seeding note (#266): rows are inserted straight into Mongo rather than via
+/api/register-push. Since #266 that endpoint only files a device row when
+the push provider ACCEPTS the registration, and in this environment
+EMERGENT_PUSH_KEY is a placeholder so every registration is refused — by
+design. Going through the endpoint would therefore seed nothing.
+"""
 import os
 import re
+
+import pymongo
 import pytest
 import requests
+from dotenv import load_dotenv
+
+load_dotenv("/app/backend/.env")
 
 BASE_URL = os.environ.get("BACKEND_URL_OVERRIDE") or "http://localhost:8001"
-ADMIN_PWD = os.environ.get("ADMIN_TRIGGER_PASSWORD", "REDACTED_SEE_ENV")
+ADMIN_PWD = os.environ["ADMIN_TRIGGER_PASSWORD"]
+
+from server import TRIGGER_ALERT_CONFIRMATION  # noqa: E402
 
 TEST_ROWS = [
     ("TEST_a1", "android"),
@@ -16,6 +30,16 @@ TEST_ROWS = [
 ]
 LEGIT_ROW = ("qg-legit-1", "android")
 
+# Everything the purge endpoint considers a test row.
+PURGE_FILTER = {
+    "$or": [
+        {"user_id": {"$regex": "^TEST_"}},
+        {"user_id": {"$regex": "^test-"}},
+        {"user_id": {"$regex": "^diag-"}},
+        {"user_id": "dashboard"},
+    ]
+}
+
 
 @pytest.fixture(scope="module")
 def s():
@@ -24,43 +48,45 @@ def s():
     return sess
 
 
-def _register(sess, user_id, platform):
-    """POST /api/register-push. In this env EMERGENT_PUSH_KEY=placeholder,
-    so the relay returns 401 → endpoint returns 500 AFTER the DB upsert has
-    already succeeded. We therefore accept 201 or 500 as 'row is now in DB'.
-    """
-    return sess.post(
-        f"{BASE_URL}/api/register-push",
-        json={"user_id": user_id, "platform": platform, "device_token": f"tok-{user_id}"},
-    )
+@pytest.fixture(scope="module")
+def devices():
+    m = pymongo.MongoClient(os.environ["MONGO_URL"])
+    col = m[os.environ.get("DB_NAME", "test_database")].push_devices
+    yield col
+    m.close()
 
 
-def _assert_registered(r, uid):
-    assert r.status_code in (201, 500), f"seed {uid} unexpected: {r.status_code} {r.text}"
+def _seed(col, rows):
+    for uid, plat in rows:
+        col.update_one(
+            {"user_id": uid},
+            {"$set": {"user_id": uid, "platform": plat,
+                      "device_token": f"tok-{uid}"}},
+            upsert=True,
+        )
 
 
 def _count(sess):
-    # Count via the preview page (which reports total rows) — but simplest is a helper:
-    # We don't have a public GET-all endpoint, so parse from the preview page.
+    # No public GET-all endpoint, so read the total off the preview page.
     r = sess.get(f"{BASE_URL}/api/admin/purge-test-devices", params={"token": ADMIN_PWD})
     m = re.search(r"Currently\s+(\d+)\s+total device rows", r.text)
     return int(m.group(1)) if m else -1
 
 
+def _remaining(text):
+    m = re.search(r"Remaining:</b>\s*(\d+)", text)
+    assert m, text[:400]
+    return int(m.group(1))
+
+
 # ---------- Setup: seed rows ----------
 class TestSeed:
-    def test_seed_all_rows(self, s):
-        # Nuke ALL pre-existing rows (previous test iterations left legit rows behind).
-        # We do this via a direct mongo delete since the purge endpoint only removes
-        # rows matching the TEST_/test-/diag-/dashboard filter.
-        import pymongo
-        m = pymongo.MongoClient(os.environ.get("MONGO_URL", "mongodb://localhost:27017"))
-        m[os.environ.get("DB_NAME", "test_database")].push_devices.delete_many({})
-        m.close()
-
-        for uid, plat in TEST_ROWS + [LEGIT_ROW]:
-            r = _register(s, uid, plat)
-            _assert_registered(r, uid)
+    def test_seed_all_rows(self, devices):
+        # Clear only the rows the purge endpoint would match, so the counts
+        # below are exact without destroying real rows other tests rely on.
+        devices.delete_many(PURGE_FILTER)
+        _seed(devices, TEST_ROWS + [LEGIT_ROW])
+        assert devices.count_documents(PURGE_FILTER) == len(TEST_ROWS)
 
 
 # ---------- Auth on GET ----------
@@ -114,8 +140,8 @@ class TestConfirmDelete:
                   params={"token": ADMIN_PWD, "confirm": "yes"})
         assert r.status_code == 200
         assert "Deleted:</b> 4" in r.text, r.text[:400]
-        # 1 legit remaining
-        assert "Remaining:</b> 1" in r.text
+        # The legit row (and any other real row) survives.
+        assert _remaining(r.text) >= 1
         # Result HTML must also carry the no-referrer meta tag
         assert '<meta name="referrer" content="no-referrer">' in r.text, (
             "result page missing <meta name='referrer' content='no-referrer'>"
@@ -126,7 +152,7 @@ class TestConfirmDelete:
                   params={"token": ADMIN_PWD, "confirm": "yes"})
         assert r.status_code == 200
         assert "Deleted:</b> 0" in r.text
-        assert "Remaining:</b> 1" in r.text
+        assert _remaining(r.text) >= 1
 
     def test_preview_now_empty(self, s):
         r = s.get(f"{BASE_URL}/api/admin/purge-test-devices",
@@ -144,10 +170,9 @@ class TestPostVariant:
         # JSON body (not HTML)
         assert r.headers.get("content-type", "").startswith("application/json")
 
-    def test_post_with_header_200(self, s):
+    def test_post_with_header_200(self, s, devices):
         # Reseed a test row so this POST has something to delete
-        r0 = _register(s, "TEST_post_check", "android")
-        _assert_registered(r0, "TEST_post_check")
+        _seed(devices, [("TEST_post_check", "android")])
         r = s.post(
             f"{BASE_URL}/api/admin/purge-test-devices",
             headers={"X-Admin-Token": ADMIN_PWD},
@@ -161,11 +186,10 @@ class TestPostVariant:
 
 # ---------- HTML escaping (rogue user_id + platform) ----------
 class TestHtmlEscaping:
-    def test_script_tag_in_user_id_not_executed(self, s):
+    def test_script_tag_in_user_id_not_executed(self, s, devices):
         rogue_uid = "TEST_<script>alert(1)</script>"
         rogue_plat = "<img src=x onerror=alert(2)>"
-        r = _register(s, rogue_uid, rogue_plat)
-        _assert_registered(r, rogue_uid)
+        _seed(devices, [(rogue_uid, rogue_plat)])
         try:
             r = s.get(f"{BASE_URL}/api/admin/purge-test-devices",
                       params={"token": ADMIN_PWD})
@@ -213,30 +237,23 @@ class TestHtmlEscaping:
 
 # ---------- Regression on neighbouring endpoints ----------
 class TestRegression:
-    def test_trigger_alert_still_200(self, s):
+    def test_trigger_alert_still_200(self, s, stand_down_after):
         r = s.post(
             f"{BASE_URL}/api/trigger-alert",
             headers={"X-Admin-Token": ADMIN_PWD},
-            json={"triggeredBy": "regression-tester", "magnitude": 5.5},
+            json={"triggeredBy": "regression-tester", "magnitude": 5.5,
+                  "confirmation_phrase": TRIGGER_ALERT_CONFIRMATION},
         )
         assert r.status_code == 200, r.text
         data = r.json()
         assert data["status"] == "broadcast"
         assert "recipients" in data
 
-    def test_register_push_upserts(self, s):
-        r = _register(s, "TEST_upsert_1", "android")
-        _assert_registered(r, "upsert_1")
-        r2 = _register(s, "TEST_upsert_1", "ios")  # same user_id, different platform
-        _assert_registered(r2, "upsert_1")
-        # Cleanup
-        s.post(f"{BASE_URL}/api/admin/purge-test-devices",
-               headers={"X-Admin-Token": ADMIN_PWD})
-
     def test_status_get_and_post(self, s):
-        r = s.post(f"{BASE_URL}/api/status", json={"client_name": "TEST_client"})
-        assert r.status_code == 200
-        assert r.json()["client_name"] == "TEST_client"
+        r = s.post(f"{BASE_URL}/api/status",
+                   json={"deviceId": "TEST_purge_status", "status": "safe"})
+        assert r.status_code == 200, r.text
+        assert r.json()["device_id"] == "TEST_purge_status"
         r2 = s.get(f"{BASE_URL}/api/status")
         assert r2.status_code == 200
         assert isinstance(r2.json(), list)
@@ -254,7 +271,8 @@ class TestRegression:
         assert r.status_code == 404
 
     def test_shared_helper_used(self):
-        with open("/app/backend/server.py") as f:
+        # Helper lives in routes_diagnostics.py and is referenced by both the
+        # GET and POST paths → defined once, called twice.
+        with open("/app/backend/routes_diagnostics.py") as f:
             src = f.read()
-        # Helper defined once, referenced in both GET and POST paths → 3 total occurrences
         assert src.count("_run_purge_test_devices") >= 3

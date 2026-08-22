@@ -147,7 +147,13 @@ def test_incident_status_reflects_trigger_and_stand_down():
     )
     d = r.json()
     assert d["active"] is True, d
-    assert isinstance(d["reason"], str) and "stand-down" in d["reason"].lower()
+    assert isinstance(d["reason"], str)
+    # #277 wording: the reason speaks in plain words about calling the
+    # alert off — it does not use the operator-jargon "stand-down".
+    reason = d["reason"].lower()
+    assert "an alert is running" in reason, d
+    assert "call the alert off" in reason, d
+    assert "stand-down" not in reason, d
     assert d["hours_since_trigger"] is not None
     assert d["hours_since_trigger"] < 72
 

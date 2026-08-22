@@ -272,10 +272,11 @@ def test_trigger_alert_wrong_token_401(api):
     assert r.status_code == 401
 
 
-def test_trigger_alert_correct_token_200(api):
+def test_trigger_alert_correct_token_200(api, stand_down_after):
     r = api.post(
         f"{BASE_URL}/api/trigger-alert",
-        json={"magnitude": 6.4, "triggeredBy": "qg-test-suite"},
+        json={"magnitude": 6.4, "triggeredBy": "qg-test-suite",
+              "confirmation_phrase": "SIREN"},
         headers={"X-Admin-Token": ADMIN_TOKEN},
     )
     assert r.status_code == 200, f"got {r.status_code}: {r.text}"

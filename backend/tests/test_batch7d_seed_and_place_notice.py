@@ -19,7 +19,7 @@ import requests
 
 BASE_URL = os.environ.get("EXPO_PUBLIC_BACKEND_URL", "").rstrip("/") or \
            os.environ.get("EXPO_BACKEND_URL", "").rstrip("/")
-ADMIN_TOKEN = os.environ.get("ADMIN_TRIGGER_PASSWORD") or "m11vRwfDoxnHvIMLkKzjUwQy"
+ADMIN_TOKEN = os.environ["ADMIN_TRIGGER_PASSWORD"]
 
 
 @pytest.fixture

@@ -36,24 +36,20 @@ class _FakeCollection:
         for d in self._docs:
             ok = True
             for k, v in (query or {}).items():
-                if isinstance(v, dict) and "$in" in v:
-                    if d.get(k) not in v["$in"]:
+                if isinstance(v, dict):
+                    # Operator form — every operator present must hold.
+                    if "$in" in v and d.get(k) not in v["$in"]:
                         ok = False
-                        break
-                elif isinstance(v, dict) and "$exists" in v:
-                    if v["$exists"] and d.get(k) is None:
-                        ok = False
-                        break
-                    if not v["$exists"] and d.get(k) is not None:
-                        ok = False
-                        break
+                    if "$exists" in v:
+                        present = d.get(k) is not None
+                        if bool(v["$exists"]) != present:
+                            ok = False
                     if "$ne" in v and d.get(k) == v["$ne"]:
                         ok = False
-                        break
-                else:
-                    if d.get(k) != v:
-                        ok = False
-                        break
+                elif d.get(k) != v:
+                    ok = False
+                if not ok:
+                    break
             if ok:
                 results.append(d)
 

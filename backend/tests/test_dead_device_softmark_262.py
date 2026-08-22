@@ -4,13 +4,12 @@ from an always-on background job (the re-check sweeper) with no human
 action per deletion. Fixed to soft-mark (dead_token=True) instead of
 delete, and re-registration clears the mark. This test locks that in.
 
-Single asyncio.run() for the whole test — avoids the pre-existing
-TestClient+Motor "Event loop is closed" flakiness documented in the
-other #262 test files.
+The whole scenario runs on the suite-wide event loop (the `run_async`
+fixture in conftest.py) — Motor pins itself to one loop for the life of
+the process, so a private asyncio.run() here would fail in a full run.
 """
 from __future__ import annotations
 
-import asyncio
 from dotenv import load_dotenv
 load_dotenv("/app/backend/.env")
 
@@ -61,5 +60,5 @@ async def _scenario():
     await db.push_devices.delete_one({"user_id": TEST_USER_ID})
 
 
-def test_dead_device_is_marked_not_deleted_and_can_recover():
-    asyncio.run(_scenario())
+def test_dead_device_is_marked_not_deleted_and_can_recover(run_async):
+    run_async(_scenario)

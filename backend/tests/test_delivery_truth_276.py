@@ -34,7 +34,7 @@ BASE_URL = (
     or os.environ.get("EXPO_BACKEND_URL")
     or "http://localhost:8001"
 ).rstrip("/")
-ADMIN_TOKEN = os.environ.get("ADMIN_TRIGGER_PASSWORD", "m11vRwfDoxnHvIMLkKzjUwQy")
+ADMIN_TOKEN = os.environ["ADMIN_TRIGGER_PASSWORD"]
 ID_A = "qg-1755700000001-neo268a"
 # Created and deleted by the live test below. Clearly a test row.
 DEV_276 = "qg-test-276-delivery"

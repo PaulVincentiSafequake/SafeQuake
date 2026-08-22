@@ -30,7 +30,7 @@ BASE_URL = (
     or os.environ.get("EXPO_BACKEND_URL")
     or "http://localhost:8001"
 ).rstrip("/")
-ADMIN_TOKEN = os.environ.get("ADMIN_TRIGGER_PASSWORD", "m11vRwfDoxnHvIMLkKzjUwQy")
+ADMIN_TOKEN = os.environ["ADMIN_TRIGGER_PASSWORD"]
 
 ID_C = "qg-1755700000003-neo268c"   # trapped, seeded by seed_268_scenario
 

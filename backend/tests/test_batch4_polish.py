@@ -97,8 +97,11 @@ class TestA1JargonFreePdfs:
     def test_no_b1_b2_anywhere(self):
         _delete_logo()   # logo variants tested separately
         for name, text in self._texts().items():
-            assert "B1" not in text, f"'B1' still present in {name} PDF"
-            assert "B2" not in text, f"'B2' still present in {name} PDF"
+            # Word-boundary match: a randomly generated rescue short code
+            # can legitimately contain "B1" (e.g. FB1FC) and that is not
+            # the jargon this test is about.
+            assert not re.search(r"\bB1\b", text), f"'B1' still present in {name} PDF"
+            assert not re.search(r"\bB2\b", text), f"'B2' still present in {name} PDF"
 
     def test_team_title_is_plain_language(self):
         r = requests.get(TEAM_URL, headers=HEADERS, timeout=60)

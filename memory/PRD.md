@@ -2488,3 +2488,54 @@ because they need a build either way.
   because it is also what a mast failure looks like. After the pilot.
 - **#305**: tremor notices on by default for new installs, with a
   one-time "want fewer?" question after the first week. In the phone batch.
+
+### #307 — the test suite tells the truth again
+
+143 of 1,001 backend tests were failing. None of them were failing because
+the product was broken; every one was a test still asserting a world that
+had been deliberately changed. Left alone, that is worse than having no
+tests, because a real regression hides in the noise.
+
+What was wrong, and what was done:
+
+- **Seven whole files tested endpoints that no longer exist.** The
+  `/api/debug/*` family (devices, test-push, probe-push, last-push-events,
+  recipients-sample, full-recipient-list, register-push-capture) was removed
+  in an earlier cleanup. ~100 failures. Deleted; the "these must stay 404"
+  guards live on in `test_critical_alerts.py` and `test_purge_browser.py`.
+- **Tests seeded phones through `/api/register-push`.** Since #266 that
+  endpoint only files a device row when the push provider ACCEPTS the
+  registration, and this environment's key is a placeholder, so every
+  registration is refused *by design*. Those tests now insert rows straight
+  into Mongo and separately assert the #266 contract (502, no row).
+- **Tests sent alerts without the confirmation phrase** (#245) and without
+  calling the alert off afterwards. A live incident legitimately holds
+  records on the working board, so a stray trigger made unrelated board
+  tests fail — including on the NEXT run, since the state is in Mongo.
+  Every test that sends a real alert now stands it down (`stand_down_after`).
+- **Motor pins itself to one event loop for the life of the process.**
+  Starlette's TestClient makes a new loop per request and `asyncio.run()`
+  makes its own, so tests passed alone and failed together. `conftest.py`
+  now gives the whole session ONE loop (and a `run_async` fixture for tests
+  that call server internals directly).
+- **The per-IP registration rate limit is real** and 20/hour is generous for
+  a phone but not for a test suite. `clear_register_rate_limit` empties the
+  bucket for the handful of tests that register over HTTP.
+- **Stale assertions**: app version pinned to 1.0.8; the critical-alert
+  payload and `send_push` moved to `apns.py` / `push_relay.py`; the legacy
+  `client_name` POST /api/status is now the device check-in payload; #277
+  reworded incident status away from "stand-down"; two in-memory fake Mongo
+  matchers didn't understand `$ne`, so their devices silently disappeared.
+- **Two genuinely brittle tests**, fixed at the cause: the audit CSV returns
+  the newest 500 rows in the window, and a suite run writes several hundred
+  events, so seeded rows fell off the end of a six-hour window (window
+  narrowed to ten minutes); and the B1/B2 table-vs-narrative comparison
+  compares CURRENT state against WINDOW state, which is only meaningful over
+  a window wide enough to contain the events behind that state (29 days).
+- **The "no B1/B2 jargon" guard** was matching the "B1" inside randomly
+  generated rescue short codes like FB1FC. Now a word-boundary match.
+- Nobody keeps a copy of the admin password any more: `conftest.py` loads
+  `backend/.env` once and eight files read it from the environment.
+
+Result: 910 passed, 7 skipped (all env-gated), 0 failed — stable across
+three consecutive full runs. No product code was changed.

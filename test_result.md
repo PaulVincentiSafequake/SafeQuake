@@ -227,3 +227,48 @@ agent_communication:
       EXPO_PUBLIC_BACKEND_URL in this fork), test_critical_alerts (asserts app
       version 1.0.8), test_debug_endpoints + push/probe suites (endpoints
       removed or moved behind auth in earlier sessions).
+
+## #307 — legacy backend test suite cleanup (2026-08-23)
+
+  - agent: "main"
+    message: |
+      143 failing / 858 passing -> 910 passing, 7 skipped (env-gated), 0
+      failing, stable across three consecutive full runs. NO product code
+      changed — every failure was a test asserting a world we had
+      deliberately changed.
+
+      Deleted 7 files that only tested the removed /api/debug/* endpoints
+      (~100 failures). The "must stay 404" guards survive in
+      test_critical_alerts.py and test_purge_browser.py.
+
+      New tests/conftest.py does three things worth knowing about:
+        * ONE event loop for the whole session (Motor pins itself to the
+          first loop it sees; TestClient makes a new one per request, which
+          is why tests passed alone and failed together). Use the
+          `run_async` fixture instead of asyncio.run() for anything that
+          touches the db.
+        * `clear_register_rate_limit` — the per-IP /register-push limit is
+          20/hour, generous for a phone, not for a test suite.
+        * `stand_down_after` — MANDATORY for any test that sends a real
+          alert. A live incident holds records on the working board, so a
+          stray trigger breaks unrelated board tests, including on the next
+          run (the state is in Mongo).
+        * loads backend/.env once, so no test file carries a copy of
+          ADMIN_TRIGGER_PASSWORD any more.
+
+      Rewritten to current doctrine: device rows are seeded straight into
+      Mongo (since #266 /register-push refuses to file a row the push
+      provider rejected, which is every registration in this environment);
+      trigger-alert calls carry the #245 confirmation phrase; POST
+      /api/status uses the device check-in payload, not legacy client_name;
+      the critical-alert payload assertions point at apns.py and
+      push_relay.py where that code now lives.
+
+      Two brittle tests fixed at the cause, not by relaxing them: the audit
+      CSV returns the newest 500 rows in a window and a suite run writes
+      several hundred events (window narrowed to 10 min), and the B1/B2
+      table-vs-narrative check compares CURRENT state against WINDOW state
+      (needs a wide window, now 29 days). Also the "no B1/B2 jargon" guard
+      was matching the B1 inside random short codes like FB1FC — now a
+      word-boundary match, which is the same false positive noted in
+      iteration 34.

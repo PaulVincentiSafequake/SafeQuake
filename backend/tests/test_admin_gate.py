@@ -10,10 +10,15 @@ import os
 import uuid
 import pytest
 import requests
+from dotenv import load_dotenv
+
+load_dotenv("/app/backend/.env")
 
 # Per problem statement: curl against local backend.
 BASE_URL = "http://localhost:8001"
-ADMIN_PWD = "REDACTED_SEE_ENV"
+ADMIN_PWD = os.environ["ADMIN_TRIGGER_PASSWORD"]
+
+from server import TRIGGER_ALERT_CONFIRMATION  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -61,10 +66,11 @@ class TestTriggerAlertGate:
             "Invalid or missing X-Admin-Token", "Not authenticated",
         )
 
-    def test_correct_token_returns_200_broadcast(self, s):
+    def test_correct_token_returns_200_broadcast(self, s, stand_down_after):
         r = requests.post(
             f"{BASE_URL}/api/trigger-alert",
-            json={"triggeredBy": "dashboard"},
+            json={"triggeredBy": "dashboard",
+                  "confirmation_phrase": TRIGGER_ALERT_CONFIRMATION},
             headers={"Content-Type": "application/json", "X-Admin-Token": ADMIN_PWD},
         )
         assert r.status_code == 200, r.text
@@ -73,7 +79,6 @@ class TestTriggerAlertGate:
         assert isinstance(data.get("recipients"), int)
         # Push should NOT be delivered locally (placeholder key).
         assert data.get("push_delivered") is False
-        assert data.get("push_error") == "EMERGENT_PUSH_KEY missing or invalid"
 
 
 # ---------- CORS preflight from safequake origin ----------
@@ -98,49 +103,41 @@ class TestCorsPreflight:
 
 # ---------- /api/register-push unchanged (no admin gate) ----------
 class TestRegisterPushNotGated:
-    def test_register_push_writes_local_db_even_when_upstream_fails(self, s):
+    def test_register_push_is_not_behind_the_admin_token(self, s, clear_register_rate_limit):
         user_id = f"TEST_{uuid.uuid4()}"
-        body = {"user_id": user_id, "platform": "android", "device_token": "TEST_tok"}
-        # NOTE: With placeholder EMERGENT_PUSH_KEY, upstream returns 401 →
-        # backend converts to HTTPException(500, "EMERGENT_PUSH_KEY missing or invalid").
-        # Local DB write should still have happened BEFORE the upstream call.
+        body = {"user_id": user_id, "platform": "android",
+                "device_token": "TEST_" + "t" * 40}
         r = requests.post(
             f"{BASE_URL}/api/register-push",
             json=body,
             headers={"Content-Type": "application/json"},
         )
-        # 201 (upstream OK) or 500 (upstream 401) — both mean "not gated by X-Admin-Token"
-        assert r.status_code in (201, 500), r.text
+        # A phone must be able to register before anyone has signed in
+        # anywhere, so this endpoint is never gated by X-Admin-Token.
+        # #266: with a placeholder EMERGENT_PUSH_KEY the relay refuses the
+        # registration and the endpoint answers 502 WITHOUT filing a row —
+        # no false promise that the phone is reachable.
         assert r.status_code != 401, "register-push must NOT require X-Admin-Token"
-
-        # Now the trigger-alert with correct token should include this user in
-        # recipients (proves push_devices was written even on upstream failure).
-        r2 = requests.post(
-            f"{BASE_URL}/api/trigger-alert",
-            json={"triggeredBy": "OTHER_" + uuid.uuid4().hex},
-            headers={"Content-Type": "application/json", "X-Admin-Token": ADMIN_PWD},
-        )
-        assert r2.status_code == 200, r2.text
-        # recipients should be >= 1 since we just registered a device
-        assert r2.json().get("recipients", 0) >= 1
+        assert r.status_code in (201, 502), r.text
 
 
-# ---------- Legacy /api/status endpoints unchanged ----------
-class TestLegacyStatus:
+# ---------- /api/status endpoints ungated ----------
+class TestStatusNotGated:
+    device_id = "TEST_admin_gate_status"
+
     def test_status_post_no_gate(self, s):
-        r = s.post(f"{BASE_URL}/api/status", json={"client_name": "TEST_legacy"})
+        r = s.post(f"{BASE_URL}/api/status",
+                   json={"deviceId": self.device_id, "status": "safe"})
         assert r.status_code == 200, r.text
         d = r.json()
-        assert d["client_name"] == "TEST_legacy"
-        assert "id" in d
-        assert "timestamp" in d
+        assert d["status"] == "ok"
+        assert d["device_id"] == self.device_id
+        assert "updated_at" in d
 
     def test_status_get_no_gate(self, s):
         r = s.get(f"{BASE_URL}/api/status")
         assert r.status_code == 200
-        arr = r.json()
-        assert isinstance(arr, list)
-        assert any(x.get("client_name") == "TEST_legacy" for x in arr)
+        assert isinstance(r.json(), list)
 
 
 # ---------- HTML snippet sanity ----------

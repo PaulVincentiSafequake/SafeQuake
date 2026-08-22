@@ -1337,7 +1337,7 @@ async def export_audit_log_pdf(
             details = (
                 f"Device {e.get('short_code') or '?'} "
                 f"(was {e.get('prior_status') or '?'}/{e.get('prior_severity') or '?'}). "
-                f"Notes: {e.get('notes') or '—'}"
+                f"Notes: {e.get('notes') or 'Not known'}"
             )
             meta = e.get("device_id") or ""
         elif kind_str == "rescue_reverted":

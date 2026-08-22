@@ -174,9 +174,14 @@ def test_seeded_chartchk_device_contributes_one_red_bar():
         {"device_id": "qg-1787000000000-chartchk"}
     ))
     assert len(rows) == 5
-    # Widen the window to include all 5 events
-    since = datetime.now(timezone.utc) - timedelta(hours=6)
-    until = datetime.now(timezone.utc) + timedelta(hours=1)
+    # Window derived from the seeded rows themselves — the seed is fixed in
+    # time, so a window anchored to "now" drifts out of range as time passes.
+    stamps = sorted(
+        datetime.fromisoformat(str(r["recorded_at"]).replace("Z", "+00:00"))
+        for r in rows
+    )
+    since = stamps[0] - timedelta(hours=1)
+    until = stamps[-1] + timedelta(hours=1)
     buckets, _ = reports_export._bucket_timeline(rows, since, until)
     assert sum(b["trapped"] for b in buckets) == 1
     assert sum(b["rescued"] for b in buckets) == 0
@@ -253,14 +258,17 @@ class _FakeCollection:
         for d in self.docs:
             ok = True
             for k, v in query.items():
-                if isinstance(v, dict) and "$in" in v:
-                    if d.get(k) not in v["$in"]:
-                        ok = False; break
-                elif isinstance(v, dict) and "$exists" in v:
-                    if v["$exists"] and k not in d:
-                        ok = False; break
+                if isinstance(v, dict):
+                    if "$in" in v and d.get(k) not in v["$in"]:
+                        ok = False
+                    if "$exists" in v and bool(v["$exists"]) != (d.get(k) is not None):
+                        ok = False
+                    if "$ne" in v and d.get(k) == v["$ne"]:
+                        ok = False
                 elif d.get(k) != v:
-                    ok = False; break
+                    ok = False
+                if not ok:
+                    break
             if ok:
                 rows.append(d)
         return _Cur(rows)

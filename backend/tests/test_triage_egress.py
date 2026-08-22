@@ -21,7 +21,7 @@ import os
 import requests
 
 BASE_URL = "http://localhost:8001"
-ADMIN_TOKEN = os.environ.get("ADMIN_TRIGGER_PASSWORD") or "m11vRwfDoxnHvIMLkKzjUwQy"
+ADMIN_TOKEN = os.environ["ADMIN_TRIGGER_PASSWORD"]
 HEADERS = {"X-Admin-Token": ADMIN_TOKEN}
 ALERT_TSX = "/app/frontend/app/alert.tsx"
 DEVICE = "qg-1700000000099-egressft"

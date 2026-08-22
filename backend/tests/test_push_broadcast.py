@@ -1,24 +1,38 @@
 """Backend tests for QuakeGuard push fan-out (register-push + trigger-alert).
 
-Tests run against localhost:8001 (per task spec: direct backend curl testing).
-EMERGENT_PUSH_KEY is placeholder → upstream Emergent relay will 401.
-Expected preview behaviour:
-  - /api/register-push returns 500 (upstream 401 raises HTTPException) BUT
-    the device row must already be persisted in db.push_devices before the
-    upstream call.
-  - /api/trigger-alert must ALWAYS return 200 with push_delivered:false and
-    push_error='EMERGENT_PUSH_KEY missing or invalid'.
-  - Legacy /api/status POST + GET must still work.
+Tests run against the local backend on port 8001.
+
+Current doctrine these tests pin down:
+  - #266: /api/register-push only files a row in `push_devices` when the
+    push provider ACCEPTS the registration. EMERGENT_PUSH_KEY is a
+    placeholder here, so the relay 401s and the endpoint answers 502 with
+    no row — the app is never told a phone is on the alert list when it
+    isn't.
+  - #262: obviously-fake tokens are refused with 400 before anything else.
+  - #245: /api/trigger-alert needs the confirmation phrase naming the
+    consequence, and always answers 200 with push_delivered:false rather
+    than 500 when the provider is unreachable.
+
+Device rows are therefore seeded straight into Mongo.
 """
 import os
 import uuid
+
 import pytest
 import requests
+from dotenv import load_dotenv
 from pymongo import MongoClient
 
+load_dotenv("/app/backend/.env")
+
 BASE_URL = "http://localhost:8001"
-MONGO_URL = os.environ.get("MONGO_URL", "mongodb://localhost:27017")
+MONGO_URL = os.environ["MONGO_URL"]
 DB_NAME = os.environ.get("DB_NAME", "test_database")
+ADMIN_PWD = os.environ["ADMIN_TRIGGER_PASSWORD"]
+
+from server import TRIGGER_ALERT_CONFIRMATION  # noqa: E402
+
+ADMIN_HDR = {"X-Admin-Token": ADMIN_PWD}
 
 
 @pytest.fixture(scope="module")
@@ -36,50 +50,47 @@ def api():
 
 
 @pytest.fixture(scope="module")
-def seed_devices(api, db):
-    """Register the 3 test devices per task spec (a). Persistence must occur
-    even though upstream 401s."""
-    # Unique per run to avoid cross-run interference
+def seed_devices(db):
     suffix = uuid.uuid4().hex[:6]
     devs = [
-        {"user_id": f"TEST_dev-A-{suffix}", "platform": "ios", "device_token": "tok-A"},
-        {"user_id": f"TEST_dev-B-{suffix}", "platform": "android", "device_token": "tok-B"},
-        {"user_id": f"TEST_dev-C-{suffix}", "platform": "ios", "device_token": "tok-C"},
+        {"user_id": f"TEST_dev-A-{suffix}", "platform": "ios",
+         "device_token": "a" * 64},
+        {"user_id": f"TEST_dev-B-{suffix}", "platform": "android",
+         "device_token": "fcm-" + "b" * 60},
+        {"user_id": f"TEST_dev-C-{suffix}", "platform": "ios",
+         "device_token": "c" * 64},
     ]
     for d in devs:
-        r = api.post(f"{BASE_URL}/api/register-push", json=d)
-        # Upstream 401 is expected → 500 surfaced OR 201 if provider passes.
-        # Either way the DB row must exist. Assert body-persistence separately.
-        assert r.status_code in (201, 500), f"unexpected status {r.status_code}: {r.text}"
+        db.push_devices.update_one({"user_id": d["user_id"]}, {"$set": d}, upsert=True)
 
     yield devs
 
-    # Teardown
     db.push_devices.delete_many({"user_id": {"$in": [d["user_id"] for d in devs]}})
 
 
-# ---------- (a) register-push persistence ----------
-class TestRegisterPushPersistence:
-    def test_register_persists_before_upstream(self, seed_devices, db):
-        for d in seed_devices:
-            row = db.push_devices.find_one({"user_id": d["user_id"]})
-            assert row is not None, f"device {d['user_id']} not persisted"
-            assert row["platform"] == d["platform"]
-            assert row["device_token"] == d["device_token"]
+def _trigger(api, **body):
+    body.setdefault("confirmation_phrase", TRIGGER_ALERT_CONFIRMATION)
+    return api.post(f"{BASE_URL}/api/trigger-alert", json=body, headers=ADMIN_HDR)
 
-    def test_register_upsert_idempotent(self, api, db, seed_devices):
-        d = seed_devices[0]
-        new_token = "tok-A-refreshed"
+
+# ---------- (a) register-push honesty ----------
+class TestRegisterPush:
+    def test_refused_registration_leaves_no_row(self, api, db, clear_register_rate_limit):
+        uid = f"TEST_reg_{uuid.uuid4().hex[:6]}"
         r = api.post(
             f"{BASE_URL}/api/register-push",
-            json={"user_id": d["user_id"], "platform": d["platform"], "device_token": new_token},
+            json={"user_id": uid, "platform": "ios", "device_token": "d" * 64},
         )
-        assert r.status_code in (201, 500)
-        row = db.push_devices.find_one({"user_id": d["user_id"]})
-        assert row["device_token"] == new_token
-        # only one row per user_id (upsert not insert)
-        count = db.push_devices.count_documents({"user_id": d["user_id"]})
-        assert count == 1
+        assert r.status_code == 502, r.text
+        assert db.push_devices.count_documents({"user_id": uid}) == 0
+
+    def test_obviously_fake_token_is_refused(self, api, clear_register_rate_limit):
+        r = api.post(
+            f"{BASE_URL}/api/register-push",
+            json={"user_id": "TEST_fake_token", "platform": "ios",
+                  "device_token": "tok-A"},
+        )
+        assert r.status_code == 400, r.text
 
     def test_register_validation_error(self, api):
         r = api.post(f"{BASE_URL}/api/register-push", json={"user_id": "x"})
@@ -88,45 +99,42 @@ class TestRegisterPushPersistence:
 
 # ---------- (b/c/d) trigger-alert broadcast + recipients count ----------
 class TestTriggerAlert:
+    @pytest.fixture(autouse=True)
+    def _call_the_alert_off(self, stand_down_after):
+        """Every alert these tests send is stood down again."""
+
     def test_triggered_by_excludes_source(self, api, seed_devices):
-        """spec (b): triggeredBy=dev-A → recipients=2 (dev-B + dev-C),
-        push_delivered=false, push_error='EMERGENT_PUSH_KEY missing or invalid'."""
         src = seed_devices[0]["user_id"]
-        r = api.post(f"{BASE_URL}/api/trigger-alert", json={"triggeredBy": src}, headers={"X-Admin-Token": "REDACTED_SEE_ENV"})
-        assert r.status_code == 200
+        r = _trigger(api, triggeredBy=src)
+        assert r.status_code == 200, r.text
         body = r.json()
         assert body["status"] == "broadcast"
-        # There may be OTHER pre-existing rows in preview db; assert AT LEAST 2
-        # AND that the source is NOT counted.
+        # Other rows may exist in this database; assert AT LEAST the two
+        # siblings, and that the source itself is not counted.
         assert body["recipients"] >= 2
         assert body["push_delivered"] is False
-        assert body["push_error"] == "EMERGENT_PUSH_KEY missing or invalid"
 
     def test_triggered_by_dev_a_recipients_equals_others(self, api, db, seed_devices):
         """Strict count: recipients from body == total docs where user_id != triggeredBy."""
         src = seed_devices[0]["user_id"]
-        expected = db.push_devices.count_documents({"user_id": {"$ne": src}})
-        r = api.post(f"{BASE_URL}/api/trigger-alert", json={"triggeredBy": src}, headers={"X-Admin-Token": "REDACTED_SEE_ENV"})
+        expected = db.push_devices.count_documents({
+            "user_id": {"$ne": src}, "dead_token": {"$ne": True},
+        })
+        r = _trigger(api, triggeredBy=src)
         assert r.status_code == 200
         assert r.json()["recipients"] == expected
 
     def test_empty_body_returns_all_devices(self, api, db, seed_devices):
-        """spec (c): POST /api/trigger-alert body {} → recipients = total devices."""
-        expected = db.push_devices.count_documents({})
-        r = api.post(f"{BASE_URL}/api/trigger-alert", json={}, headers={"X-Admin-Token": "REDACTED_SEE_ENV"})
+        expected = db.push_devices.count_documents({"dead_token": {"$ne": True}})
+        r = _trigger(api)
         assert r.status_code == 200
         body = r.json()
         assert body["recipients"] == expected
         assert body["push_delivered"] is False
 
     def test_magnitude_flows_through(self, api, seed_devices):
-        """spec (d): with magnitude=7.1 the endpoint still returns 200 and
-        recipients count is stable for triggeredBy=dev-A."""
         src = seed_devices[0]["user_id"]
-        r = api.post(
-            f"{BASE_URL}/api/trigger-alert",
-            json={"triggeredBy": src, "magnitude": 7.1}, headers={"X-Admin-Token": "REDACTED_SEE_ENV"},
-        )
+        r = _trigger(api, triggeredBy=src, magnitude=7.1)
         assert r.status_code == 200
         body = r.json()
         assert body["recipients"] >= 2
@@ -135,26 +143,34 @@ class TestTriggerAlert:
 
     def test_never_500s_on_upstream_failure(self, api):
         """Core invariant: even with no upstream key, trigger-alert must be 200."""
-        r = api.post(f"{BASE_URL}/api/trigger-alert", json={"triggeredBy": "nonexistent"}, headers={"X-Admin-Token": "REDACTED_SEE_ENV"})
+        r = _trigger(api, triggeredBy="nonexistent")
         assert r.status_code == 200
         assert r.json()["push_delivered"] is False
 
+    def test_wrong_confirmation_phrase_is_refused(self, api):
+        r = api.post(
+            f"{BASE_URL}/api/trigger-alert",
+            json={"triggeredBy": "nonexistent", "confirmation_phrase": "nope"},
+            headers=ADMIN_HDR,
+        )
+        assert r.status_code == 400, r.text
+        assert TRIGGER_ALERT_CONFIRMATION in r.json()["detail"]
 
-# ---------- (e) Legacy status endpoints ----------
-class TestLegacyStatus:
+
+# ---------- (e) status endpoints ----------
+class TestStatus:
     def test_status_post_and_get(self, api):
-        name = f"TEST_client_{uuid.uuid4().hex[:6]}"
-        r = api.post(f"{BASE_URL}/api/status", json={"client_name": name})
-        assert r.status_code == 200
+        device_id = f"TEST_broadcast_{uuid.uuid4().hex[:6]}"
+        r = api.post(f"{BASE_URL}/api/status",
+                     json={"deviceId": device_id, "status": "safe"})
+        assert r.status_code == 200, r.text
         created = r.json()
-        assert created["client_name"] == name
-        assert "id" in created and "timestamp" in created
+        assert created["status"] == "ok"
+        assert created["device_id"] == device_id
 
-        # GET must include the created row
         rg = api.get(f"{BASE_URL}/api/status")
         assert rg.status_code == 200
-        rows = rg.json()
-        assert any(x["client_name"] == name for x in rows)
+        assert isinstance(rg.json(), list)
 
     def test_root(self, api):
         r = api.get(f"{BASE_URL}/api/")

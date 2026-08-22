@@ -24,7 +24,7 @@ BASE_URL = (
     or os.environ.get("EXPO_BACKEND_URL")
     or "https://quake-alert-18.preview.emergentagent.com"
 ).rstrip("/")
-ADMIN_TOKEN = os.environ.get("ADMIN_TRIGGER_PASSWORD") or "m11vRwfDoxnHvIMLkKzjUwQy"
+ADMIN_TOKEN = os.environ["ADMIN_TRIGGER_PASSWORD"]
 MONGO_URL = os.environ.get("MONGO_URL") or "mongodb://localhost:27017"
 DB_NAME = os.environ.get("DB_NAME") or "test_database"
 

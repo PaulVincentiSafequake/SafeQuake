@@ -84,7 +84,7 @@ def seeded(request):
     # WITH a name → export must backfill it. Precise 12-dp coordinates →
     # export must round to 5 dp.
     db.status_events.insert_one({
-        "recorded_at": (now - timedelta(hours=2)).isoformat(),
+        "recorded_at": (now - timedelta(minutes=8)).isoformat(),
         "device_id": dev_named, "display_name": None,
         "status": "trapped", "severity": "red", "mobility": "trapped",
         "latitude": 35.887200385677, "longitude": 14.512345678901,
@@ -92,7 +92,7 @@ def seeded(request):
         "platform": "ios", "_test_seed": TAG,
     })
     db.status_events.insert_one({
-        "recorded_at": (now - timedelta(hours=1)).isoformat(),
+        "recorded_at": (now - timedelta(minutes=7)).isoformat(),
         "device_id": dev_anon, "display_name": None,
         "status": "trapped", "severity": "yellow", "mobility": "mobile",
         "latitude": 35.901234567891, "longitude": 14.498765432109,
@@ -109,7 +109,7 @@ def seeded(request):
     )
     # rescued event attributed to an operator email → pseudonymisation target
     db.status_events.insert_one({
-        "recorded_at": (now - timedelta(minutes=30)).isoformat(),
+        "recorded_at": (now - timedelta(minutes=6)).isoformat(),
         "device_id": dev_named, "display_name": None,
         "status": "rescued", "severity": None, "mobility": None,
         "latitude": 35.887200385677, "longitude": 14.512345678901,
@@ -129,7 +129,7 @@ def seeded(request):
     # own separately-worded figure, never merged into "found by a rescue team"
     dev_selfsafe = _DEV_SELF
     db.status_events.insert_one({
-        "recorded_at": (now - timedelta(minutes=90)).isoformat(),
+        "recorded_at": (now - timedelta(minutes=5)).isoformat(),
         "device_id": dev_selfsafe, "display_name": None,
         "status": "trapped", "severity": "green", "mobility": "mobile",
         "latitude": 35.912345678901, "longitude": 14.487654321098,
@@ -137,7 +137,7 @@ def seeded(request):
         "battery_state": "unplugged", "platform": "ios", "_test_seed": TAG,
     })
     db.status_events.insert_one({
-        "recorded_at": (now - timedelta(minutes=20)).isoformat(),
+        "recorded_at": (now - timedelta(minutes=4)).isoformat(),
         "device_id": dev_selfsafe, "display_name": None,
         "status": "safe", "severity": None, "mobility": None,
         "latitude": 35.912345678901, "longitude": 14.487654321098,
@@ -169,8 +169,30 @@ def seeded(request):
 
 
 def _window():
+    """A DELIBERATELY NARROW window.
+
+    The export returns the newest MAX_EXPORT_ROWS (500) rows in the window,
+    and a full run of this suite writes several hundred status/trigger
+    events. Over a six-hour window the rows seeded above get pushed off the
+    end and these tests fail for a reason that has nothing to do with the
+    export. The seeded events are minutes old, so ten minutes is plenty.
+    """
     now = datetime.now(timezone.utc)
-    return {"since": (now - timedelta(hours=6)).isoformat(),
+    return {"since": (now - timedelta(minutes=10)).isoformat(),
+            "until": (now + timedelta(minutes=5)).isoformat()}
+
+
+def _wide_window():
+    """For the table-vs-narrative comparisons only.
+
+    The aggregate table on B1/B2 reads CURRENT state (every record on the
+    board, whenever it was last touched) while the narrative under "What
+    happened during this window" reads the window. Comparing the two is
+    only meaningful when the window is wide enough to contain the events
+    behind the current state — hence 29 days (the endpoint caps at 30).
+    """
+    now = datetime.now(timezone.utc)
+    return {"since": (now - timedelta(days=29)).isoformat(),
             "until": (now + timedelta(minutes=5)).isoformat()}
 
 
@@ -518,8 +540,9 @@ class TestNarrativeTableConsistency:
     figures it describes, instead of testing each in isolation."""
 
     def _texts(self):
-        b1 = _pdf_text(requests.get(B1_URL, headers=HEADERS, params=_window(), timeout=30).content)
-        b2 = _pdf_text(requests.get(B2_URL, headers=HEADERS, params=_window(), timeout=30).content)
+        w = _wide_window()
+        b1 = _pdf_text(requests.get(B1_URL, headers=HEADERS, params=w, timeout=30).content)
+        b2 = _pdf_text(requests.get(B2_URL, headers=HEADERS, params=w, timeout=30).content)
         return b1, b2
 
     @staticmethod

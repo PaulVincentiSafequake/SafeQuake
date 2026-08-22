@@ -14,11 +14,24 @@ import re
 import uuid
 from pathlib import Path
 
+import pymongo
 import pytest
 import requests
+from dotenv import load_dotenv
 
-BASE_URL = os.environ["EXPO_PUBLIC_BACKEND_URL"].rstrip("/")
-ADMIN_TOKEN = "REDACTED_SEE_ENV"
+load_dotenv("/app/backend/.env")
+
+BASE_URL = os.environ.get("BACKEND_URL_OVERRIDE") or "http://localhost:8001"
+ADMIN_TOKEN = os.environ["ADMIN_TRIGGER_PASSWORD"]
+
+from server import TRIGGER_ALERT_CONFIRMATION  # noqa: E402
+
+
+@pytest.fixture(scope="module")
+def devices():
+    m = pymongo.MongoClient(os.environ["MONGO_URL"])
+    yield m[os.environ.get("DB_NAME", "test_database")].push_devices
+    m.close()
 
 
 @pytest.fixture(scope="module")
@@ -76,7 +89,7 @@ class TestPurgeTestDevices:
         assert r.status_code == 401
         assert r.json() == {"detail": "Invalid or missing X-Admin-Token"}
 
-    def test_purge_seeded_rows_and_leaves_real_row(self, api):
+    def test_purge_seeded_rows_and_leaves_real_row(self, api, devices, stand_down_after):
         # Clean baseline: purge whatever leftover test rows are there
         api.post(
             f"{BASE_URL}/api/admin/purge-test-devices",
@@ -87,21 +100,22 @@ class TestPurgeTestDevices:
         real_uid = f"qg-real-{uuid.uuid4().hex[:8]}"
 
         seed = [
-            ("TEST_1", "android", "tok-TEST_1"),
-            ("test-x", "android", "tok-test-x"),
-            ("diag-y", "ios", "tok-diag-y"),
-            ("dashboard", "android", "tok-dashboard"),
-            (real_uid, "android", "tok-real"),
+            ("TEST_1", "android"),
+            ("test-x", "android"),
+            ("diag-y", "ios"),
+            ("dashboard", "android"),
+            (real_uid, "android"),
         ]
-        for uid, platform, tok in seed:
-            r = api.post(
-                f"{BASE_URL}/api/register-push",
-                json={"user_id": uid, "platform": platform, "device_token": tok},
-            )
-            # In preview env EMERGENT_PUSH_KEY is placeholder → relay returns 401
-            # → endpoint raises 500. DB upsert still happens BEFORE relay call.
-            assert r.status_code in (201, 500), (
-                f"register-push unexpected status for {uid}: {r.status_code} {r.text}"
+        # Seeded straight into Mongo: since #266 /register-push only files a
+        # row when the push provider accepts it, and this environment's
+        # EMERGENT_PUSH_KEY is a placeholder, so every registration is
+        # refused by design.
+        for uid, platform in seed:
+            devices.update_one(
+                {"user_id": uid},
+                {"$set": {"user_id": uid, "platform": platform,
+                          "device_token": f"tok-{uid}"}},
+                upsert=True,
             )
 
         # Purge
@@ -116,30 +130,36 @@ class TestPurgeTestDevices:
         assert isinstance(body["remaining"], int)
         # At least the 4 test-shaped rows we just seeded should have been deleted
         assert body["deleted"] >= 4
+        # The real row is untouched.
+        assert devices.count_documents({"user_id": real_uid}) == 1
 
         # Trigger-alert broadcast to remaining recipients — should include our real uid.
         # We use triggeredBy = a random uid so nothing is excluded.
         r2 = api.post(
             f"{BASE_URL}/api/trigger-alert",
             headers={"X-Admin-Token": ADMIN_TOKEN},
-            json={"triggeredBy": "no-such-user"},
+            json={"triggeredBy": "no-such-user",
+                  "confirmation_phrase": TRIGGER_ALERT_CONFIRMATION},
         )
         assert r2.status_code == 200, r2.text
-        # recipients count should equal 'remaining' from purge
-        assert r2.json().get("recipients") == body["remaining"]
+        # Recipients are the remaining rows minus any the push provider has
+        # already told us are dead (#262 soft-marks those instead of
+        # deleting them, so `remaining` can be the larger number).
+        live = devices.count_documents({"dead_token": {"$ne": True}})
+        assert r2.json().get("recipients") == live
+        assert live <= body["remaining"]
 
-        # Cleanup: remove our real seed row so tests are idempotent
-        # Register again as TEST_ prefix then purge — since no DELETE endpoint exists.
-        # Simpler: rely on it being a unique uid; the next test run uses a fresh uid.
+        devices.delete_one({"user_id": real_uid})
 
 
 # ---------- (e) trigger-alert still works ----------
 class TestTriggerAlert:
-    def test_trigger_alert_ok(self, api):
+    def test_trigger_alert_ok(self, api, stand_down_after):
         r = api.post(
             f"{BASE_URL}/api/trigger-alert",
             headers={"X-Admin-Token": ADMIN_TOKEN},
-            json={"magnitude": 6.4},
+            json={"magnitude": 6.4,
+                  "confirmation_phrase": TRIGGER_ALERT_CONFIRMATION},
         )
         assert r.status_code == 200, r.text
         body = r.json()
@@ -152,55 +172,36 @@ class TestTriggerAlert:
         assert r.status_code == 401
 
 
-# ---------- (f) register-push upserts ----------
+# ---------- (f) register-push refuses what it cannot deliver to ----------
 class TestRegisterPush:
-    def test_register_push_upserts(self, api):
+    def test_register_push_does_not_file_a_row_the_relay_refused(
+        self, api, devices, clear_register_rate_limit,
+    ):
         uid = f"TEST_reg_{uuid.uuid4().hex[:6]}"
-        r1 = api.post(
+        r = api.post(
             f"{BASE_URL}/api/register-push",
-            json={"user_id": uid, "platform": "ios", "device_token": "tok-a"},
+            json={"user_id": uid, "platform": "ios", "device_token": "a" * 64},
         )
-        # In preview env: EMERGENT_PUSH_KEY placeholder → relay 401 → 500.
-        # DB upsert still succeeds because it runs before the relay call.
-        assert r1.status_code in (201, 500), r1.text
-        if r1.status_code == 201:
-            assert r1.json() == {"status": "registered"}
-
-        r2 = api.post(
-            f"{BASE_URL}/api/register-push",
-            json={"user_id": uid, "platform": "ios", "device_token": "tok-b"},
-        )
-        assert r2.status_code in (201, 500), r2.text
-
-        # Verify DB upsert really happened by checking trigger-alert recipient count.
-        r3 = api.post(
-            f"{BASE_URL}/api/trigger-alert",
-            headers={"X-Admin-Token": ADMIN_TOKEN},
-            json={"triggeredBy": "no-such-user"},
-        )
-        assert r3.status_code == 200
-        assert r3.json().get("recipients", 0) >= 1
-
-        # Cleanup
-        api.post(
-            f"{BASE_URL}/api/admin/purge-test-devices",
-            headers={"X-Admin-Token": ADMIN_TOKEN},
-        )
+        # #266: placeholder EMERGENT_PUSH_KEY → relay 401 → 502 and NO row,
+        # so the phone is never told it is on the alert list when it isn't.
+        assert r.status_code == 502, r.text
+        assert devices.count_documents({"user_id": uid}) == 0
 
 
-# ---------- (g) Legacy status endpoints ----------
-class TestLegacyStatus:
+# ---------- (g) status endpoints ----------
+class TestStatusEndpoints:
     def test_status_post_and_get(self, api):
-        name = f"TEST_client_{uuid.uuid4().hex[:6]}"
-        r = api.post(f"{BASE_URL}/api/status", json={"client_name": name})
+        device_id = f"TEST_cleanup_{uuid.uuid4().hex[:6]}"
+        r = api.post(f"{BASE_URL}/api/status",
+                     json={"deviceId": device_id, "status": "safe"})
         assert r.status_code == 200, r.text
         created = r.json()
-        assert created["client_name"] == name
-        assert "id" in created
+        assert created["status"] == "ok"
+        assert created["device_id"] == device_id
 
         r2 = api.get(f"{BASE_URL}/api/status")
         assert r2.status_code == 200
-        assert any(s.get("client_name") == name for s in r2.json())
+        assert isinstance(r2.json(), list)
 
 
 # ---------- (h) server.py should not reference _last_push_events ----------

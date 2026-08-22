@@ -84,7 +84,7 @@ class _FakeDB:
 def test_compute_counts_matches_expected():
     from people_counts import compute_counts
     db = _FakeDB(_ROWS)
-    c = asyncio.get_event_loop().run_until_complete(compute_counts(db, include_test=False))
+    c = asyncio.run(compute_counts(db, include_test=False))
     # 4 real trapped (red/yellow/green/unset), 1 safe, 2 rescued (one via
     # rescued_at override), 1 not_responding, 1 unknown. Test entry dropped.
     assert c.safe == 1
@@ -105,7 +105,7 @@ def test_compute_counts_matches_expected():
 def test_include_test_flag_reveals_test_entries():
     from people_counts import compute_counts
     db = _FakeDB(_ROWS)
-    c = asyncio.get_event_loop().run_until_complete(compute_counts(db, include_test=True))
+    c = asyncio.run(compute_counts(db, include_test=True))
     assert c.total == 10
     assert c.trapped == 5   # 4 real + 1 test
     assert c.test_filtered_out == 0
@@ -129,7 +129,7 @@ def test_all_consumers_agree_on_needs_help():
     will fail before it hits the dashboard."""
     from people_counts import compute_counts
     db = _FakeDB(_ROWS)
-    c = asyncio.get_event_loop().run_until_complete(compute_counts(db, include_test=False))
+    c = asyncio.run(compute_counts(db, include_test=False))
     # These are the four numbers that all disagreed in Batch 7 A2.
     # They must all equal c.needs_help.
     #

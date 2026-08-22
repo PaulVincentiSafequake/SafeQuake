@@ -87,11 +87,11 @@ def test_empty_token_is_rejected():
     assert r.status_code == 400, r.text
 
 
-def test_rate_limit_kicks_in_after_threshold():
+def test_rate_limit_kicks_in_after_threshold(run_async):
     """Direct unit test of the limiter function — no TestClient, no HTTP,
-    a single asyncio.run() driving a loop of calls against ONE event loop.
+    driven on the suite-wide event loop (Motor pins itself to one loop for
+    the life of the process, so a private asyncio.run() would fail here).
     """
-    import asyncio
     from fastapi import HTTPException
     from starlette.requests import Request as StarletteRequest
     from server import _enforce_register_rate_limit, REGISTER_RATE_LIMIT_PER_HOUR
@@ -120,18 +120,17 @@ def test_rate_limit_kicks_in_after_threshold():
                 return i, e.status_code
         return None
 
-    tripped = asyncio.run(_run())
+    tripped = run_async(_run)
     assert tripped is not None, "rate limit never tripped after exceeding the threshold"
     index, status = tripped
     assert status == 429
     assert index == REGISTER_RATE_LIMIT_PER_HOUR  # trips on the (LIMIT+1)-th call, 0-indexed
 
 
-def test_missing_ip_fails_open():
+def test_missing_ip_fails_open(run_async):
     """No client IP available (can't extract one) -> allowed through, not
     blocked. Losing a real device's ability to register because a proxy
     hid its IP would be a worse outcome than a theoretical bypass."""
-    import asyncio
     from starlette.requests import Request as StarletteRequest
     from server import _enforce_register_rate_limit
 
@@ -142,4 +141,4 @@ def test_missing_ip_fails_open():
         }
         return StarletteRequest(scope)
 
-    asyncio.run(_enforce_register_rate_limit(_fake_request_no_ip()))  # must not raise
+    run_async(_enforce_register_rate_limit, _fake_request_no_ip())  # must not raise

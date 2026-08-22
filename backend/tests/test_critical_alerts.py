@@ -16,18 +16,28 @@ Verifies:
 import json
 import os
 import re
+import uuid
 from pathlib import Path
 
 import pytest
 import requests
+from dotenv import load_dotenv
+
+load_dotenv("/app/backend/.env")
 
 BASE_URL = os.environ.get("BACKEND_URL_OVERRIDE") or "http://localhost:8001"
-ADMIN_PWD = os.environ.get("ADMIN_TRIGGER_PASSWORD", "REDACTED_SEE_ENV")
+ADMIN_PWD = os.environ["ADMIN_TRIGGER_PASSWORD"]
+# #245: a real alert needs the operator to type the phrase naming the
+# consequence. Imported rather than hardcoded so a change to the phrase
+# doesn't quietly turn this into a test of nothing.
+from server import TRIGGER_ALERT_CONFIRMATION  # noqa: E402
 
 APP_JSON = Path("/app/frontend/app.json")
 REMINDERS_TS = Path("/app/frontend/src/utils/reminders.ts")
 PUSH_TS = Path("/app/frontend/src/utils/push.ts")
 SERVER_PY = Path("/app/backend/server.py")
+APNS_PY = Path("/app/backend/apns.py")
+PUSH_RELAY_PY = Path("/app/backend/push_relay.py")
 
 
 # ---------- app.json config ----------
@@ -36,8 +46,11 @@ class TestAppJsonConfig:
     def cfg(self):
         return json.loads(APP_JSON.read_text())
 
-    def test_version_bumped_to_1_0_8(self, cfg):
-        assert cfg["expo"]["version"] == "1.0.8", f"expected 1.0.8, got {cfg['expo']['version']}"
+    def test_version_is_at_least_1_0_8(self, cfg):
+        # Critical Alerts entitlements shipped in 1.0.8 — the app has moved
+        # on since, so assert "not rolled back below that", not equality.
+        parts = tuple(int(p) for p in cfg["expo"]["version"].split("."))
+        assert parts >= (1, 0, 8), f"version regressed to {cfg['expo']['version']}"
 
     def test_ios_bundle_identifier_unchanged(self, cfg):
         assert cfg["expo"]["ios"]["bundleIdentifier"] == "com.paulvincenti.quakeguard"
@@ -90,24 +103,31 @@ class TestPushTs:
         assert not re.search(r"allowCriticalAlerts\s*:\s*false", src)
 
 
-# ---------- server.py static grep ----------
+# ---------- APNs payload static grep ----------
+# The critical-alert payload moved out of server.py into apns.py (direct
+# APNs path) and the relay helper into push_relay.py.
 class TestServerTriggerPayload:
     @pytest.fixture(scope="class")
-    def src(self):
-        return SERVER_PY.read_text()
+    def apns_src(self):
+        return APNS_PY.read_text()
 
-    def test_trigger_alert_sends_interruption_level_critical(self, src):
-        # The literal string must appear in the trigger-alert send_push data dict
-        assert '"interruption_level": "critical"' in src
+    @pytest.fixture(scope="class")
+    def relay_src(self):
+        return PUSH_RELAY_PY.read_text()
 
-    def test_trigger_alert_sends_sound_dict(self, src):
-        # Match the full sound dict; allow whitespace flexibility
-        pattern = r'"sound"\s*:\s*\{\s*"critical"\s*:\s*1\s*,\s*"name"\s*:\s*"default"\s*,\s*"volume"\s*:\s*1\.0\s*\}'
-        assert re.search(pattern, src), "sound dict for critical alerts not found in server.py"
+    def test_alert_payload_is_interruption_level_critical(self, apns_src):
+        assert '"interruption-level": "critical"' in apns_src
 
-    def test_send_push_still_enforces_title_and_message(self, src):
-        assert '"title" not in data or "message" not in data' in src
-        assert 'ValueError("data must include title and message")' in src
+    def test_alert_payload_sends_critical_sound_dict(self, apns_src):
+        pattern = (
+            r'"sound"\s*:\s*\{\s*"critical"\s*:\s*1\s*,\s*"name"\s*:\s*'
+            r'"[^"]+"\s*,\s*"volume"\s*:\s*1\.0\s*\}'
+        )
+        assert re.search(pattern, apns_src), "critical sound dict not found in apns.py"
+
+    def test_send_push_still_enforces_title_and_message(self, relay_src):
+        assert '"title" not in data or "message" not in data' in relay_src
+        assert 'ValueError("data must include title and message")' in relay_src
 
 
 # ---------- Live backend: /api/trigger-alert ----------
@@ -130,10 +150,16 @@ class TestTriggerAlertEndpoint:
         )
         assert r.status_code == 401
 
-    def test_valid_admin_token_returns_200_with_schema(self, sess):
+    def test_valid_admin_token_returns_200_with_schema(self, sess, stand_down_after):
         r = sess.post(
             f"{BASE_URL}/api/trigger-alert",
-            json={"triggeredBy": "regression-ok", "magnitude": 6.4, "distance_km": 12, "intensity": "VII"},
+            json={
+                "triggeredBy": "regression-ok",
+                "magnitude": 6.4,
+                "distance_km": 12,
+                "intensity": "VII",
+                "confirmation_phrase": TRIGGER_ALERT_CONFIRMATION,
+            },
             headers={"X-Admin-Token": ADMIN_PWD},
         )
         assert r.status_code == 200, r.text
@@ -144,6 +170,15 @@ class TestTriggerAlertEndpoint:
         assert data["status"] == "broadcast"
         assert isinstance(data["recipients"], int)
         assert isinstance(data["push_delivered"], bool)
+
+    def test_missing_confirmation_phrase_returns_400(self, sess):
+        r = sess.post(
+            f"{BASE_URL}/api/trigger-alert",
+            json={"triggeredBy": "regression-no-phrase"},
+            headers={"X-Admin-Token": ADMIN_PWD},
+        )
+        assert r.status_code == 400, r.text
+        assert TRIGGER_ALERT_CONFIRMATION in r.json()["detail"]
 
 
 # ---------- Regression: neighbouring production endpoints ----------
@@ -160,20 +195,26 @@ class TestNeighbouringEndpoints:
         assert isinstance(r.json(), list)
 
     def test_status_post_ok(self, sess):
-        r = sess.post(f"{BASE_URL}/api/status", json={"client_name": "TEST_iter22"})
-        assert r.status_code == 200
+        device_id = f"TEST_iter22_{uuid.uuid4().hex[:6]}"
+        r = sess.post(
+            f"{BASE_URL}/api/status",
+            json={"deviceId": device_id, "status": "safe"},
+        )
+        assert r.status_code == 200, r.text
         body = r.json()
-        assert body.get("client_name") == "TEST_iter22"
-        assert "id" in body
+        assert body.get("status") == "ok"
+        assert body.get("device_id") == device_id
 
-    def test_register_push_still_upserts_row(self, sess):
-        # Placeholder EMERGENT_PUSH_KEY may make the endpoint 500 after DB write;
-        # tolerate 201 or 500 (see other tests / iteration_21 notes).
+    def test_register_push_refuses_a_malformed_token(self, sess):
+        # #266 doctrine: a device row is only written when the push provider
+        # accepts the registration, and a token that cannot be real is
+        # refused outright rather than filed as a false promise.
         r = sess.post(
             f"{BASE_URL}/api/register-push",
-            json={"user_id": "TEST_iter22_reg", "platform": "ios", "device_token": "tok-iter22"},
+            json={"user_id": "TEST_iter22_reg", "platform": "ios",
+                  "device_token": "tok-iter22"},
         )
-        assert r.status_code in (201, 500), f"{r.status_code} {r.text}"
+        assert r.status_code == 400, f"{r.status_code} {r.text}"
 
     def test_purge_test_devices_post_401_without_token(self, sess):
         r = sess.post(f"{BASE_URL}/api/admin/purge-test-devices")

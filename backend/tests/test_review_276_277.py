@@ -51,12 +51,11 @@ import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-BASE_URL = (
-    os.environ.get("EXPO_PUBLIC_BACKEND_URL")
-    or os.environ.get("EXPO_BACKEND_URL")
-    or "http://localhost:8001"
-).rstrip("/")
-ADMIN_TOKEN = os.environ.get("ADMIN_TRIGGER_PASSWORD", "m11vRwfDoxnHvIMLkKzjUwQy")
+# Local backend on purpose: the ask-to-check-in call below waits on a real
+# APNs attempt, and through the public ingress that occasionally comes back
+# as an empty 502 from the proxy rather than the backend's own answer.
+BASE_URL = "http://localhost:8001"
+ADMIN_TOKEN = os.environ["ADMIN_TRIGGER_PASSWORD"]
 
 ID_A = "qg-1755700000001-neo268a"
 ID_C = "qg-1755700000003-neo268c"
