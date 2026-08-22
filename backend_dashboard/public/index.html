@@ -1461,6 +1461,84 @@
   };
 
 
+  // #296: a countdown a tired person can read at a glance. Seconds alone
+  // ("back in 287 seconds") makes someone do arithmetic under stress.
+  window.qgCountdownWords = function (ms) {
+    var s = Math.max(0, Math.ceil(ms / 1000));
+    if (s < 60) return s + "s";
+    var m = Math.floor(s / 60), r = s % 60;
+    return m + " min " + (r < 10 ? "0" + r : r) + "s";
+  };
+  var qgCountdownWords = window.qgCountdownWords;
+
+
+  // ── #296 (2026-08-23 — Paul): the annunciator sound ──────────────────
+  //
+  // ISA-18.1: the sound's only job is to pull the operator's eyes to the
+  // screen. It carries no information, so it is one short two-tone chime
+  // and nothing more. Rules built in here so no caller can break them:
+  //   · never two sounds on top of each other (2 s floor between plays);
+  //   · mute is time-limited and the caller can read the remaining time,
+  //     so the board can show a countdown — nobody must be able to forget
+  //     they muted it;
+  //   · muting NEVER touches the visual. This object cannot hide anything.
+  //   · a browser that will not let us make sound until the page is
+  //     clicked is reported honestly through `blocked()`, so the board can
+  //     say "sound is not working yet" rather than pretending.
+  window.qgSound = (function () {
+    var ctx = null, muteUntil = 0, lastPlay = 0, everBlocked = false;
+    function ensure() {
+      try {
+        var C = window.AudioContext || window.webkitAudioContext;
+        if (!C) { everBlocked = true; return null; }
+        if (!ctx) ctx = new C();
+        if (ctx.state === "suspended") { ctx.resume(); everBlocked = true; }
+        return ctx;
+      } catch (_) { everBlocked = true; return null; }
+    }
+    // Any click anywhere is the gesture browsers demand before audio.
+    document.addEventListener("click", function () {
+      var c = ensure();
+      if (c && c.state === "running") everBlocked = false;
+    }, true);
+    function tone(c, freq, at, dur, peak) {
+      var osc = c.createOscillator(), g = c.createGain();
+      osc.type = "sine";
+      osc.frequency.value = freq;
+      g.gain.setValueAtTime(0.0001, c.currentTime + at);
+      g.gain.exponentialRampToValueAtTime(peak, c.currentTime + at + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, c.currentTime + at + dur);
+      osc.connect(g); g.connect(c.destination);
+      osc.start(c.currentTime + at);
+      osc.stop(c.currentTime + at + dur + 0.05);
+    }
+    return {
+      // kind: "alarm" (something needs an operator) | "fault" (the board
+      // itself has stopped working). Two clearly different sounds, because
+      // they need two different actions.
+      play: function (kind) {
+        if (Date.now() < muteUntil) return false;
+        if (Date.now() - lastPlay < 2000) return false;
+        var c = ensure();
+        if (!c || c.state !== "running") return false;
+        lastPlay = Date.now();
+        if (kind === "fault") {
+          tone(c, 392, 0, 0.22, 0.16);
+          tone(c, 294, 0.26, 0.30, 0.16);
+        } else {
+          tone(c, 880, 0, 0.16, 0.14);
+          tone(c, 1175, 0.19, 0.20, 0.14);
+        }
+        return true;
+      },
+      mute: function (ms) { muteUntil = Date.now() + ms; },
+      unmute: function () { muteUntil = 0; },
+      muteRemainingMs: function () { return Math.max(0, muteUntil - Date.now()); },
+      blocked: function () { return everBlocked && !(ctx && ctx.state === "running"); }
+    };
+  })();
+
+
   // Human-friendly error translator. Never let a JavaScript error object,
   // enum string, or CORS-style browser-console phrase reach an operator.
   // Batch 7 Pattern 5.
@@ -2648,7 +2726,7 @@
               "Set the preview distance to " + km + " km?",
               "Malta's real alert zone is 600 km.\n" +
               "This is a test setting only.\n\n" +
-              "At " + km + " km you will get previews from " +
+              "At " + km + " km, previews cover " +
               (km >= 3000 ? "much of Europe and the Middle East" :
                km >= 2000 ? "Greece, Turkey and parts of North Africa" :
                "Sicily, southern Italy and parts of Greece") + ".\n\n" +
@@ -2859,6 +2937,155 @@
   <span id="qg-tremor-strip-cta" style="margin-left:12px; font-weight:500; color:#5a0f13"></span>
 </div>
 
+<!-- ═════════════════════════════════════════════════════════════════════
+     #295 / #194 (2026-08-23 — Paul): "if the board silently stops updating
+     for any reason, the operator must be told loudly. A stale board that
+     looks live is more dangerous than one that admits it is stale."
+     Two parts, both here:
+       · the sticky strip inside the sidebar — is what I am reading now?
+       · this fixed bar — the loud version, when it is not.
+     Neither ever says "live" from a timer. Only a real successful read of
+     /api/devices moves the clock.
+     ═════════════════════════════════════════════════════════════════════ -->
+<style>
+  .qg-stale-bar {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 12000;
+    background: #7A0B0B; color: #fff;
+    border-bottom: 3px solid #FF4D4D;
+    padding: 10px 14px;
+    display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px;
+    font-size: 15px; line-height: 1.45;
+    box-shadow: 0 6px 18px rgba(0,0,0,.45);
+  }
+  .qg-stale-bar[hidden] { display: none; }
+  .qg-stale-flash { animation: qgStaleFlash 1s steps(1, end) infinite; }
+  @keyframes qgStaleFlash {
+    0%, 49%   { background: #7A0B0B; }
+    50%, 100% { background: #B31212; }
+  }
+  .qg-stale-shape { font-size: 18px; margin-right: 6px; }
+  .qg-stale-main { font-weight: 800; }
+  .qg-stale-detail { flex: 1 1 320px; }
+  .qg-stale-btn {
+    background: #fff; color: #7A0B0B; border: 0; border-radius: 8px;
+    padding: 8px 12px; font-size: 14px; font-weight: 700; cursor: pointer;
+    min-height: 38px;
+  }
+  .qg-stale-btn.ghost { background: transparent; color: #fff; border: 1px solid #FF9A9A; }
+  .qg-live {
+    position: relative;
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 10px;
+    border: 1px solid var(--border, #d0d0d0); border-radius: 8px;
+    background: var(--panel, #14171c);
+    font-size: 13.5px; line-height: 1.4;
+  }
+  .qg-topstrip {
+    position: sticky; top: 0; z-index: 40;
+    background: var(--bg, #0F1115);
+    padding-bottom: 8px;
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  /* #296 — the annunciator strip. Word + shape + colour, never colour
+     alone, so it reads with the sound off and in black and white. */
+  .qg-annun {
+    border: 2px solid #E64545; border-radius: 10px;
+    background: #2A0E0E; color: #fff;
+    padding: 10px; display: flex; flex-direction: column; gap: 8px;
+  }
+  .qg-annun[hidden] { display: none; }
+  .qg-annun.is-quiet { border-color: var(--border, #444); background: var(--panel, #14171c); color: inherit; }
+  .qg-annun-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .qg-annun-count {
+    min-width: 30px; padding: 2px 8px; border-radius: 6px;
+    background: #E64545; color: #fff; font-weight: 800; font-size: 16px;
+    text-align: center;
+  }
+  .qg-annun.is-quiet .qg-annun-count { background: #4A4A4A; }
+  .qg-annun-headline { font-size: 14.5px; font-weight: 700; flex: 1 1 160px; }
+  .qg-annun-mute {
+    background: transparent; color: inherit; cursor: pointer;
+    border: 1px solid #FF9A9A; border-radius: 6px;
+    font-size: 12.5px; padding: 6px 9px; min-height: 32px;
+  }
+  .qg-annun-note {
+    font-size: 13px; line-height: 1.45; color: #FFE0E0;
+    border-left: 3px solid #FF9A9A; padding-left: 8px;
+  }
+  .qg-annun-note[hidden] { display: none; }
+  /* The count and the headline stay on screen; the rows themselves scroll,
+     so a long list of alarms can never push the board off the screen. */
+  #qg-annun-rows {
+    max-height: 38vh; overflow-y: auto;
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  .qg-alarm {
+    border: 1px solid #7A2323; border-radius: 8px;
+    background: #3A1010; padding: 10px;
+    display: flex; gap: 10px; align-items: flex-start;
+  }
+  .qg-alarm.is-new { animation: qgAlarmFlash 1s steps(1, end) infinite; }
+  @keyframes qgAlarmFlash {
+    0%, 49%   { background: #3A1010; border-color: #7A2323; }
+    50%, 100% { background: #7E1414; border-color: #FF6B6B; }
+  }
+  .qg-alarm.is-acked { background: #2B1616; border-color: #6A4A4A; }
+  .qg-alarm-shape { font-size: 20px; line-height: 1; width: 22px; text-align: center; }
+  .qg-alarm-body { flex: 1; }
+  .qg-alarm-word {
+    font-size: 12px; font-weight: 800; letter-spacing: .04em;
+    text-transform: uppercase; color: #FFC9C9;
+  }
+  .qg-alarm-headline { font-size: 15px; font-weight: 700; margin-top: 2px; }
+  .qg-alarm-action { font-size: 13.5px; line-height: 1.45; margin-top: 3px; color: #FFE2E2; }
+  .qg-alarm-meta { font-size: 12px; margin-top: 4px; color: #E0BDBD; }
+  .qg-alarm-ack {
+    background: #fff; color: #7A0B0B; border: 0; border-radius: 8px;
+    padding: 8px 12px; font-size: 13.5px; font-weight: 700; cursor: pointer;
+    min-height: 38px; align-self: center;
+  }
+  .qg-alarm-names { margin-top: 6px; font-size: 12.5px; }
+  .qg-alarm-names summary { cursor: pointer; }
+  .qg-alarm-names div { padding: 2px 0 2px 10px; }
+  .qg-live-dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    background: #1F8A3A; flex: 0 0 auto;
+  }
+  .qg-live.is-stale { border-color: #FF4D4D; background: #3A0B0B; color: #FFE4E4; }
+  .qg-live.is-stale .qg-live-dot { background: #FF4D4D; }
+  .qg-live.is-signedout .qg-live-dot { background: #8A8A8A; }
+  .qg-live-retry {
+    margin-left: auto; background: transparent; cursor: pointer;
+    border: 1px solid var(--border, #555); border-radius: 6px;
+    color: inherit; font-size: 12.5px; padding: 5px 9px; min-height: 30px;
+  }
+  .qg-gap-note {
+    margin: 0 0 8px; padding: 8px 10px;
+    border: 1px solid #8A6B0F; border-radius: 8px;
+    background: #2A2216; color: #F7E7B8;
+    font-size: 13.5px; line-height: 1.45;
+  }
+  .qg-gap-note[hidden] { display: none; }
+  .qg-filters-on {
+    padding: 7px 10px; border-radius: 8px;
+    border: 1px solid #8A6B0F; background: #2A2216; color: #F7E7B8;
+    font-size: 13px; line-height: 1.4;
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  }
+  .qg-filters-on[hidden] { display: none; }
+  .qg-filters-on button {
+    background: transparent; color: inherit; cursor: pointer;
+    border: 1px solid #8A6B0F; border-radius: 6px;
+    font-size: 12.5px; padding: 5px 8px; min-height: 30px;
+  }
+</style>
+<div id="qg-stale-bar" class="qg-stale-bar" role="alert" hidden>
+  <span class="qg-stale-main"><span class="qg-stale-shape" aria-hidden="true">■</span><span id="qg-stale-head">The board is not updating</span></span>
+  <span class="qg-stale-detail" id="qg-stale-detail"></span>
+  <button type="button" class="qg-stale-btn" id="qg-stale-retry">Update now</button>
+  <button type="button" class="qg-stale-btn ghost" id="qg-stale-mute">Silence the sound for 5 minutes</button>
+</div>
+
 <div class="layout">
   <div id="map-wrap">
     <div class="map-filters" role="group" aria-label="Filter map by severity">
@@ -2872,10 +3099,45 @@
         <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true" style="vertical-align:-1px;margin-right:5px"><polygon points="6,1 11,10.5 1,10.5" fill="#F2A114" stroke="#000" stroke-width="1" stroke-linejoin="round"/></svg>Serious/Stable</button>
       <button class="map-filter-btn" data-filter="green" onclick="setFilter('green')" aria-label="Filter: Minor">
         <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true" style="vertical-align:-1px;margin-right:5px"><rect x="1.5" y="1.5" width="9" height="9" fill="#1F8A3A" stroke="#000" stroke-width="1"/></svg>Minor</button>
+      <!-- #297: rescued pins are off the map until asked for, and small,
+           grey and unlabelled when shown. -->
+      <button class="map-filter-btn" id="qg-rescued-toggle" type="button" aria-pressed="false">Show rescued</button>
     </div>
     <div id="map"></div>
   </div>
   <div class="sidebar">
+    <!-- #295 / #296: the strip that must be on screen wherever the
+         operator has scrolled — is the board live, and is there anything
+         nobody has acknowledged yet. -->
+    <div class="qg-topstrip">
+      <div class="qg-live" id="qg-live" role="status" aria-live="polite">
+        <span class="qg-live-dot" id="qg-live-dot" aria-hidden="true"></span>
+        <span id="qg-live-text">Starting up…</span>
+        <button type="button" class="qg-live-retry" id="qg-live-retry">Update now</button>
+      </div>
+      <!-- #296: the annunciator. ISA-18.1 sequence — flash and sound on
+           arrival, acknowledge silences and stops the flashing, the
+           highlight stays until the situation itself is resolved. -->
+      <div class="qg-annun" id="qg-annun" hidden>
+        <div class="qg-annun-head">
+          <span class="qg-annun-count" id="qg-annun-count">0</span>
+          <span class="qg-annun-headline" id="qg-annun-headline"></span>
+          <button type="button" class="qg-annun-mute" id="qg-annun-mute">Silence the sound for 5 minutes</button>
+        </div>
+          <div class="qg-annun-note" id="qg-annun-note" hidden></div>
+        <!-- #306: quiet for a day is not resolved. No sound, never
+             invisible — this line stays in view whether anything is
+             sounding or not. -->
+        <div class="qg-annun-note" id="qg-annun-quiet" hidden></div>
+        <div id="qg-annun-rows"></div>
+      </div>
+      <!-- #297: any filter that is on must be obvious. An operator must
+           never be able to make a whole category invisible by accident. -->
+      <div class="qg-filters-on" id="qg-filters-on" role="status" hidden></div>
+    </div>
+    <!-- #194: a tab the operating system froze must own up to the gap
+         instead of quietly catching up as though nothing happened. -->
+    <div class="qg-gap-note" id="qg-gap-note" role="status" hidden></div>
     <!-- Item 7 (2026-08-13): collapsible, but DEFAULT OPEN on every load
          and the collapsed state is deliberately NOT persisted anywhere —
          no localStorage, no cookie. Core situational awareness must never
@@ -2889,6 +3151,10 @@
       <div class="stat waiting"><div class="stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><line x1="12" y1="17" x2="12.01" y2="17"></line></svg></div><div class="stat-text"><div class="num" id="count-waiting">0</div><div class="label">Unknown</div></div></div>
       <div class="stat danger"><div class="stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.68 13.31a16 16 0 0 0 3.41 2.6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 17.92z"></path><line x1="23" y1="1" x2="1" y2="23"></line></svg></div><div class="stat-text"><div class="num" id="count-danger">0</div><div class="label">Not Responding</div></div></div>
       <div class="stat rescued"><div class="stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path><path d="m9 12 2 2 4-4"></path></svg></div><div class="stat-text"><div class="num" id="count-rescued">0</div><div class="label">Rescued</div></div></div>
+      <!-- #297 (2026-08-23 — Paul): "The detail may be hidden. The count
+           never may." Walking wounded come off the working board, but this
+           number stays on it whether their list is open or shut. -->
+      <div class="stat"><div class="stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="5" r="2"></circle><path d="M10 22l1-6-2-3 1-5 3 2 2 1"></path><path d="M14 22l-1-6"></path></svg></div><div class="stat-text"><div class="num" id="count-ww">0</div><div class="label">Walking wounded</div></div></div>
     </div>
     <!-- #268: every number says what it counts and what it leaves out,
          in plain words, right under the numbers themselves. -->
@@ -2912,6 +3178,21 @@
          to say so rather than presenting a wall of casualties. -->
     <div class="qg-board-notices" id="qg-board-notices" aria-live="polite"></div>
     <div class="triage-groups" id="userlist"></div>
+    <!-- #297: walking wounded have their own labelled list. In real triage
+         they are the lowest rescue priority precisely because they can move
+         themselves, and a team should never be sent to one — but they are a
+         real number, and they can get worse, so nothing disappears. -->
+    <details class="qg-offboard" id="qg-ww" hidden>
+      <summary id="qg-ww-summary">Walking wounded</summary>
+      <div class="qg-offboard-intro">These people reported minor injuries and
+        said they can move themselves. They are not a rescue task.</div>
+      <div class="qg-offboard-intro">Their number stays on the board above
+        whether this list is open or shut.</div>
+      <div class="qg-offboard-intro">If any of them reports again and says
+        they are worse, they go straight back on the working board and the
+        board sounds an alarm.</div>
+      <div id="qg-ww-body"></div>
+    </details>
     <!-- #268: "Removed records go to a clearly labelled area an operator
          can open — not hidden, not deleted. Anyone can see what was moved,
          when, and why." -->
@@ -6008,6 +6289,10 @@ window.QuakeAngelRescue = (function () {
     var v = markerVisual(u);
     var s = iconSizeForZoom(map.getZoom());
     if (v.kind === "immediate") s = Math.round(s * 1.3);
+    // #297 (2026-08-23 — Paul): "when shown they are small and muted with
+    // no label. A resolved case is not wrong, so it does not get colour."
+    var muted = v.kind === "rescued";
+    if (muted) s = Math.max(10, Math.round(s * 0.55));
     // Every pin carries the person's short code (item 2) — the same
     // string as the triage card and the team report table.
     var code = qgCode(u);
@@ -6021,10 +6306,8 @@ window.QuakeAngelRescue = (function () {
     // string — the tooltip on the pin still carries the full name.
     var nm = u.displayName ? String(u.displayName) : "";
     var ident = nm ? code + " " + nm : code;
-    var tagText = v.kind === "immediate" ? ("SOS " + ident)
-      : v.kind === "rescued" ? ("\u2713 " + ident)
-      : ident;
-    var tagCls = v.kind === "immediate" ? "" : v.kind === "rescued" ? " rescued" : " plain";
+    var tagText = muted ? "" : (v.kind === "immediate" ? ("SOS " + ident) : ident);
+    var tagCls = v.kind === "immediate" ? "" : " plain";
     // Two-line labels need ~24px of vertical space (2 × 12px line-box).
     // Detect "will probably wrap" by length heuristic — cheap and good
     // enough since we can't measure before insertion.
@@ -6035,7 +6318,7 @@ window.QuakeAngelRescue = (function () {
     var iconW = Math.max(s, tagText ? 152 : 56);
     return L.divIcon({
       className: "qg-mrk-wrap",
-      html: '<div class="qg-mrk">' + svgShape(v.shape, v.color, s) + tag + "</div>",
+      html: '<div class="qg-mrk">' + svgShape(v.shape, muted ? "#8A8A8A" : v.color, s) + tag + "</div>",
       iconSize: [iconW, s + tagH],
       iconAnchor: [iconW / 2, s / 2],
     });
@@ -6162,6 +6445,7 @@ window.QuakeAngelRescue = (function () {
         var summary = null;
         try { summary = await fetchSummary(); } catch (_) {}   // summary may predate the backend deploy
         renderSignedOut(summary);
+        boardSignedOut = true;
         return;
       }
       var res = await window.qaApi("/api/devices");
@@ -6169,6 +6453,7 @@ window.QuakeAngelRescue = (function () {
         var summary2 = null;
         try { summary2 = await fetchSummary(); } catch (_) {}
         renderSignedOut(summary2);
+        boardSignedOut = true;
         return;
       }
       if (!res.ok) throw new Error("HTTP " + res.status);
@@ -6178,25 +6463,40 @@ window.QuakeAngelRescue = (function () {
         lastSidebarSig = null;   // force one full sidebar rebuild after sign-in
       }
       var allUsers = (data.devices || []).map(normalizeDevice);
-      // #268: everything the backend deliberately kept OFF the working
-      // board, with why/when/who. Rendered in its own labelled area —
-      // never hidden, never deleted.
-      renderOffBoard(data.off_board || [], data.counts || {});
-      renderBoardNotices(data.notices || []);
-      renderCountNotes(data.count_notes || [], data.counts || {});
       // #146: test entries are excluded from the live triage list, the map
       // and the counts by default — an operator must never have to work out
       // whether a pin is a real person. Nothing is deleted; the toggle
       // below the search box brings them back, clearly tagged.
       var testCount = allUsers.filter(function (u) { return u.isTest; }).length;
-      updateTestToggle(testCount);
       var users = showTestEntries ? allUsers : allUsers.filter(function (u) { return !u.isTest; });
       lastUsers = users;
-      renderMap(users);
-      applyFilterVisibility();
-      renderSidebar(users);
+      // #295: the read succeeded, so the board IS live as of this instant.
+      // Recorded before any drawing, because a drawing fault is a different
+      // fault from a dead connection and each has to be reported as itself.
+      markBoardLive();
+      // #295 (2026-08-23 — Paul): the casualty list is drawn FIRST and on
+      // its own. Before this, five other jobs — the map among them — ran
+      // ahead of it inside one try/catch, so a single bad record aborted
+      // the whole cycle into the console and the list silently stopped
+      // updating while the page went on looking healthy.
+      drawStep("the casualty list", function () { renderSidebar(users); });
+      drawStep("the off-board area", function () {
+        // #268: everything the backend deliberately kept OFF the working
+        // board, with why/when/who. Never hidden, never deleted.
+        renderOffBoard(data.off_board || [], data.counts || {});
+      });
+      drawStep("the board notices", function () { renderBoardNotices(data.notices || []); });
+      drawStep("the count notes", function () {
+        renderCountNotes(data.count_notes || [], data.counts || {});
+      });
+      drawStep("the test-entry toggle", function () { updateTestToggle(testCount); });
+      drawStep("the map", function () { renderMap(users); applyFilterVisibility(); });
+      // #296: the alarms ride the same cycle as the board, so the "updated
+      // N seconds ago" clock covers both. A failure here is reported inside
+      // the alarm strip, not as a dead board — they are different faults.
+      await refreshAlarms();
     } catch (e) {
-      console.error("Failed to refresh dashboard:", e);
+      noteBoardFailure(e);
     }
   }
 
@@ -6435,6 +6735,10 @@ window.QuakeAngelRescue = (function () {
   }
 
   function matchesFilter(u) {
+    // #297: "hidden by default while an alert is running, one toggle to
+    // show them". A resolved case is not wrong, so it does not get colour —
+    // and it does not get to compete with a live casualty for attention.
+    if (u.status === "rescued" && !showRescuedOnMap) return false;
     if (currentFilter === "all") return true;
     if (u.status !== "trapped") return false;
     var sev = u.severity || "green";
@@ -6454,11 +6758,31 @@ window.QuakeAngelRescue = (function () {
   function setFilter(f) {
     currentFilter = f;
     applyFilterVisibility();
+    renderFiltersOn();
     document.querySelectorAll(".map-filter-btn").forEach(function (btn) {
       btn.classList.toggle("active", btn.dataset.filter === currentFilter);
     });
   }
   window.setFilter = setFilter;
+
+  // #297 — rescued on the map: off by default, one labelled toggle.
+  var showRescuedOnMap = false;
+  (function wireRescuedToggle() {
+    var btn = document.getElementById("qg-rescued-toggle");
+    if (!btn) return;
+    var paint = function () {
+      btn.textContent = showRescuedOnMap ? "Hide rescued" : "Show rescued";
+      btn.setAttribute("aria-pressed", showRescuedOnMap ? "true" : "false");
+      btn.classList.toggle("active", showRescuedOnMap);
+    };
+    btn.addEventListener("click", function () {
+      showRescuedOnMap = !showRescuedOnMap;
+      paint();
+      applyFilterVisibility();
+      renderFiltersOn();
+    });
+    paint();
+  })();
 
   function qgCode(u) {
     return u.shortCode || String(u.deviceId || "").slice(-5).toUpperCase();
@@ -6622,6 +6946,7 @@ window.QuakeAngelRescue = (function () {
     var askDisabled = ask.can_ask === false;
     var askBtn = '<button class="qg-ask-btn" data-device-id="' + u.deviceId +
       '" data-short-code="' + (u.shortCode || "") +
+      '" data-display-name="' + window.qgEsc(u.displayName || "") +
       '" data-battery="' + (u.batteryPercent != null ? u.batteryPercent : "") +
       '" data-low-battery="' + (ask.low_battery ? "true" : "false") + '"' +
       (askDisabled ? " disabled" : "") +
@@ -6645,24 +6970,34 @@ window.QuakeAngelRescue = (function () {
   // accident. Asking one person is a judgement. Asking everyone at once
   // is a broadcast that drains every phone in the incident." So this is
   // one button on one card, with its own confirmation, every time.
-  async function askToCheckIn(deviceId, code, lowBattery, batteryPct, acknowledged) {
-    var name = code || "this phone";
+  async function askToCheckIn(deviceId, code, lowBattery, batteryPct, acknowledged, displayName) {
+    // #298 (2026-08-23 — Paul): the old dialog said "It does come through
+    // Do Not Disturb, so they will see it." That is not true, and it was
+    // disproved on Paul's own phone — the question arrived silently inside
+    // a Focus mode, in a collapsed group, and would not have been seen for
+    // hours. Telling an operator that someone WILL see it is exactly the
+    // promise this product must never make: it makes a coordinator draw a
+    // conclusion from silence. Every line below is now a statement of fact
+    // with nothing inferred and nothing reassuring we cannot stand behind.
+    var who = (displayName ? displayName + " \u00B7 " : "") + (code || "this phone");
     if (!acknowledged) {
       var lines =
-        "This sends one message to " + name + ".\n\n" +
-        "It says: \u201cAre you all right? No new earthquake. Please tap to " +
+        "This sends one message to " + who + ".\n\n" +
+        "The message says: \u201cAre you all right? No new earthquake. Please tap to " +
         "tell us how you are.\u201d\n\n" +
-        "No siren. Their silent switch still works.\n" +
-        "It does come through Do Not Disturb, so they will see it.\n" +
-        "It does use some of their battery.\n";
+        "It will not siren. Their silent switch still works.\n" +
+        "A Focus mode or Do Not Disturb can hide it completely.\n" +
+        "So no answer does not mean they are in trouble, and it does not " +
+        "mean they are fine.\n" +
+        "It uses a little of their battery, about as much as one text message.\n";
       if (lowBattery) {
         lines += "\nTheir battery is low" +
           (batteryPct ? " (" + batteryPct + "% left)" : "") +
           ". Their phone may be their lifeline.\n";
       }
-      lines += "\nWe will save your name and the time on the record.";
+      lines += "\nYour name and the time go on their record.";
       var ok = await window.confirmPlain(
-        "Ask " + name + " to check in?", lines, "Yes — ask them",
+        "Ask " + who + " to check in?", lines, "Yes — ask them",
       );
       if (!ok) { banner("ok", "Nothing was sent.", 4000); return; }
     }
@@ -6678,7 +7013,7 @@ window.QuakeAngelRescue = (function () {
       var again = await window.confirmPlain(
         "Ask anyway?", (body && body.detail) || "", "Yes — ask them",
       );
-      if (again) return askToCheckIn(deviceId, code, lowBattery, batteryPct, true);
+      if (again) return askToCheckIn(deviceId, code, lowBattery, batteryPct, true, displayName);
       banner("ok", "Nothing was sent.", 4000);
       return;
     }
@@ -6702,6 +7037,7 @@ window.QuakeAngelRescue = (function () {
       askEl.dataset.lowBattery === "true",
       askEl.dataset.battery,
       false,
+      askEl.dataset.displayName || "",
     );
   });
 
@@ -7125,19 +7461,37 @@ window.QuakeAngelRescue = (function () {
     var visible = users.filter(matchesSearch);
     var red = visible.filter(function (u) { return u.status === "trapped" && u.severity === "red"; }).sort(byLongestTrapped);
     var yellow = visible.filter(function (u) { return u.status === "trapped" && u.severity === "yellow"; }).sort(byLongestTrapped);
-    var green = visible.filter(function (u) { return u.status === "trapped" && (u.severity === "green" || !u.severity); }).sort(byLongestTrapped);
+    // #297 (2026-08-23 — Paul): walking wounded come off the working board.
+    // "In real triage, walking wounded are the lowest rescue priority
+    //  precisely because they can move themselves... Leaving them on the
+    //  board as though someone must go to them is exactly the clutter that
+    //  hides the people who cannot move at all."
+    // A minor injury who CANNOT get out, or cannot move, is not walking
+    // wounded — severity is medical, being stuck is structural, and the
+    // structural fact keeps them on the working board.
+    var minor = visible.filter(function (u) {
+      return u.status === "trapped" && (u.severity === "green" || !u.severity);
+    });
+    var walking = minor.filter(function (u) {
+      return !u.needsExtraction && u.mobility !== "trapped";
+    }).sort(byLongestTrapped);
+    var minorStuck = minor.filter(function (u) {
+      return u.needsExtraction || u.mobility === "trapped";
+    }).sort(byLongestTrapped);
     var rescued = visible.filter(function (u) { return u.status === "rescued"; }).sort(byRecency);
     var other = visible.filter(function (u) { return u.status !== "trapped" && u.status !== "rescued"; }).sort(byRecency);
 
     container.innerHTML = "";
     container.appendChild(buildGroup("🔴 IMMEDIATE — seriously injured / can't move", "group-red", red, true, openState));
     container.appendChild(buildGroup("🟡 SERIOUS — STABLE — hurt but stable", "group-yellow", yellow, true, openState));
-    container.appendChild(buildGroup("🟢 MINOR — walking wounded", "group-green", green, true, openState));
+    container.appendChild(buildGroup("🟢 MINOR — hurt lightly but cannot get out, still needs a team", "group-green", minorStuck, true, openState));
     // Item 5: Rescued defaults COLLAPSED — finished work must not push
     // live cases off the bottom of the screen. Count stays visible in the
     // summary; Undo Rescued still works inside once expanded.
     container.appendChild(buildGroup("✅ Rescued — confirmed found & safe", "group-rescued", rescued, false, openState));
     container.appendChild(buildGroup("⚪ Other — Safe / Not Responding / Unknown", "group-other", other, true, openState));
+
+    renderWalkingWounded(walking, openState);
 
     // Restore focus (checkboxes carry data-device-id) and scroll position.
     if (activeId) {
@@ -7148,18 +7502,134 @@ window.QuakeAngelRescue = (function () {
   }
 
   function computeCounts(users) {
-    var safe = 0, trapped = 0, danger = 0, rescued = 0;
+    var safe = 0, trapped = 0, danger = 0, rescued = 0, walking = 0;
     users.forEach(function (u) {
       if (u.status === "safe") safe += 1;
-      else if (u.status === "trapped") trapped += 1;
+      else if (u.status === "trapped") {
+        trapped += 1;
+        // #297: counted in BOTH numbers on purpose. They are still people
+        // who reported an injury (so the trapped total stays honest), and
+        // they are also the number who will need treating somewhere.
+        if ((u.severity === "green" || !u.severity) && !u.needsExtraction &&
+            u.mobility !== "trapped") walking += 1;
+      }
       else if (u.status === "not_responding") danger += 1;
       else if (u.status === "rescued") rescued += 1;
     });
     return {
       safe: safe, trapped: trapped, danger: danger, rescued: rescued,
+      walking: walking,
       waiting: users.length - safe - trapped - danger - rescued,
     };
   }
+
+  // #297 — the walking wounded list, and the rule that goes with it:
+  // the detail may be hidden, the count never may.
+  function renderWalkingWounded(list, openState) {
+    var wrap = document.getElementById("qg-ww");
+    var body = document.getElementById("qg-ww-body");
+    var summary = document.getElementById("qg-ww-summary");
+    if (!wrap || !body || !summary) return;
+    if (!list.length) {
+      // "none" has to read differently from "hidden".
+      wrap.hidden = true;
+      body.innerHTML = "";
+      return;
+    }
+    wrap.hidden = false;
+    summary.textContent = "Walking wounded — " + list.length +
+      (list.length === 1 ? " person, not a rescue task" : " people, not a rescue task") +
+      (wrap.open ? "" : " (list closed)");
+    body.innerHTML = "";
+    body.appendChild(buildGroup(
+      "🟢 MINOR — can move themselves", "group-walking", list, true, openState || {},
+    ));
+  }
+
+  (function wireWalkingWounded() {
+    var wrap = document.getElementById("qg-ww");
+    if (!wrap) return;
+    wrap.addEventListener("toggle", function () {
+      lastSidebarSig = null;   // redraw so the summary says open or closed
+      renderFiltersOn();
+      if (lastUsers.length) renderSidebar(lastUsers);
+    });
+  })();
+
+  // #297: "Any filter that is on must be obvious on screen." One line,
+  // always in the same place, listing everything currently out of sight —
+  // and one button that puts it all back.
+  function renderFiltersOn() {
+    var el = document.getElementById("qg-filters-on");
+    if (!el) return;
+    // Nothing to say about filters while signed out — there is no detail
+    // on screen to be hiding.
+    if (!isSignedIn()) { el.hidden = true; el.innerHTML = ""; return; }
+    var hidden = [];
+    if (currentFilter !== "all") {
+      hidden.push("the map is showing only " + ({
+        red: "IMMEDIATE", yellow: "SERIOUS", green: "MINOR",
+      }[currentFilter] || currentFilter));
+    }
+    if (!showRescuedOnMap) hidden.push("rescued people are off the map");
+    var ww = document.getElementById("qg-ww");
+    if (ww && !ww.hidden && !ww.open) {
+      var wwCount = (document.getElementById("count-ww") || {}).textContent || "?";
+      hidden.push("the walking wounded list is closed (" + wwCount + ")");
+    }
+    if (showTestEntries) hidden.push("test entries are being shown as well");
+    if (searchTerm) hidden.push('the list is filtered by "' + searchTerm + '"');
+    if (!hidden.length) { el.hidden = true; el.innerHTML = ""; return; }
+    el.hidden = false;
+    el.innerHTML = "<span>Showing less than everything: " +
+      window.qgEsc(hidden.join("; ")) + ".</span>" +
+      '<button type="button" id="qg-filters-reset">Show me everything</button>';
+  }
+
+  document.addEventListener("click", function (ev) {
+    if (ev.target && ev.target.id === "qg-filters-reset") resetBoardFilters();
+  });
+
+  function resetBoardFilters(mode) {
+    // mode "new_alert" = a fresh incident, so back to the safe defaults
+    // (resolved cases off the map). Anything else = the operator asked to
+    // see all of it, and "everything" has to mean everything.
+    var showAll = mode !== "new_alert";
+    setFilter("all");
+    showRescuedOnMap = showAll;
+    var rt = document.getElementById("qg-rescued-toggle");
+    if (rt) {
+      rt.textContent = showRescuedOnMap ? "Hide rescued" : "Show rescued";
+      rt.classList.toggle("active", showRescuedOnMap);
+      rt.setAttribute("aria-pressed", showRescuedOnMap ? "true" : "false");
+    }
+    var ww = document.getElementById("qg-ww");
+    if (ww) ww.open = true;
+    searchTerm = "";
+    var box = document.getElementById("qg-triage-search");
+    if (box) box.value = "";
+    showTestEntries = false;
+    var tests = document.getElementById("qg-show-tests");
+    if (tests) tests.checked = false;
+    lastSidebarSig = null;
+    if (lastUsers.length) renderSidebar(lastUsers);
+    applyFilterVisibility();
+    renderFiltersOn();
+  }
+  window.qgResetBoardFilters = resetBoardFilters;
+
+  // #297: filters reset when a new alert starts, so nobody inherits
+  // somebody else's hidden view at the worst possible moment. (Sign-in
+  // resets them too — nothing about a filter is ever persisted.)
+  var lastSeenAlertAt = null;
+  setInterval(function () {
+    var a = window.__qgLastAlertAt || null;
+    if (a && lastSeenAlertAt && a > lastSeenAlertAt) {
+      resetBoardFilters("new_alert");
+      banner("ok", "A new alert has started, so the board is showing everything again.", 8000);
+    }
+    lastSeenAlertAt = a;
+  }, 5000);
 
   function updateCountPills(c) {
     var set = function (id, v) {
@@ -7171,6 +7641,8 @@ window.QuakeAngelRescue = (function () {
     set("count-waiting", c.waiting);
     set("count-danger", c.danger);
     set("count-rescued", c.rescued);
+    set("count-ww", c.walking);
+    renderFiltersOn();
   }
 
   initBulkBar();
@@ -7188,6 +7660,336 @@ window.QuakeAngelRescue = (function () {
       if (typeof fixMapSize === "function") setTimeout(fixMapSize, 50);
     });
   })();
+
+  // ═══════════════════════════════════════════════════════════════════
+  // #295 / #194 — is the board live, and does it admit when it is not
+  // ═══════════════════════════════════════════════════════════════════
+  //
+  // What was found (2026-08-23): the poll itself was never broken. It runs
+  // every 4 seconds and the change-detector does include status and injury
+  // severity. What was broken is that the cycle had no way of telling
+  // anyone it had stopped: five other drawing jobs ran ahead of the
+  // casualty list inside one try/catch, so a single bad record — a person
+  // who declined location, for instance — threw into the console, aborted
+  // the cycle, and the list quietly froze while the page looked healthy.
+  // A frozen browser tab produced exactly the same silence.
+  //
+  // So: the list is drawn first and alone, every job is isolated, and the
+  // board carries a clock that only a real successful read can move.
+  var STALE_MS = 15000;            // 15 s without a good read = say so
+  var lastGoodAt = 0;              // performance clock of the last good read
+  var lastGoodWall = null;         // wall clock of the same instant
+  var lastFault = "";              // plain-English reason, operator-facing
+  var staleAnnounced = false;
+  var boardSignedOut = false;
+  var hiddenAt = 0;
+
+  function qgClockSeconds(d) {
+    try {
+      return d.toLocaleTimeString("en-GB", {
+        hour: "2-digit", minute: "2-digit", second: "2-digit",
+        timeZone: "Europe/Malta",
+      });
+    } catch (_) { return String(d); }
+  }
+
+  function humanGap(ms) {
+    var s = Math.round(ms / 1000);
+    if (s < 60) return s + (s === 1 ? " second" : " seconds");
+    var m = Math.round(s / 60);
+    if (m < 60) return m + (m === 1 ? " minute" : " minutes");
+    var h = Math.floor(m / 60);
+    return h + (h === 1 ? " hour " : " hours ") + (m % 60) + " min";
+  }
+
+  function markBoardLive() {
+    lastGoodAt = Date.now();
+    lastGoodWall = new Date();
+    lastFault = "";
+    boardSignedOut = false;
+  }
+
+  function noteBoardFailure(e) {
+    // Plain English, never a JavaScript object. qgFriendlyError already
+    // does this translation for every other message on the page.
+    var msg = "";
+    try { msg = window.qgFriendlyError(e, { context: "the board" }); } catch (_) {}
+    if (/backend/i.test(msg)) msg = "We could not reach the server.";
+    lastFault = msg || "We could not reach the server.";
+    console.error("Failed to refresh dashboard:", e);
+  }
+
+  // One drawing job, isolated. A fault in any of them is named on screen
+  // rather than left in a console nobody has open.
+  function drawStep(what, fn) {
+    try { fn(); return true; }
+    catch (e) {
+      console.error("Dashboard could not draw " + what + ":", e);
+      lastFault = "We could not draw " + what + " (a fault in this page, not in the data).";
+      return false;
+    }
+  }
+
+  function renderHeartbeat() {
+    var strip = document.getElementById("qg-live");
+    var text = document.getElementById("qg-live-text");
+    var bar = document.getElementById("qg-stale-bar");
+    var detail = document.getElementById("qg-stale-detail");
+    var head = document.getElementById("qg-stale-head");
+    var mute = document.getElementById("qg-stale-mute");
+    if (!strip || !text || !bar) return;
+
+    if (boardSignedOut) {
+      strip.className = "qg-live is-signedout";
+      text.textContent = "Signed out — overall numbers only. Sign in for live triage.";
+      bar.hidden = true;
+      bar.classList.remove("qg-stale-flash");
+      try { document.body.style.paddingTop = ""; } catch (_) {}
+      staleAnnounced = false;
+      return;
+    }
+
+    var age = lastGoodAt ? Date.now() - lastGoodAt : Infinity;
+    var stale = age > STALE_MS;
+
+    if (!stale) {
+      strip.className = "qg-live";
+      var secs = Math.max(0, Math.round(age / 1000));
+      text.textContent = "Live — updated " + (secs <= 1 ? "a second" : secs + " seconds") +
+        " ago, at " + qgClockSeconds(lastGoodWall) + " Malta time.";
+      bar.hidden = true;
+      bar.classList.remove("qg-stale-flash");
+      try { document.body.style.paddingTop = ""; } catch (_) {}
+      staleAnnounced = false;
+      return;
+    }
+
+    // Stale. Loud, flashing, and it says what it is showing instead.
+    strip.className = "qg-live is-stale";
+    text.textContent = lastGoodWall
+      ? "Not updating. You are reading information from " + humanGap(age) + " ago."
+      : "Not updating. Nothing has loaded yet.";
+    bar.hidden = false;
+    bar.classList.add("qg-stale-flash");
+    // The bar is fixed to the top of the window, so the page has to make
+    // room for it — otherwise it covers the alert controls underneath.
+    try { document.body.style.paddingTop = bar.offsetHeight + "px"; } catch (_) {}
+    if (head) head.textContent = "The board is not updating";
+    if (detail) {
+      detail.textContent = (lastGoodWall
+        ? "Last real update " + qgClockSeconds(lastGoodWall) + " Malta time, " +
+          humanGap(age) + " ago. Anyone who has reported since then is not on this screen."
+        : "Nothing has loaded since this page opened.") +
+        (lastFault ? " " + lastFault : "");
+    }
+    if (mute) {
+      var left = window.qgSound.muteRemainingMs();
+      mute.textContent = left > 0
+        ? "Sound off — back in " + qgCountdownWords(left)
+        : "Silence the sound for 5 minutes";
+    }
+    if (!staleAnnounced) staleAnnounced = true;
+    window.qgSound.play("fault");
+  }
+
+  (function wireHeartbeat() {
+    var retry = document.getElementById("qg-live-retry");
+    if (retry) retry.addEventListener("click", function () { refresh(); });
+    var retry2 = document.getElementById("qg-stale-retry");
+    if (retry2) retry2.addEventListener("click", function () { refresh(); });
+    var mute = document.getElementById("qg-stale-mute");
+    if (mute) mute.addEventListener("click", function () {
+      if (window.qgSound.muteRemainingMs() > 0) window.qgSound.unmute();
+      else window.qgSound.mute(5 * 60 * 1000);
+      renderHeartbeat();
+    });
+
+    // #194: browsers freeze timers in a tab that is not in front. That is
+    // not a fault we can prevent — but pretending it did not happen is.
+    // On return: read immediately, and own the gap in words.
+    document.addEventListener("visibilitychange", function () {
+      if (document.hidden) { hiddenAt = Date.now(); return; }
+      var note = document.getElementById("qg-gap-note");
+      var gap = hiddenAt ? Date.now() - hiddenAt : 0;
+      if (note) {
+        if (gap > 20000) {
+          note.hidden = false;
+          note.textContent = "This tab was in the background for " + humanGap(gap) +
+            ", and the board did not update while it was. It has just been read again — " +
+            "check the list for anything that arrived in that time.";
+        } else {
+          note.hidden = true;
+        }
+      }
+      hiddenAt = 0;
+      refresh();
+    });
+    window.addEventListener("focus", function () { refresh(); });
+
+    setInterval(renderHeartbeat, 1000);
+  })();
+
+  // ═══════════════════════════════════════════════════════════════════
+  // #296 — the annunciator
+  // ═══════════════════════════════════════════════════════════════════
+  //
+  // Paul, 2026-08-23: "Do not invent this. There is a defined sequence used
+  // in control rooms for decades, standardised as ISA-18.1, and it exists
+  // because it works under stress."
+  //
+  //   arrive → flash + short sound
+  //   acknowledge → sound stops, flashing stops, highlight STAYS
+  //   highlight clears only when the situation is resolved
+  //
+  // What is an alarm and what is only information is decided server-side
+  // (backend/board_alarms.py) so two operators cannot see two different
+  // pictures, and an acknowledgement survives a page reload — it will be
+  // read back in an inquiry. This file only draws and sounds.
+  var alarmData = null;
+  var alarmFault = "";
+  var lastAlarmSound = 0;
+  var ALARM_SOUND_EVERY_MS = 10000;
+  var SHAPE_GLYPH = { triangle: "▲", diamond: "◆", square: "■" };
+
+  async function refreshAlarms() {
+    try {
+      if (!isSignedIn()) { alarmData = null; renderAlarms(); return; }
+      var res = await window.qaApi("/api/admin/alarms");
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      alarmData = await res.json();
+      alarmFault = "";
+    } catch (e) {
+      // The board can be live while the alarm feed is not. Say which.
+      alarmFault = "We cannot read the alarms right now. The list below is still updating.";
+      console.error("Failed to read alarms:", e);
+    }
+    renderAlarms();
+  }
+
+  async function ackAlarm(payload) {
+    try {
+      var res = await window.qaApi("/api/admin/alarms/ack", {
+        method: "POST", body: JSON.stringify(payload),
+      });
+      if (!res.ok) { banner("err", window.qgHumanHttpMessage(res.status)); return; }
+      await refreshAlarms();
+    } catch (e) {
+      banner("err", "We could not record that. Nothing has been acknowledged.");
+    }
+  }
+
+  function renderAlarms() {
+    var wrap = document.getElementById("qg-annun");
+    var rowsEl = document.getElementById("qg-annun-rows");
+    var countEl = document.getElementById("qg-annun-count");
+    var headEl = document.getElementById("qg-annun-headline");
+    var noteEl = document.getElementById("qg-annun-note");
+    var muteEl = document.getElementById("qg-annun-mute");
+    if (!wrap || !rowsEl) return;
+    if (!isSignedIn()) { wrap.hidden = true; return; }
+    wrap.hidden = false;
+
+    var groups = (alarmData && alarmData.groups) || [];
+    var unacked = (alarmData && alarmData.unacknowledged) || 0;
+
+    countEl.textContent = String(unacked);
+    wrap.className = unacked > 0 ? "qg-annun" : "qg-annun is-quiet";
+    headEl.textContent = unacked > 0
+      ? (unacked === 1 ? "1 alarm nobody has acknowledged" : unacked + " alarms nobody has acknowledged")
+      : (groups.length
+          ? "Everything showing has been acknowledged. It stays until the person is rescued or taken off the board."
+          : "No alarms. This is not the same as nobody needing help — read the list.");
+
+    // Notes: the flood rule, a feed we cannot read, and a browser that
+    // will not make sound until the page is clicked. All said plainly.
+    var notes = [];
+    if (alarmData && alarmData.flood && alarmData.flood_note) notes.push(alarmData.flood_note);
+    if (alarmFault) notes.push(alarmFault);
+    if (window.qgSound.blocked()) {
+      notes.push("Sound is off until you click anywhere on this page once — your browser will not let us play it before that.");
+    }
+    var muteLeft = window.qgSound.muteRemainingMs();
+    if (muteLeft > 0) {
+      notes.push("Sound is silenced. It comes back in " + qgCountdownWords(muteLeft) +
+        ". The flashing and the count are not affected.");
+    }
+    noteEl.hidden = notes.length === 0;
+    noteEl.textContent = notes.join(" ");
+
+    // #306 — the day-old silences. Always in view, never a sound, and it
+    // names them on request so nobody has to scroll and notice.
+    var quietEl = document.getElementById("qg-annun-quiet");
+    var lq = (alarmData && alarmData.long_quiet) || {count: 0};
+    if (quietEl) {
+      if (lq.count > 0) {
+        quietEl.hidden = false;
+        quietEl.innerHTML = "<span>\u25A0 " + window.qgEsc(lq.words || "") + "</span>" +
+          '<details class="qg-alarm-names"><summary>Show me who (' + lq.count + ')</summary>' +
+          (lq.people || []).map(function (p) {
+            return "<div>" + window.qgEsc(p.who || "") +
+              (p.hours != null ? " — quiet for " + Math.floor(p.hours / 24) + " day" +
+                (Math.floor(p.hours / 24) === 1 ? "" : "s") : "") + "</div>";
+          }).join("") + "</details>";
+      } else {
+        quietEl.hidden = true;
+        quietEl.innerHTML = "";
+      }
+    }
+    muteEl.textContent = muteLeft > 0
+      ? "Turn the sound back on now"
+      : "Silence the sound for 5 minutes";
+
+    rowsEl.innerHTML = groups.map(function (g) {
+      var glyph = SHAPE_GLYPH[g.shape] || "■";
+      var acked = !!g.acknowledged;
+      var names = "";
+      if (g.count > 1) {
+        names = '<details class="qg-alarm-names"><summary>Show me who (' + g.count + ')</summary>' +
+          g.people.map(function (p) {
+            return "<div>" + window.qgEsc(p.headline || p.who || "") +
+              (p.acknowledged ? "" : " — not acknowledged") + "</div>";
+          }).join("") + "</details>";
+      }
+      return '<div class="qg-alarm ' + (acked ? "is-acked" : "is-new") + '">' +
+        '<div class="qg-alarm-shape" aria-hidden="true">' + glyph + "</div>" +
+        '<div class="qg-alarm-body">' +
+          '<div class="qg-alarm-word">' + window.qgEsc(g.word || "") + "</div>" +
+          '<div class="qg-alarm-headline">' + window.qgEsc(g.headline || "") + "</div>" +
+          '<div class="qg-alarm-action">' + window.qgEsc(g.action || "") + "</div>" +
+          '<div class="qg-alarm-meta">' + window.qgEsc(window.qgTime(g.at)) + " Malta time" +
+            (acked && g.ack_by
+              ? " · acknowledged by " + window.qgEsc(g.ack_by) + " at " + window.qgEsc(window.qgTime(g.ack_at))
+              : "") + "</div>" +
+          names +
+        "</div>" +
+        (acked ? "" : '<button type="button" class="qg-alarm-ack" data-group="' +
+          window.qgEsc(g.group_key) + '">Acknowledge</button>') +
+        "</div>";
+    }).join("");
+
+    // The sound: one short chime, repeated every 10 seconds while anything
+    // is unacknowledged. Never two on top of each other (qgSound enforces
+    // that), and muting cannot hide the flashing or the count.
+    if (unacked > 0 && Date.now() - lastAlarmSound > ALARM_SOUND_EVERY_MS) {
+      if (window.qgSound.play("alarm")) lastAlarmSound = Date.now();
+    }
+  }
+
+  document.addEventListener("click", function (ev) {
+    var btn = ev.target.closest && ev.target.closest(".qg-alarm-ack");
+    if (btn) { ackAlarm({ group_key: btn.dataset.group }); return; }
+    if (ev.target && ev.target.id === "qg-annun-mute") {
+      if (window.qgSound.muteRemainingMs() > 0) window.qgSound.unmute();
+      else window.qgSound.mute(5 * 60 * 1000);
+      renderAlarms();
+    }
+  });
+
+  // The mute countdown has to tick even when nothing else changes —
+  // nobody must be able to forget they silenced it.
+  setInterval(function () {
+    if (window.qgSound.muteRemainingMs() > 0) renderAlarms();
+  }, 1000);
 
   refresh();
   setInterval(refresh, 4000);
