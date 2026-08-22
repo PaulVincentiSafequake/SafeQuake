@@ -129,3 +129,28 @@ Verified in preview: opened the alert screen, tapped I NEED HELP, left the
 injury sheet open unanswered — at 00:12 the amber "Another alert just arrived —
 M5.1. Your answer below still applies." notice appeared with the sheet and the
 part-finished answer untouched.
+
+---
+
+## 1.0.44 (build 44) — 22 Aug 2026
+
+Paul's installed build before this is **1.0.41 (41)**. 1.0.42 and 1.0.43 were
+never built: the work landed in the repo while the version stayed at 41, which
+is why this jumps straight to 44 — the numbers Paul was quoted in conversation
+are kept, and no build number is ever reused (Apple rejects that anyway).
+
+| Change | Ref |
+|---|---|
+| One source decides whether the siren can sound, so settings and the home screen can no longer contradict each other | #280 |
+| Permanent home-screen warning above the rescue code when the phone cannot sound the siren, show our messages, or share a location. Not dismissible; prints nothing when there is no problem | #281 |
+| Home screen layout fixed at the cause — no absolutely-positioned bar over the content | #282 |
+| Plain sentences, no shouting. Capitals only for IMMEDIATE, SERIOUS, MINOR and DROP. COVER. HOLD ON. | #283 |
+| "Early warning" wording removed everywhere | #284 |
+| Setup split into three screens, one decision each | #285 |
+| Practice run asks where the siren came out; "my watch" restores the Watch reminder. The reminder can no longer be dismissed for good | #286 |
+| Tremor notices held for 20 minutes (`apns-expiration`) instead of "deliver once, never store" | #287 |
+| Diagnostics → "What's fixed in it" rewritten for this build, so a stale install is visible on the phone | process |
+
+Dashboard: unchanged in this build. The #278 sentence-case change to the ask
+history is built in `/app/memory/dashboard_build/index.html` but deliberately
+NOT pushed — Paul chose to ship it with the next dashboard round.

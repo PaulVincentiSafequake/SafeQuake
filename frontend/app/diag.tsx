@@ -379,7 +379,7 @@ export default function DiagScreen() {
             label="What's fixed in it"
             value={
               (info?.app_version ?? "?") +
-              " — #208 mobile probe: last 5 notification taps are now recorded to Diagnostics (Copy button below sends the raw APNs payload back to support so we can see which routing key iOS actually delivered). No routing changes in this build. Earlier: #208 unanswered-alert redirect takes over from ANY screen on lock/unlock, #266/#260 truthful registration status, #245 type-to-confirm on trigger, #199 clear-on-stand-down, #247 saved place, #249 saved places on the map, #211 recency-ramp map key, #243 zoom in to epicentre, #250 not-responding wording, #252 human-first diagnostics, #244 honest test-button wording."
+              " — the home screen now warns you, permanently and above your rescue code, whenever this phone cannot sound the siren, cannot show our messages or cannot tell anyone where you are. One source decides that, so settings and the home screen can no longer disagree. Setup is three screens, one decision each. The practice run asks where the siren came out, and puts the watch reminder back if it was your watch. Tremor notices are now held for 20 minutes instead of being dropped if your phone is locked or out of signal. Plain sentences everywhere; capitals only for IMMEDIATE, SERIOUS, MINOR and DROP. COVER. HOLD ON. Earlier: #208 mobile tap probe, unanswered-alert redirect from any screen, truthful registration status, type-to-confirm on trigger, clear-on-stand-down, saved places on the map, zoom in to epicentre, human-first diagnostics."
             }
           />
         </Section>
