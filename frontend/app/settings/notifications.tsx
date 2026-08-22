@@ -46,6 +46,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import { getDeviceId } from "@/src/utils/checkin";
 import { useReadiness } from "@/src/utils/readiness";
+import { markPresetChosenByUser } from "@/src/utils/tremorNotices";
 
 const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL ?? "";
 
@@ -134,6 +135,10 @@ export default function NotificationSettingsScreen() {
       });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       setPreset(next);
+      // #305: a person who has chosen for themselves is never asked
+      // whether they want fewer notices. They have decided. `silent` is
+      // the automatic migration of the retired tier, which is not a choice.
+      if (!opts?.silent) markPresetChosenByUser().catch(() => {});
     } catch {
       if (!opts?.silent) {
         Alert.alert("Could not save", "Please check your connection and try again.");
@@ -219,7 +224,7 @@ export default function NotificationSettingsScreen() {
               {"\n\n"}
               {sirenOff
                 ? "An earthquake alert should come through anything — but not on this phone until you fix the warning above."
-                : "An earthquake alert is different. It always comes through."}
+                : "An earthquake alert is different. It is set to come through Focus and silent — it still needs signal and the permissions above."}
               {"\n\n"}
               To let check-in questions through, turn on Time Sensitive
               Notifications for Quake Angel.

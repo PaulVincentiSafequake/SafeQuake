@@ -50,9 +50,10 @@ export type EventPayloadLike =
  * different distances.
  */
 export function roundDistanceKm(km: number | string | null | undefined): string {
-  if (km === null || km === undefined || km === "") return "—";
+  // #292: one phrase for "we do not know this", everywhere.
+  if (km === null || km === undefined || km === "") return "Not known";
   const n = typeof km === "number" ? km : Number(km);
-  if (!Number.isFinite(n)) return "—";
+  if (!Number.isFinite(n)) return "Not known";
   if (n < 10) return String(Math.round(n * 10) / 10);
   return String(Math.round(n));
 }

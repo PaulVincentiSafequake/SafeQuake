@@ -27,6 +27,29 @@ import {
 } from "@/src/utils/reminders";
 import { recordTap, buildLogFields, type TapSource } from "@/src/utils/tapProbe";
 import { reportPresentedPushes, reportPushSeen } from "@/src/utils/pushReceipt";
+import {
+  recordTremorNoticeOpened,
+  recordTremorNoticeReceived,
+} from "@/src/utils/tremorNotices";
+
+/**
+ * #305: which pushes are tremor notices — the quiet "a shake happened
+ * nearby" messages — as opposed to our operational ones. Listed by
+ * exclusion, deliberately: a tremor notice is the default kind of push, so
+ * a new operational kind added later cannot be miscounted as noise.
+ */
+const OPERATIONAL_PUSH_KINDS = [
+  "critical_alert",
+  "check_in_request",
+  "recheck",
+  "cancel_reminders",
+  "alert_stood_down",
+  "incident_closed",
+  "quakeguard-reminder",
+];
+function isTremorNotice(kind: string): boolean {
+  return !OPERATIONAL_PUSH_KINDS.includes(kind);
+}
 
 const ONBOARDING_DONE_KEY = "quakeguard_onboarding_done";
 
@@ -595,6 +618,9 @@ export default function RootLayout() {
           ? explicit
           : "/quake/unknown";
       const fallbackRoute = path + (qs ? "?" + qs : "");
+      // #305: they opened it. Opening even one means the notices are being
+      // read, and the "want fewer?" question is never shown.
+      if (isTremorNotice(kind)) recordTremorNoticeOpened().catch(() => {});
       logChoice(fallbackRoute);
       router.push(fallbackRoute as any);
     };
@@ -637,6 +663,10 @@ export default function RootLayout() {
       // #276: the phone has the question in its hands. Tell the operator's
       // board so "no answer" can be told apart from "never arrived".
       reportPushSeen(data, "shown");
+      // #305: the app counts its own noise. A tremor notice is anything
+      // that is not one of our operational pushes — the same set that the
+      // tap handler sends to the informational detail screen.
+      if (isTremorNotice(kind)) recordTremorNoticeReceived().catch(() => {});
       if (kind === "cancel_reminders") {
         cancelCheckInReminders().catch(() => {});
         return;

@@ -7562,6 +7562,9 @@ window.QuakeAngelRescue = (function () {
   function renderFiltersOn() {
     var el = document.getElementById("qg-filters-on");
     if (!el) return;
+    // Nothing to say about filters while signed out — there is no detail
+    // on screen to be hiding.
+    if (!isSignedIn()) { el.hidden = true; el.innerHTML = ""; return; }
     var hidden = [];
     if (currentFilter !== "all") {
       hidden.push("the map is showing only " + ({

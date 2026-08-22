@@ -15,6 +15,15 @@ interface Props {
  * Single source of truth for the "iOS delivers alerts to your Apple Watch
  * instead of ringing your iPhone" advisory. Copy is intentionally identical
  * between onboarding and /diag so users see the same words in both places.
+ *
+ * #300 (2026-08-23 — Paul): the card used to repeat the heading and the
+ * opening line in almost the same words. One heading, one explanation (on
+ * the screen that shows this), and the four steps.
+ *
+ * #301: the "Heads up — re-check this after every update" block is gone.
+ * "Nobody remembers that months later." The app knows its own version, so
+ * src/utils/watchReminder.ts brings the reminder back by itself after an
+ * update. Never make the user's memory the safety mechanism.
  */
 export function AppleWatchNote({ variant = "compact" }: Props) {
   const isOnboarding = variant === "onboarding";
@@ -33,14 +42,8 @@ export function AppleWatchNote({ variant = "compact" }: Props) {
         <Text style={s.title}>Wearing an Apple Watch?</Text>
       </View>
 
-      <Text style={s.body}>
-        If you wear an Apple Watch, iOS may deliver alerts to your Watch
-        instead of ringing your iPhone loudly, even for critical alerts —
-        this is an Apple system behavior, not a bug in the app.
-      </Text>
-
       <View style={s.fixCard}>
-        <Text style={s.fixLabel}>To make sure Quake Angel always rings your iPhone:</Text>
+        <Text style={s.fixLabel}>To keep the siren on your iPhone:</Text>
         <View style={s.stepRow}>
           <Text style={s.stepNum}>1.</Text>
           <Text style={s.stepText}>
@@ -67,15 +70,6 @@ export function AppleWatchNote({ variant = "compact" }: Props) {
         </View>
       </View>
 
-      <View style={s.updateNote}>
-        <Text style={s.updateNoteLabel}>Heads up</Text>
-        <Text style={s.updateNoteText}>
-          iOS often <Text style={s.stepBold}>resets this toggle back to ON after
-          app updates</Text> (including TestFlight installs and app-name/icon
-          changes). Re-check this setting after every update — the app
-          can&apos;t detect or change it for you.
-        </Text>
-      </View>
     </View>
   );
 }

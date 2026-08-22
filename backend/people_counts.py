@@ -310,7 +310,8 @@ def moved_by_words(row: Dict[str, Any]) -> str:
         return "the phone itself — Apple reported the app is no longer installed"
     if st.get("state") == "never_used":
         return "nobody — this record has never been on the working board"
-    return "—"
+    # #292: one phrase for the unknown, on every surface.
+    return "Not known"
 
 
 def counts_notes_short(c: Counts) -> str:

@@ -178,8 +178,15 @@ export function useReadiness(): Readiness {
     if (!state.locationAllowed) {
       problems.push({
         id: "location_off",
-        headline: "We cannot tell anyone where you are.",
-        action: "Tap to allow location. Your rescue code still works without it.",
+        // #289 (2026-08-23 — Paul): "tell me what happens to someone who
+        // declines location... They must be told plainly what declining
+        // means, on the home screen, not buried." So this says what still
+        // works and what does not, in that order.
+        headline: "Nobody will know where to send help.",
+        action:
+          "Your rescue code and name still reach the people running the " +
+          "response, but there will be no pin on the map for you. Tap to " +
+          "turn location on.",
         critical: false,
       });
     }

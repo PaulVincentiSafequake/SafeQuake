@@ -89,7 +89,7 @@ export default function QuakeDetailScreen() {
   const observedAtValid = observedAt !== null;
 
   const timeAgo = (() => {
-    if (!observedAtValid) return "—";
+    if (!observedAtValid) return "Time not known";
     const s = Math.floor((Date.now() - (observedAt as Date).getTime()) / 1000);
     if (s < 60) return `${s}s ago`;
     if (s < 3600) return `${Math.floor(s / 60)} min ago`;

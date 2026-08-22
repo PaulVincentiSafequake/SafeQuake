@@ -93,7 +93,7 @@ def day_month(ts) -> str:
 def human(ts) -> str:
     """"21 Aug 2026, 21:08". Malta time. For lists and tables."""
     d = local(ts)
-    return d.strftime("%d %b %Y, %H:%M").lstrip("0") if d else "—"
+    return d.strftime("%d %b %Y, %H:%M").lstrip("0") if d else "Not known"
 
 
 def offset_words(ts) -> str:
@@ -116,7 +116,7 @@ def legal(ts) -> str:
     country."""
     d = local(ts)
     if not d:
-        return "—"
+        return "Not known"
     return f"{human(ts)} ({TZ_NAME}, {offset_words(ts)})"
 
 

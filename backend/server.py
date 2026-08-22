@@ -4203,7 +4203,7 @@ async def tremor_diagnostics(request: Request):
             "at": _iso(r.get("at")) or _iso(r.get("created_at")),
             "kind": ("Own-location tremor" if source == "preview"
                      else "Saved-place notice"),
-            "region": r.get("region") or r.get("place_name") or "—",
+            "region": r.get("region") or r.get("place_name") or "Not known",
             "magnitude": r.get("magnitude"),
             "delivered": int(r.get("delivered") or 0),
             "targeted": int(r.get("targeted") or 1),

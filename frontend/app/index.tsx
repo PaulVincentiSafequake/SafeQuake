@@ -38,11 +38,17 @@ import {
 } from "@/src/utils/watchReminder";
 import EntitlementBanner from "@/src/components/EntitlementBanner";
 import ReadinessBanner from "@/src/components/ReadinessBanner";
+import {
+  getTremorNoticeStats,
+  markQuietenAsked,
+  shouldAskToQuieten,
+} from "@/src/utils/tremorNotices";
 // #208 R4 — `shouldRedirectToAlert`/`toAlertQuery` moved to _layout.tsx
 // so the unanswered-alert redirect fires from every screen, not just
 // this one. Keeping the imports here would be dead weight.
 import { colors, radius, spacing } from "@/src/theme";
 import {
+  getDeviceId,
   getDisplayName,
   getShortCode,
   markNamePrompted,
@@ -55,6 +61,10 @@ import {
   ensureNotificationSetup,
 } from "@/src/utils/reminders";
 
+
+const BACKEND_URL =
+  process.env.EXPO_PUBLIC_BACKEND_URL ??
+  (Constants.expoConfig?.extra as any)?.EXPO_PUBLIC_BACKEND_URL;
 
 const HERO_IMG =
   "https://images.unsplash.com/photo-1772050137595-0116f8dba498?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjY2NjV8MHwxfHNlYXJjaHwxfHxlYXJ0aHF1YWtlJTIwc2Vpc21vZ3JhcGglMjBkYXJrfGVufDB8fHx8MTc4NDcwNTQ2MHww&ixlib=rb-4.1.0&q=85";
@@ -136,6 +146,11 @@ export default function HomeScreen() {
     "manual",
   );
   const [nameSaving, setNameSaving] = useState(false);
+  // #291: the home-screen prompt. Visible until answered or declined once.
+  const [namePromptOpen, setNamePromptOpen] = useState(false);
+  // #305: the one-time "want fewer tremor notices?" question. Shown at most
+  // once, ever, and never while an alert is live.
+  const [quietenAsk, setQuietenAsk] = useState<{ received: number } | null>(null);
 
   const evaluateWatchState = useCallback(async () => {
     // Non-iOS / web without ?preview=1 → the entire feature is a no-op.
@@ -200,6 +215,34 @@ export default function HomeScreen() {
     evaluateWatchState();
   }, [evaluateWatchState]);
 
+  // #305: decide once per app open. All the "do not ask" rules live in
+  // src/utils/tremorNotices.ts so no screen can get them wrong.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        if (!(await shouldAskToQuieten())) return;
+        const stats = await getTremorNoticeStats();
+        if (!cancelled) setQuietenAsk({ received: stats.received });
+      } catch { /* no question is the safe outcome */ }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  const answerQuieten = useCallback(async (fewer: boolean) => {
+    setQuietenAsk(null);
+    await markQuietenAsked().catch(() => {});
+    if (!fewer) return;
+    try {
+      const did = await getDeviceId();
+      await fetch(`${BACKEND_URL}/api/devices/notification-preset`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ device_id: did, preset: "noticeable" }),
+      });
+    } catch { /* they can also change it in settings */ }
+  }, []);
+
   useEffect(() => {
     const sub = AppState.addEventListener("change", (next: AppStateStatus) => {
       if (next === "active") {
@@ -225,17 +268,13 @@ export default function HomeScreen() {
         if (cancelled) return;
         setShortCode(code);
         setDisplayNameState(name);
-        if (!prompted) {
-          // Give the hero animation a beat to settle so the modal doesn't
-          // fight the first paint. Non-blocking — user can dismiss and
-          // will simply see "add your name" affordance on the pill.
-          setTimeout(() => {
-            if (cancelled) return;
-            setNameDraft("");
-            setNameModalReason("auto");
-            setNameModalOpen(true);
-          }, 700);
-        }
+        // #291 (2026-08-23 — Paul): this used to open the name editor by
+        // itself the moment setup finished, which made it feel like a
+        // fourth setup step — "Do not say three and show four." The name
+        // is optional and the app works without it, so it is never a gate.
+        // It is now a prompt on the home screen that stays until the
+        // person answers it or says not now.
+        setNamePromptOpen(!prompted && !name);
       } catch (e) {
         console.log("[QuakeAngel] load identity failed:", (e as Error)?.message);
       }
@@ -317,6 +356,11 @@ export default function HomeScreen() {
     }
   }, []);
 
+  const dismissNamePrompt = useCallback(async () => {
+    setNamePromptOpen(false);
+    try { await markNamePrompted(); } catch { /* they will see it once more */ }
+  }, []);
+
   const saveDisplayName = useCallback(async () => {
     if (nameSaving) return;
     setNameSaving(true);
@@ -326,6 +370,7 @@ export default function HomeScreen() {
       // manual-edit paths converge on the same persisted state.
       const saved = await setDisplayName(nameDraft.trim() || null);
       setDisplayNameState(saved);
+      setNamePromptOpen(false);
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(
         () => {},
       );
@@ -352,13 +397,12 @@ export default function HomeScreen() {
     try {
       servicesOn = await Location.hasServicesEnabledAsync();
       if (servicesOn) {
+        // #289: the practice button used to ask for location before it
+        // opened the alert screen, which is how a system box ended up on
+        // top of a playing siren. Check only, here and everywhere else
+        // that runs during an alert or a practice.
         const cur = await Location.getForegroundPermissionsAsync();
-        if (cur.granted) {
-          permGranted = true;
-        } else if (cur.canAskAgain) {
-          const req = await Location.requestForegroundPermissionsAsync();
-          permGranted = req.status === "granted";
-        }
+        if (cur.granted) permGranted = true;
       }
     } catch {
       // ignore — treat as no permission
@@ -593,6 +637,80 @@ export default function HomeScreen() {
                   </View>
                 </View>
               </Pressable>
+            ) : null}
+
+            {/* #291: obvious and easy, never a gate. It stays until they
+                add a name or say not now — the same rule as every other
+                prompt in this app: no silent disappearing. */}
+            {/* #305 — asked once, ever, and never while an alert is live
+                (this whole screen is replaced by /alert then). It says in
+                one line that the siren is not affected, because someone
+                turning notices down must not think they are turning down
+                their protection. */}
+            {quietenAsk ? (
+              <View style={styles.namePrompt} testID="home-quieten-ask">
+                <Text style={styles.namePromptTitle}>
+                  You&apos;ve had {quietenAsk.received} tremor notices this week
+                  and opened none of them. Want fewer?
+                </Text>
+                <Text style={styles.namePromptBody}>
+                  This only changes the quiet notices about small shakes. The
+                  earthquake siren is not affected either way.
+                </Text>
+                <View style={styles.namePromptRow}>
+                  <Pressable
+                    onPress={() => answerQuieten(true)}
+                    style={styles.namePromptPrimary}
+                    testID="home-quieten-fewer"
+                  >
+                    <Ionicons name="volume-low" size={16} color={colors.onBrandPrimary} />
+                    <Text style={styles.namePromptPrimaryText}>
+                      Yes — only shakes I&apos;d feel
+                    </Text>
+                  </Pressable>
+                  <Pressable
+                    onPress={() => answerQuieten(false)}
+                    style={styles.namePromptSecondary}
+                    hitSlop={8}
+                    testID="home-quieten-keep"
+                  >
+                    <Text style={styles.namePromptSecondaryText}>
+                      No — keep them all
+                    </Text>
+                  </Pressable>
+                </View>
+              </View>
+            ) : null}
+
+            {namePromptOpen ? (
+              <View style={styles.namePrompt} testID="home-name-prompt">
+                <Text style={styles.namePromptTitle}>
+                  Add your first name?
+                </Text>
+                <Text style={styles.namePromptBody}>
+                  If you ask for help, a rescuer sees your name beside your
+                  code, so they know who they are looking for. You can leave
+                  it out and the app works the same.
+                </Text>
+                <View style={styles.namePromptRow}>
+                  <Pressable
+                    onPress={openNameEditor}
+                    style={styles.namePromptPrimary}
+                    testID="home-name-prompt-add"
+                  >
+                    <Ionicons name="person-add" size={16} color={colors.onBrandPrimary} />
+                    <Text style={styles.namePromptPrimaryText}>Add my name</Text>
+                  </Pressable>
+                  <Pressable
+                    onPress={dismissNamePrompt}
+                    style={styles.namePromptSecondary}
+                    hitSlop={8}
+                    testID="home-name-prompt-dismiss"
+                  >
+                    <Text style={styles.namePromptSecondaryText}>Not now</Text>
+                  </Pressable>
+                </View>
+              </View>
             ) : null}
           </SafeAreaView>
         </View>
@@ -974,7 +1092,7 @@ export default function HomeScreen() {
 
             <Pressable
               onPress={saveDisplayName}
-              disabled={nameSaving}
+              disabled={nameSaving || (nameDraft.trim().length === 0 && !displayName)}
               style={({ pressed }) => [
                 styles.nameModalPrimary,
                 pressed && { opacity: 0.9 },
@@ -991,14 +1109,14 @@ export default function HomeScreen() {
                   color={colors.onBrandPrimary}
                 />
               )}
+              {/* #291: "the red button should be the action a person
+                  would normally take". It saves. It never skips. */}
               <Text style={styles.nameModalPrimaryText}>
                 {nameSaving
                   ? "Saving…"
-                  : nameDraft.trim().length > 0
-                    ? "Save"
-                    : displayName
-                      ? "Remove my name"
-                      : "Skip"}
+                  : nameDraft.trim().length === 0 && displayName
+                    ? "Remove my name"
+                    : "Save my name"}
               </Text>
             </Pressable>
 
@@ -1010,9 +1128,9 @@ export default function HomeScreen() {
               testID="name-modal-secondary"
               hitSlop={8}
             >
-              <Text style={styles.nameModalSecondaryText}>
-                {nameModalReason === "auto" ? "Not now" : "Cancel"}
-              </Text>
+              {/* One single way to decline. "Skip" and "Not now" side by
+                  side meant the same thing twice. */}
+              <Text style={styles.nameModalSecondaryText}>Not now</Text>
             </Pressable>
           </View>
         </KeyboardAvoidingView>
@@ -1382,6 +1500,58 @@ const styles = StyleSheet.create({
   },
   rescuePillLeft: {
     minWidth: 96,
+  },
+  // #291 — the home-screen name prompt.
+  namePrompt: {
+    marginTop: spacing.md,
+    backgroundColor: "rgba(20,23,28,0.92)",
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.14)",
+    padding: spacing.lg,
+    gap: 6,
+  },
+  namePromptTitle: {
+    color: colors.onSurface,
+    fontSize: 18,
+    fontWeight: "800",
+  },
+  namePromptBody: {
+    color: colors.onSurfaceSecondary,
+    fontSize: 15,
+    lineHeight: 21,
+  },
+  namePromptRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.md,
+    marginTop: spacing.sm,
+  },
+  namePromptPrimary: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    backgroundColor: colors.brandPrimary,
+    borderRadius: radius.md,
+    paddingHorizontal: spacing.lg,
+    minHeight: 48,
+    flexShrink: 1,
+  },
+  namePromptPrimaryText: {
+    color: colors.onBrandPrimary,
+    fontSize: 16,
+    fontWeight: "800",
+  },
+  namePromptSecondary: {
+    minHeight: 48,
+    justifyContent: "center",
+    paddingHorizontal: spacing.sm,
+  },
+  namePromptSecondaryText: {
+    color: colors.onSurfaceSecondary,
+    fontSize: 16,
+    fontWeight: "700",
   },
   rescuePillDivider: {
     width: 1,

@@ -475,9 +475,14 @@ export default function AlertScreen() {
       try {
         const servicesOn = await Location.hasServicesEnabledAsync();
         if (!servicesOn) return;
-        const { status: permStatus } =
-          await Location.requestForegroundPermissionsAsync();
-        if (permStatus !== "granted" || cancelled) return;
+        // #289 (2026-08-23 — Paul): CHECK, never ask. iOS put its location
+        // box on top of a playing siren while he was trying to press
+        // "I need help". Nothing on this screen may ever raise a system
+        // permission box: location is asked for during setup, and on the
+        // home screen if it was refused. Without it we send the report
+        // anyway and the board says the place is not known.
+        const perm = await Location.getForegroundPermissionsAsync();
+        if (!perm.granted || cancelled) return;
         sub = await Location.watchPositionAsync(
           {
             accuracy: Location.Accuracy.BestForNavigation,
@@ -526,6 +531,42 @@ export default function AlertScreen() {
       clearInterval(t);
     };
   }, [pulse, ring]);
+
+  // #288 (2026-08-23 — Paul): "The practice does not vibrate. Sound only.
+  // This is the one screen whose entire purpose is showing someone what a
+  // real alert feels like, and it makes a promise the phone does not keep."
+  //
+  // What was there: ONE short haptic tap when the screen opened. A fifth of
+  // a second, under a siren. Not a lie — just far too small to feel.
+  //
+  // What it does now: a heavy buzz every 900 ms for as long as the siren is
+  // playing, on a real alert and on a practice alike, so the phone is
+  // noticeably buzzing rather than tapping once. iOS gives no long
+  // vibration to an app (Vibration's duration and pattern are ignored
+  // there), so a repeated heavy impact is the honest way to do it.
+  //
+  // The one thing we cannot control is System Haptics being switched off in
+  // iOS settings — no app can vibrate then. The practice screen says so in
+  // one line rather than promising something the phone may refuse.
+  useEffect(() => {
+    if (!shouldPlaySiren) return;
+    let stopped = false;
+    const buzz = () => {
+      if (stopped) return;
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy).catch(() => {});
+    };
+    buzz();
+    const id = setInterval(() => {
+      // Stops itself the moment the siren stops — answering the alert
+      // silences the buzzing as well as the sound.
+      if (!shouldPlayRef.current) return;
+      buzz();
+    }, 900);
+    return () => {
+      stopped = true;
+      clearInterval(id);
+    };
+  }, [shouldPlaySiren]);
 
   const iconStyle = useAnimatedStyle(() => ({
     transform: [{ scale: pulse.value }],
@@ -612,9 +653,10 @@ export default function AlertScreen() {
         if (!servicesOn) {
           locationError = "location_services_off";
         } else {
-          const { status: permStatus } =
-            await Location.requestForegroundPermissionsAsync();
-          if (permStatus === "granted") {
+          // #289: check only — a permission box must never appear during an
+          // alert or a practice.
+          const perm = await Location.getForegroundPermissionsAsync();
+          if (perm.granted) {
             const posPromise = Location.getCurrentPositionAsync({
               // BestForNavigation → real GPS fix, not Wi-Fi / cell triangulation
               accuracy: Location.Accuracy.BestForNavigation,
@@ -986,15 +1028,40 @@ export default function AlertScreen() {
 
         {/* Data strip — own row, never overlapped by the buttons below.
             Hidden for a check-in request: there is no event to describe,
-            and empty readings would read as missing data (#205 rule 9.4). */}
-        {!isCheckInRequest && (
+            and empty readings would read as missing data (#205 rule 9.4).
+
+            #292 (2026-08-23 — Paul): "Pick one way of saying 'we do not
+            know this' and use it in every field, every screen, both PDFs
+            and the CSV." It is "Not known". A dash is not a word and reads
+            as a broken field.
+
+            And on a practice: "dashes teach people that a real alert looks
+            broken." A practice has no event behind it, so the strip is
+            replaced by one line saying exactly that, rather than three
+            empty fields or invented figures that could be mistaken for
+            real ones. */}
+        {!isCheckInRequest && isTestRun && (
+          <View style={styles.metricsRow} testID="alert-practice-readings-note">
+            <Text style={styles.practiceReadingsNote}>
+              This is a practice, so there are no real readings. In a real
+              alert this strip shows how strong the earthquake was, how far
+              away it was, and how hard the shaking was where you are.
+            </Text>
+          </View>
+        )}
+        {!isCheckInRequest && !isTestRun && (
         <View style={styles.metricsRow}>
           <View style={styles.metric}>
             <Text style={[styles.metricLabel, compact && styles.metricLabelCompact]}>
               MAGNITUDE
             </Text>
-            <Text style={styles.metricValue} numberOfLines={1} adjustsFontSizeToFit>
-              {eventReadings.magnitude ?? "—"}
+            <Text
+              style={[styles.metricValue,
+                      eventReadings.magnitude == null && styles.metricValueMissing]}
+              numberOfLines={2}
+              adjustsFontSizeToFit
+            >
+              {eventReadings.magnitude ?? "Not known"}
             </Text>
           </View>
           <View style={styles.metricDivider} />
@@ -1002,11 +1069,16 @@ export default function AlertScreen() {
             <Text style={[styles.metricLabel, compact && styles.metricLabelCompact]}>
               DISTANCE
             </Text>
-            <Text style={styles.metricValue} numberOfLines={1} adjustsFontSizeToFit>
+            <Text
+              style={[styles.metricValue,
+                      eventReadings.distance_km == null && styles.metricValueMissing]}
+              numberOfLines={2}
+              adjustsFontSizeToFit
+            >
               {eventReadings.distance_km != null ? (
                 <>{roundDistanceKm(eventReadings.distance_km)}
                   <Text style={styles.metricUnit}>km</Text></>
-              ) : "—"}
+              ) : "Not known"}
             </Text>
           </View>
           <View style={styles.metricDivider} />
@@ -1017,15 +1089,17 @@ export default function AlertScreen() {
             {/* #273 (2026-08-21 — Paul): a bare dash beside a filled-in
                 magnitude and distance reads like a missing reading. EMSC
                 often publishes no intensity at all for small or distant
-                events. Say that, in words, rather than showing nothing
-                and calling it data (#205, rule 9.4). */}
+                events. #292 (2026-08-23): and it says the same words as
+                every other unknown field — "Not known" — because two ways
+                of saying it on one screen makes a reader hunt for a
+                difference that is not there. */}
             <Text
               style={[styles.metricValue,
                       eventReadings.intensity == null && styles.metricValueMissing]}
               numberOfLines={2}
               adjustsFontSizeToFit
             >
-              {eventReadings.intensity ?? "Not reported"}
+              {eventReadings.intensity ?? "Not known"}
             </Text>
           </View>
         </View>
@@ -1059,7 +1133,7 @@ export default function AlertScreen() {
           {isTestRun && status === "sent" && !wristAnswer && (
             <View style={styles.wristAsk} testID="rehearsal-wrist-ask">
               <Text style={styles.wristAskTitle}>
-                Where did the siren come from?
+                Did your phone sound the siren?
               </Text>
               <View style={styles.wristAskRow}>
                 <Pressable
@@ -1068,7 +1142,7 @@ export default function AlertScreen() {
                   testID="rehearsal-wrist-phone"
                 >
                   <Ionicons name="phone-portrait" size={18} color="#0F1115" />
-                  <Text style={styles.wristAskBtnText}>My phone</Text>
+                  <Text style={styles.wristAskBtnText}>Yes</Text>
                 </Pressable>
                 <Pressable
                   onPress={async () => {
@@ -1079,7 +1153,7 @@ export default function AlertScreen() {
                   testID="rehearsal-wrist-watch"
                 >
                   <Ionicons name="watch" size={18} color="#0F1115" />
-                  <Text style={styles.wristAskBtnText}>My watch</Text>
+                  <Text style={styles.wristAskBtnText}>No — only my watch buzzed</Text>
                 </Pressable>
               </View>
             </View>
@@ -1261,11 +1335,11 @@ export default function AlertScreen() {
             <Pressable
               onPress={() => {
                 stopSiren();
-                if (router.canGoBack()) {
-                  router.back();
-                } else {
-                  router.replace("/");
-                }
+                // #290 (2026-08-23 — Paul): "Back to home" went back one
+                // screen, and a practice launched from setup made that
+                // screen setup. It says home, so it goes home, from every
+                // path that shows it.
+                router.replace("/");
               }}
               style={styles.dismissBtn}
               hitSlop={12}
@@ -1770,12 +1844,21 @@ const styles = StyleSheet.create({
     fontWeight: "600",
     color: "rgba(255,255,255,0.7)",
   },
-  // #273: "Not reported" is a sentence, not a reading — it must not be
+  // #292: "Not known" is a sentence, not a reading — it must not be
   // styled like one, or the eye reads it as a value.
   metricValueMissing: {
     fontSize: 15,
     fontWeight: "600",
     color: "rgba(255,255,255,0.75)",
+  },
+  // #292: on a practice there is no event, so the strip says so in words
+  // instead of showing three empty fields that look like a fault.
+  practiceReadingsNote: {
+    flex: 1,
+    color: "rgba(255,255,255,0.88)",
+    fontSize: 15,
+    lineHeight: 21,
+    fontWeight: "600",
   },
   metricDivider: {
     width: 1,

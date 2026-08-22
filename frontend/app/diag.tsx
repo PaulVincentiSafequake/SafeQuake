@@ -24,6 +24,7 @@ import {
   type DiagInfo,
 } from "@/src/utils/push";
 import { AppleWatchNote } from "@/src/components/AppleWatchNote";
+import { getTremorNoticeStats } from "@/src/utils/tremorNotices";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Clipboard from "expo-clipboard";
 import {
@@ -70,6 +71,21 @@ export default function DiagScreen() {
   // Read-only for the user; they copy the whole log and paste it back
   // to us so we can see the actual APNs payload iOS delivered.
   const [tapLog, setTapLog] = useState<TapEntry[]>([]);
+  // #305: the received-versus-opened counts behind the one-time question.
+  const [tremorStats, setTremorStats] = useState({
+    received: 0, opened: 0, asked: false, userChoseSetting: false,
+  });
+
+  useEffect(() => {
+    getTremorNoticeStats()
+      .then((st) => setTremorStats({
+        received: st.received,
+        opened: st.opened,
+        asked: st.asked,
+        userChoseSetting: st.userChoseSetting,
+      }))
+      .catch(() => {});
+  }, []);
 
   // Test-siren players. We keep two independent players so the user can
   // validate BOTH bundled audio assets (the .caf used by APNs Critical
@@ -366,6 +382,23 @@ export default function DiagScreen() {
               </>
             );
           })()}
+        </Section>
+
+        {/* #305: the app's own noise, so it can be checked rather than
+            guessed at. Received is every tremor notice this phone was
+            handed; opened is how many were tapped. The one-time "want
+            fewer?" question uses exactly these two numbers. */}
+        <Section title="Tremor notices">
+          <Row label="Arrived on this phone" value={String(tremorStats.received)} />
+          <Row label="Opened" value={String(tremorStats.opened)} />
+          <Row
+            label="Asked whether they want fewer"
+            value={tremorStats.asked ? "Yes, already asked" : "Not yet"}
+          />
+          <Row
+            label="They chose the setting themselves"
+            value={tremorStats.userChoseSetting ? "Yes — we never ask" : "No"}
+          />
         </Section>
 
         <Section title="This build">

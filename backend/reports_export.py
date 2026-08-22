@@ -792,7 +792,7 @@ def _fmt_when(ts) -> str:
     """'21 Aug 2026, 21:08' in Malta time, for table cells where the
     heading already names the clock (#272). '—' when we have nothing."""
     import timefmt
-    return timefmt.human(ts) if ts else "—"
+    return timefmt.human(ts) if ts else "Not known"
 
 
 def _duration_words(td: timedelta) -> str:
@@ -1808,12 +1808,12 @@ async def casualty_report_operational_pdf(
         _now_utc = datetime.now(timezone.utc)
         for e in events_sorted:
             lat = e.get("latitude"); lon = e.get("longitude")
-            loc = "—"
+            loc = "Not known"
             if lat is not None and lon is not None:
                 loc = f"{_round5(lat)}, {_round5(lon)}"
                 if e.get("accuracy_m"):
                     loc += f" ±{e.get('accuracy_m'):.0f}m"
-            batt = "—"
+            batt = "Not known"
             if e.get("battery_pct") is not None:
                 batt = f"{e.get('battery_pct')}%"
                 if e.get("battery_state"):
@@ -1852,13 +1852,13 @@ async def casualty_report_operational_pdf(
 
             data.append([
                 status_para,
-                cell((e.get("severity") or "—")),
+                cell((e.get("severity") or "Not known")),
                 name_para,
                 cell(_fmt_when(e.get("recorded_at"))),
                 cell(loc),
                 cell(batt),
-                cell(e.get("platform") or "—"),
-                cell(e.get("notes") or "—"),
+                cell(e.get("platform") or "Not known"),
+                cell(e.get("notes") or "Not known"),
             ])
 
         # Column widths sum to 186mm — PORTRAIT A4 (210mm − 24mm margins).
@@ -1910,12 +1910,12 @@ async def casualty_report_operational_pdf(
             _when = _r.get("resolved_at") or _st.get("app_removed_at")
             _when_dt = _parse_iso_or_none(_when) if _when else None
             _off_data.append([
-                cell(_r.get("short_code") or "—"),
-                cell(_r.get("display_name") or "—"),
-                cell(_st.get("label") or "—"),
+                cell(_r.get("short_code") or "Not known"),
+                cell(_r.get("display_name") or "Not known"),
+                cell(_st.get("label") or "Not known"),
                 cell(_fmt_when(_when)),
                 cell(_moved_by_words(_r)),
-                cell(_st.get("off_board_reason") or "—"),
+                cell(_st.get("off_board_reason") or "Not known"),
             ])
         _off_tbl = Table(_off_data, colWidths=[18*mm, 24*mm, 36*mm, 34*mm, 34*mm, 40*mm],
                          repeatRows=1)

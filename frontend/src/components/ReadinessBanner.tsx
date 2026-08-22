@@ -37,7 +37,17 @@ export default function ReadinessBanner() {
         // is Settings, and the panel below says exactly what to tap there.
         if (p.id === "notifications_off" && canAskAgain) {
           await Notifications.requestPermissionsAsync({
-            ios: { allowAlert: true, allowSound: true, allowCriticalAlerts: true },
+            // #294 (2026-08-23 — Paul): "If the app never puts a number on
+            // its icon, do not request that permission." It never does, and
+            // this was the one place that forgot to say so — omitting the
+            // field makes iOS default it to ON, which is why Apple's box
+            // mentioned badges. The other two request sites already say no.
+            ios: {
+              allowAlert: true,
+              allowSound: true,
+              allowBadge: false,
+              allowCriticalAlerts: true,
+            },
           });
         } else {
           await Linking.openSettings();

@@ -1,6 +1,7 @@
 import { useCallback, useState } from "react";
 import {
   ActivityIndicator,
+  Linking,
   Platform,
   Pressable,
   ScrollView,
@@ -13,12 +14,19 @@ import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { Ionicons } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
+import * as Location from "expo-location";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import Constants from "expo-constants";
 
 import { AppleWatchNote } from "@/src/components/AppleWatchNote";
 import { colors, radius, spacing } from "@/src/theme";
 import { registerForPushNotifications } from "@/src/utils/push";
 import { confirmWatchChecked, snoozeWatchReminder } from "@/src/utils/watchReminder";
+import { getDeviceId } from "@/src/utils/checkin";
+
+const BACKEND_URL =
+  process.env.EXPO_PUBLIC_BACKEND_URL ??
+  (Constants.expoConfig?.extra as any)?.EXPO_PUBLIC_BACKEND_URL;
 
 const ONBOARDING_DONE_KEY = "quakeguard_onboarding_done";
 
@@ -36,7 +44,16 @@ export default function OnboardingScreen() {
   //   permission = allow the siren (and the two iOS prompts that follow)
   //   watch      = the Apple Watch check, on its own screen
   //   rehearsal  = hear the real siren, safely
-  const [step, setStep] = useState<"permission" | "watch" | "rehearsal">("permission");
+  // #289 (2026-08-23 — Paul): location gets its own step, explained
+  // before it is asked for. It used to be requested by the practice button
+  // and again by the alert screen, which is how iOS put its location box on
+  // top of a playing siren. Setup asks; nothing else ever does.
+  // #291: the name is NOT a step. It is optional, the app works without it,
+  // and every extra screen before someone is protected is a chance they
+  // abandon setup halfway. It is asked on the home screen afterwards.
+  const [step, setStep] = useState<
+    "permission" | "watch" | "location" | "rehearsal"
+  >("permission");
   // ?preview=1 forces the iOS layout to render on web/Android — used by
   // devs to visually inspect the screen without a real iPhone. Has no
   // effect on real iOS devices.
@@ -51,6 +68,22 @@ export default function OnboardingScreen() {
     try {
       await AsyncStorage.setItem(ONBOARDING_DONE_KEY, "1");
     } catch {}
+    // #305 (2026-08-23 — Paul): new installs start on "everything nearby",
+    // so the app stays visible in the years between felt earthquakes.
+    // Written HERE and nowhere else, because this code path only runs for
+    // someone going through setup — an existing user never returns to it,
+    // so nobody's setting is changed behind their back.
+    try {
+      const did = await getDeviceId();
+      await fetch(`${BACKEND_URL}/api/devices/notification-preset`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ device_id: did, preset: "everything" }),
+      });
+    } catch {
+      // Offline at setup: the server default stands and the settings
+      // screen still shows what is actually stored. Nothing is claimed.
+    }
   }, []);
 
   const onEnable = useCallback(async () => {
@@ -83,11 +116,34 @@ export default function OnboardingScreen() {
 
   const onWatchChecked = useCallback(async () => {
     await confirmWatchChecked();
-    setStep("rehearsal");
+    setStep("location");
   }, []);
 
   const onWatchSnooze = useCallback(async () => {
     await snoozeWatchReminder();
+    setStep("location");
+  }, []);
+
+  // #289 — step 3: location, asked here and nowhere else.
+  const onAllowLocation = useCallback(async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const res = await Location.requestForegroundPermissionsAsync();
+      if (!res.granted && !res.canAskAgain) {
+        // Refused for good. No dead end: the home screen carries a
+        // permanent line saying what still works and what does not, with a
+        // way into iOS settings.
+        Linking.openSettings().catch(() => {});
+      }
+    } catch (e) {
+      console.log("[QuakeAngel] location step err:", (e as Error)?.message);
+    }
+    setBusy(false);
+    setStep("rehearsal");
+  }, [busy]);
+
+  const onSkipLocation = useCallback(() => {
     setStep("rehearsal");
   }, []);
 
@@ -162,7 +218,7 @@ export default function OnboardingScreen() {
           >
             <View style={styles.brandRow}>
               <View style={styles.brandDot} />
-              <Text style={styles.brandLabel}>Quake Angel · setup · step 2 of 3</Text>
+              <Text style={styles.brandLabel}>Quake Angel · setup · step 2 of 4</Text>
             </View>
             <Text style={styles.h1}>Do you wear an Apple Watch?</Text>
             <Text style={styles.subtitle}>
@@ -206,6 +262,91 @@ export default function OnboardingScreen() {
     );
   }
 
+  // #289 — step 3: location. Explained before it is asked for, and never
+  // asked for anywhere else in the app.
+  if (step === "location") {
+    return (
+      <View style={styles.root}>
+        <StatusBar style="light" />
+        <Stack.Screen
+          options={{ headerShown: false, gestureEnabled: false, animation: "fade" }}
+        />
+        <SafeAreaView style={styles.safe} edges={["top"]}>
+          <ScrollView
+            style={{ flex: 1 }}
+            contentContainerStyle={styles.body}
+            showsVerticalScrollIndicator={false}
+          >
+            <View style={styles.brandRow}>
+              <View style={styles.brandDot} />
+              <Text style={styles.brandLabel}>Quake Angel · setup · step 3 of 4</Text>
+            </View>
+            <Text style={styles.h1}>Where should we send help?</Text>
+            <Text style={styles.subtitle}>
+              If you ask for help, we send your place with it so a team knows
+              where to go. Your phone only shares it when you tap I need help
+              or I&apos;m safe.
+            </Text>
+
+            <View style={styles.reassurePanel}>
+              <Text style={styles.reassureTitle}>If you say no</Text>
+              <Text style={styles.reassureBody}>
+                Your rescue code still reaches the people running the
+                response, and your name and code are still read out.
+                {"\n\n"}
+                What they will not have is a pin on the map for you. Someone
+                would have to be told where you are another way.
+                {"\n\n"}
+                You can change your mind later. The home screen will keep
+                reminding you while it is off.
+              </Text>
+            </View>
+
+            <Text style={styles.footnote}>
+              We never watch where you go. Nothing is sent until you tap one
+              of the two buttons on an alert.
+            </Text>
+          </ScrollView>
+
+          <View
+            style={[
+              styles.ctaBar,
+              { paddingBottom: Math.max(insets.bottom, spacing.lg) },
+            ]}
+          >
+            <Pressable
+              onPress={onAllowLocation}
+              disabled={busy}
+              style={({ pressed }) => [
+                styles.primaryBtn,
+                pressed && { opacity: 0.9, transform: [{ scale: 0.98 }] },
+                busy && { opacity: 0.7 },
+              ]}
+              testID="onboarding-location-allow-btn"
+            >
+              {busy ? (
+                <ActivityIndicator color={colors.onBrandPrimary} />
+              ) : (
+                <Ionicons name="location" size={20} color={colors.onBrandPrimary} />
+              )}
+              <Text style={styles.primaryBtnText}>
+                {busy ? "Asking your phone…" : "Share my place when I ask for help"}
+              </Text>
+            </Pressable>
+            <Pressable
+              onPress={onSkipLocation}
+              disabled={busy}
+              style={styles.secondaryBtn}
+              testID="onboarding-location-skip-btn"
+            >
+              <Text style={styles.secondaryBtnText}>Not now</Text>
+            </Pressable>
+          </View>
+        </SafeAreaView>
+      </View>
+    );
+  }
+
   // §6 #144 (Neo round 2) — rehearsal step, reached after either Enable
   // or Not now on the permission ask. Same Stack.Screen options (no
   // gesture-dismiss, fade transition) so the two steps feel like one
@@ -229,7 +370,7 @@ export default function OnboardingScreen() {
           >
             <View style={styles.brandRow}>
               <View style={styles.brandDot} />
-              <Text style={styles.brandLabel}>Quake Angel · setup · step 3 of 3</Text>
+              <Text style={styles.brandLabel}>Quake Angel · setup · step 4 of 4</Text>
             </View>
             <Text style={styles.h1}>Hear what a real alert sounds like</Text>
             <Text style={styles.subtitle}>
@@ -247,7 +388,7 @@ export default function OnboardingScreen() {
               <BulletRow
                 icon="phone-portrait"
                 title="A buzz you'll feel"
-                body="Your phone vibrates too, so you'd notice it even face-down."
+                body="Your phone buzzes the whole time the siren plays. If System Haptics is off in your iPhone settings, no app can make it buzz."
               />
               <BulletRow
                 icon="shield-checkmark"
@@ -312,7 +453,7 @@ export default function OnboardingScreen() {
           {/* Header */}
           <View style={styles.brandRow}>
             <View style={styles.brandDot} />
-            <Text style={styles.brandLabel}>Quake Angel · setup · step 1 of 3</Text>
+            <Text style={styles.brandLabel}>Quake Angel · setup · step 1 of 4</Text>
           </View>
           <Text style={styles.h1}>Let the siren sound</Text>
           <Text style={styles.subtitle}>
@@ -358,12 +499,12 @@ export default function OnboardingScreen() {
             <BulletRow
               icon="phone-portrait"
               title="Wakes the screen"
-              body="Your iPhone lights up so you don't miss the alert."
+              body="Your iPhone lights up when the alert arrives."
             />
             <BulletRow
               icon="lock-open"
-              title="Delivered instantly"
-              body="Arrives straight away, by the fastest route Apple provides."
+              title="Sent by the fastest route"
+              body="We send it the fastest way Apple allows. How quickly it lands depends on your phone's signal."
             />
             {/* #279 (2026-08-21 — Paul): said at setup, not discovered in an
                 earthquake. His own check-in question arrived inside a Focus
@@ -374,7 +515,7 @@ export default function OnboardingScreen() {
             <BulletRow
               icon="moon-outline"
               title="Check-in questions can be silenced"
-              body="After a quake we may ask how you are. A Focus mode can hide that question. Alerts always come through."
+              body="After a quake we may ask how you are. A Focus mode can hide that question. An earthquake alert is set to come through Focus and silent — it still needs signal and the permission above."
             />
           </View>
 
@@ -382,10 +523,20 @@ export default function OnboardingScreen() {
               is coming." */}
           <View style={styles.headsUpPanel}>
             <Ionicons name="information-circle" size={20} color="#5DB1FF" />
+            {/* #299 (2026-08-23 — Paul): the old version explained what
+                each iOS box was for and confused him twice. "Messages"
+                invites the fear of advertising, and describing the second
+                box as being about the siren reads as asking twice for the
+                same thing. Action first, reassurance second, explanation
+                last — and no description of the individual boxes. */}
             <Text style={styles.headsUpText}>
-              Your iPhone will now ask twice. The first is ordinary permission
-              to send you anything at all. The second is the one that lets the
-              siren sound when your phone is silent. Both are needed.
+              Your iPhone will ask twice. Say yes to both.
+              {"\n\n"}
+              This app never sends advertising. It only sends earthquake
+              alerts, and notices about small tremors if you choose to have
+              them.
+              {"\n\n"}
+              Your iPhone simply asks in two steps.
             </Text>
           </View>
 
@@ -522,8 +673,10 @@ const styles = StyleSheet.create({
     backgroundColor: colors.brandPrimary,
   },
   brandLabel: {
-    color: colors.onSurfaceTertiary,
-    fontSize: 11,
+    // #302 (2026-08-23 — Paul): "It carries meaning, so it must be body
+    // size and clearly readable." 11pt faint grey was neither.
+    color: colors.onSurfaceSecondary,
+    fontSize: 16,
     fontWeight: "700",
   },
   h1: {

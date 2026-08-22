@@ -326,7 +326,7 @@ export default function PlacesScreen() {
               Sicily, a second home.{"\n"}
               <Text style={styles.ruleTextBold}>
                 This never changes the emergency alert for where you are. That
-                always comes through.
+                one is set to come through Focus and silent.
               </Text>
             </Text>
           </View>
