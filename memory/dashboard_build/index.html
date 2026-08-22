@@ -1461,6 +1461,84 @@
   };
 
 
+  // #296: a countdown a tired person can read at a glance. Seconds alone
+  // ("back in 287 seconds") makes someone do arithmetic under stress.
+  window.qgCountdownWords = function (ms) {
+    var s = Math.max(0, Math.ceil(ms / 1000));
+    if (s < 60) return s + "s";
+    var m = Math.floor(s / 60), r = s % 60;
+    return m + " min " + (r < 10 ? "0" + r : r) + "s";
+  };
+  var qgCountdownWords = window.qgCountdownWords;
+
+
+  // ── #296 (2026-08-23 — Paul): the annunciator sound ──────────────────
+  //
+  // ISA-18.1: the sound's only job is to pull the operator's eyes to the
+  // screen. It carries no information, so it is one short two-tone chime
+  // and nothing more. Rules built in here so no caller can break them:
+  //   · never two sounds on top of each other (2 s floor between plays);
+  //   · mute is time-limited and the caller can read the remaining time,
+  //     so the board can show a countdown — nobody must be able to forget
+  //     they muted it;
+  //   · muting NEVER touches the visual. This object cannot hide anything.
+  //   · a browser that will not let us make sound until the page is
+  //     clicked is reported honestly through `blocked()`, so the board can
+  //     say "sound is not working yet" rather than pretending.
+  window.qgSound = (function () {
+    var ctx = null, muteUntil = 0, lastPlay = 0, everBlocked = false;
+    function ensure() {
+      try {
+        var C = window.AudioContext || window.webkitAudioContext;
+        if (!C) { everBlocked = true; return null; }
+        if (!ctx) ctx = new C();
+        if (ctx.state === "suspended") { ctx.resume(); everBlocked = true; }
+        return ctx;
+      } catch (_) { everBlocked = true; return null; }
+    }
+    // Any click anywhere is the gesture browsers demand before audio.
+    document.addEventListener("click", function () {
+      var c = ensure();
+      if (c && c.state === "running") everBlocked = false;
+    }, true);
+    function tone(c, freq, at, dur, peak) {
+      var osc = c.createOscillator(), g = c.createGain();
+      osc.type = "sine";
+      osc.frequency.value = freq;
+      g.gain.setValueAtTime(0.0001, c.currentTime + at);
+      g.gain.exponentialRampToValueAtTime(peak, c.currentTime + at + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, c.currentTime + at + dur);
+      osc.connect(g); g.connect(c.destination);
+      osc.start(c.currentTime + at);
+      osc.stop(c.currentTime + at + dur + 0.05);
+    }
+    return {
+      // kind: "alarm" (something needs an operator) | "fault" (the board
+      // itself has stopped working). Two clearly different sounds, because
+      // they need two different actions.
+      play: function (kind) {
+        if (Date.now() < muteUntil) return false;
+        if (Date.now() - lastPlay < 2000) return false;
+        var c = ensure();
+        if (!c || c.state !== "running") return false;
+        lastPlay = Date.now();
+        if (kind === "fault") {
+          tone(c, 392, 0, 0.22, 0.16);
+          tone(c, 294, 0.26, 0.30, 0.16);
+        } else {
+          tone(c, 880, 0, 0.16, 0.14);
+          tone(c, 1175, 0.19, 0.20, 0.14);
+        }
+        return true;
+      },
+      mute: function (ms) { muteUntil = Date.now() + ms; },
+      unmute: function () { muteUntil = 0; },
+      muteRemainingMs: function () { return Math.max(0, muteUntil - Date.now()); },
+      blocked: function () { return everBlocked && !(ctx && ctx.state === "running"); }
+    };
+  })();
+
+
   // Human-friendly error translator. Never let a JavaScript error object,
   // enum string, or CORS-style browser-console phrase reach an operator.
   // Batch 7 Pattern 5.
@@ -2859,6 +2937,143 @@
   <span id="qg-tremor-strip-cta" style="margin-left:12px; font-weight:500; color:#5a0f13"></span>
 </div>
 
+<!-- ═════════════════════════════════════════════════════════════════════
+     #295 / #194 (2026-08-23 — Paul): "if the board silently stops updating
+     for any reason, the operator must be told loudly. A stale board that
+     looks live is more dangerous than one that admits it is stale."
+     Two parts, both here:
+       · the sticky strip inside the sidebar — is what I am reading now?
+       · this fixed bar — the loud version, when it is not.
+     Neither ever says "live" from a timer. Only a real successful read of
+     /api/devices moves the clock.
+     ═════════════════════════════════════════════════════════════════════ -->
+<style>
+  .qg-stale-bar {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 12000;
+    background: #7A0B0B; color: #fff;
+    border-bottom: 3px solid #FF4D4D;
+    padding: 10px 14px;
+    display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px;
+    font-size: 15px; line-height: 1.45;
+    box-shadow: 0 6px 18px rgba(0,0,0,.45);
+  }
+  .qg-stale-bar[hidden] { display: none; }
+  .qg-stale-flash { animation: qgStaleFlash 1s steps(1, end) infinite; }
+  @keyframes qgStaleFlash {
+    0%, 49%   { background: #7A0B0B; }
+    50%, 100% { background: #B31212; }
+  }
+  .qg-stale-shape { font-size: 18px; margin-right: 6px; }
+  .qg-stale-main { font-weight: 800; }
+  .qg-stale-detail { flex: 1 1 320px; }
+  .qg-stale-btn {
+    background: #fff; color: #7A0B0B; border: 0; border-radius: 8px;
+    padding: 8px 12px; font-size: 14px; font-weight: 700; cursor: pointer;
+    min-height: 38px;
+  }
+  .qg-stale-btn.ghost { background: transparent; color: #fff; border: 1px solid #FF9A9A; }
+  .qg-live {
+    position: relative;
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 10px;
+    border: 1px solid var(--border, #d0d0d0); border-radius: 8px;
+    background: var(--panel, #14171c);
+    font-size: 13.5px; line-height: 1.4;
+  }
+  .qg-topstrip {
+    position: sticky; top: 0; z-index: 40;
+    background: var(--bg, #0F1115);
+    padding-bottom: 8px;
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  /* #296 — the annunciator strip. Word + shape + colour, never colour
+     alone, so it reads with the sound off and in black and white. */
+  .qg-annun {
+    border: 2px solid #E64545; border-radius: 10px;
+    background: #2A0E0E; color: #fff;
+    padding: 10px; display: flex; flex-direction: column; gap: 8px;
+  }
+  .qg-annun[hidden] { display: none; }
+  .qg-annun.is-quiet { border-color: var(--border, #444); background: var(--panel, #14171c); color: inherit; }
+  .qg-annun-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .qg-annun-count {
+    min-width: 30px; padding: 2px 8px; border-radius: 6px;
+    background: #E64545; color: #fff; font-weight: 800; font-size: 16px;
+    text-align: center;
+  }
+  .qg-annun.is-quiet .qg-annun-count { background: #4A4A4A; }
+  .qg-annun-headline { font-size: 14.5px; font-weight: 700; flex: 1 1 160px; }
+  .qg-annun-mute {
+    background: transparent; color: inherit; cursor: pointer;
+    border: 1px solid #FF9A9A; border-radius: 6px;
+    font-size: 12.5px; padding: 6px 9px; min-height: 32px;
+  }
+  .qg-annun-note {
+    font-size: 13px; line-height: 1.45; color: #FFE0E0;
+    border-left: 3px solid #FF9A9A; padding-left: 8px;
+  }
+  .qg-annun-note[hidden] { display: none; }
+  /* The count and the headline stay on screen; the rows themselves scroll,
+     so a long list of alarms can never push the board off the screen. */
+  #qg-annun-rows {
+    max-height: 38vh; overflow-y: auto;
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  .qg-alarm {
+    border: 1px solid #7A2323; border-radius: 8px;
+    background: #3A1010; padding: 10px;
+    display: flex; gap: 10px; align-items: flex-start;
+  }
+  .qg-alarm.is-new { animation: qgAlarmFlash 1s steps(1, end) infinite; }
+  @keyframes qgAlarmFlash {
+    0%, 49%   { background: #3A1010; border-color: #7A2323; }
+    50%, 100% { background: #7E1414; border-color: #FF6B6B; }
+  }
+  .qg-alarm.is-acked { background: #2B1616; border-color: #6A4A4A; }
+  .qg-alarm-shape { font-size: 20px; line-height: 1; width: 22px; text-align: center; }
+  .qg-alarm-body { flex: 1; }
+  .qg-alarm-word {
+    font-size: 12px; font-weight: 800; letter-spacing: .04em;
+    text-transform: uppercase; color: #FFC9C9;
+  }
+  .qg-alarm-headline { font-size: 15px; font-weight: 700; margin-top: 2px; }
+  .qg-alarm-action { font-size: 13.5px; line-height: 1.45; margin-top: 3px; color: #FFE2E2; }
+  .qg-alarm-meta { font-size: 12px; margin-top: 4px; color: #E0BDBD; }
+  .qg-alarm-ack {
+    background: #fff; color: #7A0B0B; border: 0; border-radius: 8px;
+    padding: 8px 12px; font-size: 13.5px; font-weight: 700; cursor: pointer;
+    min-height: 38px; align-self: center;
+  }
+  .qg-alarm-names { margin-top: 6px; font-size: 12.5px; }
+  .qg-alarm-names summary { cursor: pointer; }
+  .qg-alarm-names div { padding: 2px 0 2px 10px; }
+  .qg-live-dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    background: #1F8A3A; flex: 0 0 auto;
+  }
+  .qg-live.is-stale { border-color: #FF4D4D; background: #3A0B0B; color: #FFE4E4; }
+  .qg-live.is-stale .qg-live-dot { background: #FF4D4D; }
+  .qg-live.is-signedout .qg-live-dot { background: #8A8A8A; }
+  .qg-live-retry {
+    margin-left: auto; background: transparent; cursor: pointer;
+    border: 1px solid var(--border, #555); border-radius: 6px;
+    color: inherit; font-size: 12.5px; padding: 5px 9px; min-height: 30px;
+  }
+  .qg-gap-note {
+    margin: 0 0 8px; padding: 8px 10px;
+    border: 1px solid #8A6B0F; border-radius: 8px;
+    background: #2A2216; color: #F7E7B8;
+    font-size: 13.5px; line-height: 1.45;
+  }
+  .qg-gap-note[hidden] { display: none; }
+</style>
+<div id="qg-stale-bar" class="qg-stale-bar" role="alert" hidden>
+  <span class="qg-stale-main"><span class="qg-stale-shape" aria-hidden="true">■</span><span id="qg-stale-head">The board is not updating</span></span>
+  <span class="qg-stale-detail" id="qg-stale-detail"></span>
+  <button type="button" class="qg-stale-btn" id="qg-stale-retry">Update now</button>
+  <button type="button" class="qg-stale-btn ghost" id="qg-stale-mute">Silence the sound for 5 minutes</button>
+</div>
+
 <div class="layout">
   <div id="map-wrap">
     <div class="map-filters" role="group" aria-label="Filter map by severity">
@@ -2876,6 +3091,31 @@
     <div id="map"></div>
   </div>
   <div class="sidebar">
+    <!-- #295 / #296: the strip that must be on screen wherever the
+         operator has scrolled — is the board live, and is there anything
+         nobody has acknowledged yet. -->
+    <div class="qg-topstrip">
+      <div class="qg-live" id="qg-live" role="status" aria-live="polite">
+        <span class="qg-live-dot" id="qg-live-dot" aria-hidden="true"></span>
+        <span id="qg-live-text">Starting up…</span>
+        <button type="button" class="qg-live-retry" id="qg-live-retry">Update now</button>
+      </div>
+      <!-- #296: the annunciator. ISA-18.1 sequence — flash and sound on
+           arrival, acknowledge silences and stops the flashing, the
+           highlight stays until the situation itself is resolved. -->
+      <div class="qg-annun" id="qg-annun" hidden>
+        <div class="qg-annun-head">
+          <span class="qg-annun-count" id="qg-annun-count">0</span>
+          <span class="qg-annun-headline" id="qg-annun-headline"></span>
+          <button type="button" class="qg-annun-mute" id="qg-annun-mute">Silence the sound for 5 minutes</button>
+        </div>
+        <div class="qg-annun-note" id="qg-annun-note" hidden></div>
+        <div id="qg-annun-rows"></div>
+      </div>
+    </div>
+    <!-- #194: a tab the operating system froze must own up to the gap
+         instead of quietly catching up as though nothing happened. -->
+    <div class="qg-gap-note" id="qg-gap-note" role="status" hidden></div>
     <!-- Item 7 (2026-08-13): collapsible, but DEFAULT OPEN on every load
          and the collapsed state is deliberately NOT persisted anywhere —
          no localStorage, no cookie. Core situational awareness must never
@@ -6162,6 +6402,7 @@ window.QuakeAngelRescue = (function () {
         var summary = null;
         try { summary = await fetchSummary(); } catch (_) {}   // summary may predate the backend deploy
         renderSignedOut(summary);
+        boardSignedOut = true;
         return;
       }
       var res = await window.qaApi("/api/devices");
@@ -6169,6 +6410,7 @@ window.QuakeAngelRescue = (function () {
         var summary2 = null;
         try { summary2 = await fetchSummary(); } catch (_) {}
         renderSignedOut(summary2);
+        boardSignedOut = true;
         return;
       }
       if (!res.ok) throw new Error("HTTP " + res.status);
@@ -6178,25 +6420,40 @@ window.QuakeAngelRescue = (function () {
         lastSidebarSig = null;   // force one full sidebar rebuild after sign-in
       }
       var allUsers = (data.devices || []).map(normalizeDevice);
-      // #268: everything the backend deliberately kept OFF the working
-      // board, with why/when/who. Rendered in its own labelled area —
-      // never hidden, never deleted.
-      renderOffBoard(data.off_board || [], data.counts || {});
-      renderBoardNotices(data.notices || []);
-      renderCountNotes(data.count_notes || [], data.counts || {});
       // #146: test entries are excluded from the live triage list, the map
       // and the counts by default — an operator must never have to work out
       // whether a pin is a real person. Nothing is deleted; the toggle
       // below the search box brings them back, clearly tagged.
       var testCount = allUsers.filter(function (u) { return u.isTest; }).length;
-      updateTestToggle(testCount);
       var users = showTestEntries ? allUsers : allUsers.filter(function (u) { return !u.isTest; });
       lastUsers = users;
-      renderMap(users);
-      applyFilterVisibility();
-      renderSidebar(users);
+      // #295: the read succeeded, so the board IS live as of this instant.
+      // Recorded before any drawing, because a drawing fault is a different
+      // fault from a dead connection and each has to be reported as itself.
+      markBoardLive();
+      // #295 (2026-08-23 — Paul): the casualty list is drawn FIRST and on
+      // its own. Before this, five other jobs — the map among them — ran
+      // ahead of it inside one try/catch, so a single bad record aborted
+      // the whole cycle into the console and the list silently stopped
+      // updating while the page went on looking healthy.
+      drawStep("the casualty list", function () { renderSidebar(users); });
+      drawStep("the off-board area", function () {
+        // #268: everything the backend deliberately kept OFF the working
+        // board, with why/when/who. Never hidden, never deleted.
+        renderOffBoard(data.off_board || [], data.counts || {});
+      });
+      drawStep("the board notices", function () { renderBoardNotices(data.notices || []); });
+      drawStep("the count notes", function () {
+        renderCountNotes(data.count_notes || [], data.counts || {});
+      });
+      drawStep("the test-entry toggle", function () { updateTestToggle(testCount); });
+      drawStep("the map", function () { renderMap(users); applyFilterVisibility(); });
+      // #296: the alarms ride the same cycle as the board, so the "updated
+      // N seconds ago" clock covers both. A failure here is reported inside
+      // the alarm strip, not as a dead board — they are different faults.
+      await refreshAlarms();
     } catch (e) {
-      console.error("Failed to refresh dashboard:", e);
+      noteBoardFailure(e);
     }
   }
 
@@ -7188,6 +7445,316 @@ window.QuakeAngelRescue = (function () {
       if (typeof fixMapSize === "function") setTimeout(fixMapSize, 50);
     });
   })();
+
+  // ═══════════════════════════════════════════════════════════════════
+  // #295 / #194 — is the board live, and does it admit when it is not
+  // ═══════════════════════════════════════════════════════════════════
+  //
+  // What was found (2026-08-23): the poll itself was never broken. It runs
+  // every 4 seconds and the change-detector does include status and injury
+  // severity. What was broken is that the cycle had no way of telling
+  // anyone it had stopped: five other drawing jobs ran ahead of the
+  // casualty list inside one try/catch, so a single bad record — a person
+  // who declined location, for instance — threw into the console, aborted
+  // the cycle, and the list quietly froze while the page looked healthy.
+  // A frozen browser tab produced exactly the same silence.
+  //
+  // So: the list is drawn first and alone, every job is isolated, and the
+  // board carries a clock that only a real successful read can move.
+  var STALE_MS = 15000;            // 15 s without a good read = say so
+  var lastGoodAt = 0;              // performance clock of the last good read
+  var lastGoodWall = null;         // wall clock of the same instant
+  var lastFault = "";              // plain-English reason, operator-facing
+  var staleAnnounced = false;
+  var boardSignedOut = false;
+  var hiddenAt = 0;
+
+  function qgClockSeconds(d) {
+    try {
+      return d.toLocaleTimeString("en-GB", {
+        hour: "2-digit", minute: "2-digit", second: "2-digit",
+        timeZone: "Europe/Malta",
+      });
+    } catch (_) { return String(d); }
+  }
+
+  function humanGap(ms) {
+    var s = Math.round(ms / 1000);
+    if (s < 60) return s + (s === 1 ? " second" : " seconds");
+    var m = Math.round(s / 60);
+    if (m < 60) return m + (m === 1 ? " minute" : " minutes");
+    var h = Math.floor(m / 60);
+    return h + (h === 1 ? " hour " : " hours ") + (m % 60) + " min";
+  }
+
+  function markBoardLive() {
+    lastGoodAt = Date.now();
+    lastGoodWall = new Date();
+    lastFault = "";
+    boardSignedOut = false;
+  }
+
+  function noteBoardFailure(e) {
+    // Plain English, never a JavaScript object. qgFriendlyError already
+    // does this translation for every other message on the page.
+    var msg = "";
+    try { msg = window.qgFriendlyError(e, { context: "the board" }); } catch (_) {}
+    if (/backend/i.test(msg)) msg = "We could not reach the server.";
+    lastFault = msg || "We could not reach the server.";
+    console.error("Failed to refresh dashboard:", e);
+  }
+
+  // One drawing job, isolated. A fault in any of them is named on screen
+  // rather than left in a console nobody has open.
+  function drawStep(what, fn) {
+    try { fn(); return true; }
+    catch (e) {
+      console.error("Dashboard could not draw " + what + ":", e);
+      lastFault = "We could not draw " + what + " (a fault in this page, not in the data).";
+      return false;
+    }
+  }
+
+  function renderHeartbeat() {
+    var strip = document.getElementById("qg-live");
+    var text = document.getElementById("qg-live-text");
+    var bar = document.getElementById("qg-stale-bar");
+    var detail = document.getElementById("qg-stale-detail");
+    var head = document.getElementById("qg-stale-head");
+    var mute = document.getElementById("qg-stale-mute");
+    if (!strip || !text || !bar) return;
+
+    if (boardSignedOut) {
+      strip.className = "qg-live is-signedout";
+      text.textContent = "Signed out — overall numbers only. Sign in for live triage.";
+      bar.hidden = true;
+      bar.classList.remove("qg-stale-flash");
+      try { document.body.style.paddingTop = ""; } catch (_) {}
+      staleAnnounced = false;
+      return;
+    }
+
+    var age = lastGoodAt ? Date.now() - lastGoodAt : Infinity;
+    var stale = age > STALE_MS;
+
+    if (!stale) {
+      strip.className = "qg-live";
+      var secs = Math.max(0, Math.round(age / 1000));
+      text.textContent = "Live — updated " + (secs <= 1 ? "a second" : secs + " seconds") +
+        " ago, at " + qgClockSeconds(lastGoodWall) + " Malta time.";
+      bar.hidden = true;
+      bar.classList.remove("qg-stale-flash");
+      try { document.body.style.paddingTop = ""; } catch (_) {}
+      staleAnnounced = false;
+      return;
+    }
+
+    // Stale. Loud, flashing, and it says what it is showing instead.
+    strip.className = "qg-live is-stale";
+    text.textContent = lastGoodWall
+      ? "Not updating. You are reading information from " + humanGap(age) + " ago."
+      : "Not updating. Nothing has loaded yet.";
+    bar.hidden = false;
+    bar.classList.add("qg-stale-flash");
+    // The bar is fixed to the top of the window, so the page has to make
+    // room for it — otherwise it covers the alert controls underneath.
+    try { document.body.style.paddingTop = bar.offsetHeight + "px"; } catch (_) {}
+    if (head) head.textContent = "The board is not updating";
+    if (detail) {
+      detail.textContent = (lastGoodWall
+        ? "Last real update " + qgClockSeconds(lastGoodWall) + " Malta time, " +
+          humanGap(age) + " ago. Anyone who has reported since then is not on this screen."
+        : "Nothing has loaded since this page opened.") +
+        (lastFault ? " " + lastFault : "");
+    }
+    if (mute) {
+      var left = window.qgSound.muteRemainingMs();
+      mute.textContent = left > 0
+        ? "Sound off — back in " + qgCountdownWords(left)
+        : "Silence the sound for 5 minutes";
+    }
+    if (!staleAnnounced) staleAnnounced = true;
+    window.qgSound.play("fault");
+  }
+
+  (function wireHeartbeat() {
+    var retry = document.getElementById("qg-live-retry");
+    if (retry) retry.addEventListener("click", function () { refresh(); });
+    var retry2 = document.getElementById("qg-stale-retry");
+    if (retry2) retry2.addEventListener("click", function () { refresh(); });
+    var mute = document.getElementById("qg-stale-mute");
+    if (mute) mute.addEventListener("click", function () {
+      if (window.qgSound.muteRemainingMs() > 0) window.qgSound.unmute();
+      else window.qgSound.mute(5 * 60 * 1000);
+      renderHeartbeat();
+    });
+
+    // #194: browsers freeze timers in a tab that is not in front. That is
+    // not a fault we can prevent — but pretending it did not happen is.
+    // On return: read immediately, and own the gap in words.
+    document.addEventListener("visibilitychange", function () {
+      if (document.hidden) { hiddenAt = Date.now(); return; }
+      var note = document.getElementById("qg-gap-note");
+      var gap = hiddenAt ? Date.now() - hiddenAt : 0;
+      if (note) {
+        if (gap > 20000) {
+          note.hidden = false;
+          note.textContent = "This tab was in the background for " + humanGap(gap) +
+            ", and the board did not update while it was. It has just been read again — " +
+            "check the list for anything that arrived in that time.";
+        } else {
+          note.hidden = true;
+        }
+      }
+      hiddenAt = 0;
+      refresh();
+    });
+    window.addEventListener("focus", function () { refresh(); });
+
+    setInterval(renderHeartbeat, 1000);
+  })();
+
+  // ═══════════════════════════════════════════════════════════════════
+  // #296 — the annunciator
+  // ═══════════════════════════════════════════════════════════════════
+  //
+  // Paul, 2026-08-23: "Do not invent this. There is a defined sequence used
+  // in control rooms for decades, standardised as ISA-18.1, and it exists
+  // because it works under stress."
+  //
+  //   arrive → flash + short sound
+  //   acknowledge → sound stops, flashing stops, highlight STAYS
+  //   highlight clears only when the situation is resolved
+  //
+  // What is an alarm and what is only information is decided server-side
+  // (backend/board_alarms.py) so two operators cannot see two different
+  // pictures, and an acknowledgement survives a page reload — it will be
+  // read back in an inquiry. This file only draws and sounds.
+  var alarmData = null;
+  var alarmFault = "";
+  var lastAlarmSound = 0;
+  var ALARM_SOUND_EVERY_MS = 10000;
+  var SHAPE_GLYPH = { triangle: "▲", diamond: "◆", square: "■" };
+
+  async function refreshAlarms() {
+    try {
+      if (!isSignedIn()) { alarmData = null; renderAlarms(); return; }
+      var res = await window.qaApi("/api/admin/alarms");
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      alarmData = await res.json();
+      alarmFault = "";
+    } catch (e) {
+      // The board can be live while the alarm feed is not. Say which.
+      alarmFault = "We cannot read the alarms right now. The list below is still updating.";
+      console.error("Failed to read alarms:", e);
+    }
+    renderAlarms();
+  }
+
+  async function ackAlarm(payload) {
+    try {
+      var res = await window.qaApi("/api/admin/alarms/ack", {
+        method: "POST", body: JSON.stringify(payload),
+      });
+      if (!res.ok) { banner("err", window.qgHumanHttpMessage(res.status)); return; }
+      await refreshAlarms();
+    } catch (e) {
+      banner("err", "We could not record that. Nothing has been acknowledged.");
+    }
+  }
+
+  function renderAlarms() {
+    var wrap = document.getElementById("qg-annun");
+    var rowsEl = document.getElementById("qg-annun-rows");
+    var countEl = document.getElementById("qg-annun-count");
+    var headEl = document.getElementById("qg-annun-headline");
+    var noteEl = document.getElementById("qg-annun-note");
+    var muteEl = document.getElementById("qg-annun-mute");
+    if (!wrap || !rowsEl) return;
+    if (!isSignedIn()) { wrap.hidden = true; return; }
+    wrap.hidden = false;
+
+    var groups = (alarmData && alarmData.groups) || [];
+    var unacked = (alarmData && alarmData.unacknowledged) || 0;
+
+    countEl.textContent = String(unacked);
+    wrap.className = unacked > 0 ? "qg-annun" : "qg-annun is-quiet";
+    headEl.textContent = unacked > 0
+      ? (unacked === 1 ? "1 alarm nobody has acknowledged" : unacked + " alarms nobody has acknowledged")
+      : (groups.length
+          ? "Everything showing has been acknowledged. It stays until the person is rescued or taken off the board."
+          : "No alarms. This is not the same as nobody needing help — read the list.");
+
+    // Notes: the flood rule, a feed we cannot read, and a browser that
+    // will not make sound until the page is clicked. All said plainly.
+    var notes = [];
+    if (alarmData && alarmData.flood && alarmData.flood_note) notes.push(alarmData.flood_note);
+    if (alarmFault) notes.push(alarmFault);
+    if (window.qgSound.blocked()) {
+      notes.push("Sound is off until you click anywhere on this page once — your browser will not let us play it before that.");
+    }
+    var muteLeft = window.qgSound.muteRemainingMs();
+    if (muteLeft > 0) {
+      notes.push("Sound is silenced. It comes back in " + qgCountdownWords(muteLeft) +
+        ". The flashing and the count are not affected.");
+    }
+    noteEl.hidden = notes.length === 0;
+    noteEl.textContent = notes.join(" ");
+    muteEl.textContent = muteLeft > 0
+      ? "Turn the sound back on now"
+      : "Silence the sound for 5 minutes";
+
+    rowsEl.innerHTML = groups.map(function (g) {
+      var glyph = SHAPE_GLYPH[g.shape] || "■";
+      var acked = !!g.acknowledged;
+      var names = "";
+      if (g.count > 1) {
+        names = '<details class="qg-alarm-names"><summary>Show me who (' + g.count + ')</summary>' +
+          g.people.map(function (p) {
+            return "<div>" + window.qgEsc(p.headline || p.who || "") +
+              (p.acknowledged ? "" : " — not acknowledged") + "</div>";
+          }).join("") + "</details>";
+      }
+      return '<div class="qg-alarm ' + (acked ? "is-acked" : "is-new") + '">' +
+        '<div class="qg-alarm-shape" aria-hidden="true">' + glyph + "</div>" +
+        '<div class="qg-alarm-body">' +
+          '<div class="qg-alarm-word">' + window.qgEsc(g.word || "") + "</div>" +
+          '<div class="qg-alarm-headline">' + window.qgEsc(g.headline || "") + "</div>" +
+          '<div class="qg-alarm-action">' + window.qgEsc(g.action || "") + "</div>" +
+          '<div class="qg-alarm-meta">' + window.qgEsc(window.qgTime(g.at)) + " Malta time" +
+            (acked && g.ack_by
+              ? " · acknowledged by " + window.qgEsc(g.ack_by) + " at " + window.qgEsc(window.qgTime(g.ack_at))
+              : "") + "</div>" +
+          names +
+        "</div>" +
+        (acked ? "" : '<button type="button" class="qg-alarm-ack" data-group="' +
+          window.qgEsc(g.group_key) + '">Acknowledge</button>') +
+        "</div>";
+    }).join("");
+
+    // The sound: one short chime, repeated every 10 seconds while anything
+    // is unacknowledged. Never two on top of each other (qgSound enforces
+    // that), and muting cannot hide the flashing or the count.
+    if (unacked > 0 && Date.now() - lastAlarmSound > ALARM_SOUND_EVERY_MS) {
+      if (window.qgSound.play("alarm")) lastAlarmSound = Date.now();
+    }
+  }
+
+  document.addEventListener("click", function (ev) {
+    var btn = ev.target.closest && ev.target.closest(".qg-alarm-ack");
+    if (btn) { ackAlarm({ group_key: btn.dataset.group }); return; }
+    if (ev.target && ev.target.id === "qg-annun-mute") {
+      if (window.qgSound.muteRemainingMs() > 0) window.qgSound.unmute();
+      else window.qgSound.mute(5 * 60 * 1000);
+      renderAlarms();
+    }
+  });
+
+  // The mute countdown has to tick even when nothing else changes —
+  // nobody must be able to forget they silenced it.
+  setInterval(function () {
+    if (window.qgSound.muteRemainingMs() > 0) renderAlarms();
+  }, 1000);
 
   refresh();
   setInterval(refresh, 4000);

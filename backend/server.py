@@ -369,7 +369,11 @@ async def post_status(payload: StatusInPayload):
     # recorded so the board's history explains itself.
     prior = await db.device_status.find_one(
         {"device_id": doc["device_id"]},
-        {"_id": 0, "resolved_at": 1, "resolved_reason": 1, "asks": 1},
+        {"_id": 0, "resolved_at": 1, "resolved_reason": 1, "asks": 1,
+         # #296: the annunciator needs to know what this person was BEFORE
+         # this report, because "worse" is a comparison, not a state.
+         "status": 1, "severity": 1, "mobility": 1, "egress": 1,
+         "needs_extraction": 1, "synthetic": 1},
     )
     returning = bool((prior or {}).get("resolved_at"))
     # Upsert latest state.
@@ -434,6 +438,15 @@ async def post_status(payload: StatusInPayload):
         })
     except Exception as e:
         logging.warning(f"Failed to append status_events: {e}")
+    # #296: a report that requires an operator to act becomes an alarm on
+    # the board — and one that does not (someone reporting safe, a battery
+    # reading) deliberately does not. The decision lives in one place:
+    # board_alarms.on_status_change.
+    try:
+        import board_alarms
+        await board_alarms.on_status_change(db, prior, doc)
+    except Exception as e:
+        logging.warning(f"Failed to raise board alarm: {e}")
     return {"status": "ok", "device_id": doc["device_id"], "updated_at": now}
 
 
@@ -481,6 +494,16 @@ async def get_devices(
         rows = [r for r in rows if str(r.get("updated_at") or "") >= since]
     rows.sort(key=lambda r: str(r.get("updated_at") or ""), reverse=True)
     rows = rows[:limit]
+
+    # #296: silence is measured by the clock, so nothing arrives to
+    # announce it — it has to be noticed while the board is being read.
+    # Uses the same classifier output the cards use, so an alarm and a
+    # card can never disagree about who has gone quiet.
+    try:
+        import board_alarms
+        await board_alarms.sweep_silence(db, board.board)
+    except Exception as e:
+        logging.warning(f"Board alarm silence sweep failed: {e}")
 
     # 'trapped since' timestamps for the current trapped spell (item 3).
     trapped_since = await _trapped_since_map(
@@ -614,6 +637,55 @@ async def get_devices(
         "counts": board.counts.to_dict(),
         "count_notes": board.notes,
     }
+
+
+# ---------- #296: the board's alarms (ISA-18.1 annunciation) ----------
+@api_router.get("/admin/alarms")
+async def get_board_alarms(
+    request: Request,
+    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
+):
+    """Every alarm that is not yet resolved, grouped, with the count of
+    those nobody has acknowledged.
+
+    Server-side on purpose: two operators looking at the same incident must
+    see the same alarms and the same acknowledgements, and an acknowledgement
+    has to survive a page reload — it will be read back in an inquiry.
+    """
+    principal = await resolve_principal(request, x_admin_token, ADMIN_TRIGGER_PASSWORD, db)
+    require_role(principal, "admin", "operator")
+    import board_alarms
+    return await board_alarms.list_open(db)
+
+
+@api_router.post("/admin/alarms/ack")
+async def ack_board_alarms(
+    payload: dict = Body(...),
+    request: Request = None,
+    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
+):
+    """Acknowledge one alarm or one group of them.
+
+    Acknowledging stops the sound and the flashing. It does NOT clear the
+    alarm: the highlight stays until the person is rescued or deliberately
+    taken off the board. Who and when are recorded.
+    """
+    principal = await resolve_principal(request, x_admin_token, ADMIN_TRIGGER_PASSWORD, db)
+    require_role(principal, "admin", "operator")
+    import board_alarms
+
+    ids = payload.get("ids") or []
+    group_key = str(payload.get("group_key") or "").strip()
+    if group_key and not ids:
+        rows = await db.board_alarms.find(
+            {"group_key": group_key, "resolved_at": None}, {"_id": 0, "id": 1},
+        ).to_list(500)
+        ids = [r.get("id") for r in rows if r.get("id")]
+    if not ids:
+        raise HTTPException(400, "Nothing to acknowledge.")
+    who = (principal.get("email") if principal else None) or "unknown"
+    n = await board_alarms.ack(db, [str(i) for i in ids], who)
+    return {"status": "ok", "acknowledged": n, "acknowledged_by": who}
 
 
 # ---------- Per-person full history (B3, 2026-08-17) ----------
@@ -968,6 +1040,31 @@ async def get_audit_log(
                     })
                     continue
                 events.append({**base, "kind": "status"})
+
+    # ---- #296: who acknowledged which alarm, and when ----
+    # An inquiry will ask "who saw this, and when did they see it". The
+    # acknowledgement is the answer, so it belongs in the same feed as
+    # everything else a human did.
+    if kind in (None, "alarm_acknowledged"):
+        aq: dict = {"ack_at": {"$ne": None}}
+        if since:
+            aq["ack_at"]["$gte"] = since
+        rows = await db.board_alarms.find(aq, {"_id": 0}).sort("ack_at", -1).to_list(limit)
+        for r in rows:
+            events.append({
+                "kind": "alarm_acknowledged",
+                "at": r.get("ack_at"),
+                "device_id": r.get("device_id"),
+                "short_code": r.get("short_code"),
+                "display_name": r.get("display_name"),
+                "alarm_kind": r.get("kind"),
+                "alarm_word": r.get("word"),
+                "alarm_headline": r.get("headline"),
+                "alarm_raised_at": r.get("created_at"),
+                "acknowledged_by": r.get("ack_by"),
+                "resolved_at": r.get("resolved_at"),
+                "resolved_reason": r.get("resolved_reason"),
+            })
 
     # Merge and clip.
     events.sort(key=lambda e: e.get("at") or "", reverse=True)
@@ -2377,6 +2474,16 @@ async def resolve_record(
             "resolved_as": code,
         }},
     )
+    # #296: deliberately taking a record off the working board resolves its
+    # alarms — a named human with a reason is the other legitimate way out.
+    try:
+        import board_alarms
+        await board_alarms.resolve_for_device(
+            db, device_id,
+            reason=f"Taken off the working board by {audit_attribution(principal)}: {reason_text}",
+        )
+    except Exception as e:
+        logging.warning(f"Failed to resolve board alarms on off-board: {e}")
     return {"status": "ok", "device_id": device_id, "resolved_at": now,
             "resolved_by": audit_attribution(principal),
             "resolved_reason": reason_text}
@@ -2977,6 +3084,17 @@ async def mark_rescued(
         })
     except Exception as e:
         logging.warning(f"Failed to append rescue status_events: {e}")
+
+    # #296: being rescued is the situation actually resolving, which is the
+    # only thing allowed to clear an alarm. Acknowledging never does.
+    try:
+        import board_alarms
+        await board_alarms.resolve_for_device(
+            db, device_id,
+            reason=f"Marked rescued by {rescued_by}.",
+        )
+    except Exception as e:
+        logging.warning(f"Failed to resolve board alarms on rescue: {e}")
 
     return {
         "status": "ok",
@@ -4333,6 +4451,17 @@ async def bootstrap_users_and_indexes():
         "last_login_at": None,
     })
     logger.info("Bootstrapped first admin user: %s", bootstrap_email)
+
+
+@app.on_event("startup")
+async def start_board_alarm_indexes():
+    """#296: indexes for the alarm feed. Separate from the users bootstrap
+    so a failure in one cannot block the other."""
+    try:
+        import board_alarms
+        await board_alarms.ensure_indexes(db)
+    except Exception as e:
+        logger.warning("board_alarms index setup failed: %s", e)
 
 
 @app.on_event("startup")
