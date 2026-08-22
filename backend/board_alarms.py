@@ -115,12 +115,23 @@ def _who(row: Dict[str, Any], short_code: Optional[str] = None) -> str:
 def _help_action(row: Dict[str, Any]) -> str:
     """What the operator is expected to DO. Not "status changed"."""
     sev = str(row.get("severity") or "").lower()
+    stuck = bool(row.get("needs_extraction")) or row.get("egress") == "cannot_exit"
+    cannot_move = str(row.get("mobility") or "") == CANNOT_MOVE
+    # #297: a team must never be sent to walking wounded. In real triage
+    # they are the lowest rescue priority precisely because they can move
+    # themselves, so the alarm says what to do about them instead of
+    # implying a rescue task.
+    if sev == "green" and not stuck and not cannot_move:
+        return (
+            "MINOR, and they can move themselves. Not a rescue task — "
+            "they are on the walking wounded list."
+        )
     parts: List[str] = []
     if sev in SEVERITY_WORD:
         parts.append(SEVERITY_WORD[sev])
-    if row.get("needs_extraction") or row.get("egress") == "cannot_exit":
+    if stuck:
         parts.append("cannot get out")
-    if str(row.get("mobility") or "") == CANNOT_MOVE:
+    if cannot_move:
         parts.append("cannot move")
     tail = ", ".join(parts)
     return "Send a team" + (f" — {tail}." if tail else ".")

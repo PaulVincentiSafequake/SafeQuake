@@ -2382,3 +2382,109 @@ check-in screen; and a real "I need help" report reaching /api/devices.
 Testing agent rounds 43 and 44: two regressions found in 43 (both mine —
 the caps exception and an auto-redirect that made the wrist question
 unreachable), both fixed and confirmed in 44. 32/32 backend tests pass.
+
+---
+
+## The board batch — #295, #194, #296, #297, #298 (23 Aug 2026)
+
+Paul's testing report on v1.0.44, fresh install, production. Part C came
+with the strongest wording in the project so far: "This is the most
+important item in the batch." Numbers assigned in that report:
+#288–#302, plus #303/#304 logged and deliberately not built, and #305
+added later the same day.
+
+### #295 — the board did not update until manually refreshed
+
+**Diagnosed before anything was changed, and the first answer was "not
+what you expected".** The live dashboard was fetched and compared byte for
+byte with the copy in this repo: identical. That file *does* poll every 4
+seconds, and its change-detector *does* include status and injury
+severity. So "the refresh broke" was false.
+
+What was actually wrong: the poll had no way of telling anyone it had
+stopped. Five drawing jobs — the map among them — ran ahead of the
+casualty list inside one try/catch. Any one of them throwing (a person who
+declined location, for instance) aborted the cycle into a console nobody
+has open, and the list froze while the page looked perfectly healthy. A
+browser tab frozen in the background produced the identical silence.
+
+Fixed at the cause: the casualty list is drawn first and alone, every job
+is isolated with its own plain-English failure line, and the board now
+carries a clock that only a real successful read can move.
+
+### #194 — a stale board must admit it
+
+Sticky strip: "Live — updated 3 seconds ago, at 20:14:32 Malta time."
+Nothing but a successful read of `/api/devices` moves that clock. After 15
+seconds without one: a flashing red bar across the top saying what it is
+showing instead and how old it is, with a sound. Returning to a tab the
+operating system froze prints the length of the gap rather than quietly
+catching up.
+
+### #296 — the annunciator, to ISA-18.1
+
+Paul: "Do not invent this. There is a defined sequence used in control
+rooms for decades." Built to it, server-side (`backend/board_alarms.py`)
+so two operators see one picture and an acknowledgement survives a reload.
+
+- Alarms: a new person asking for help · an existing person getting worse
+  · a person who asked for help going quiet.
+- Information, which never flashes or sounds: safe reports, battery
+  changes, list housekeeping, registrations, tremor notices.
+- Every alarm names the action, not the state change — and for a walking
+  wounded it says "Not a rescue task", because a team must never be sent.
+- Grouping: same kind, same minute, one line and one sound. Past ten
+  alarms in ten minutes the board says out loud that it is summarising.
+- Shape + word + colour, so it reads with the sound off and in black and
+  white. Mute is five minutes with a visible countdown, and it cannot
+  touch the flashing or the count.
+- Acknowledging stops the noise, records who and when (readable in
+  `/api/audit` as `alarm_acknowledged`), and clears nothing. Only a
+  rescue, a deliberate move off the board, or a quiet phone speaking
+  again resolves an alarm. Nothing auto-clears or times out.
+- One guard added deliberately: a record that has been quiet for more than
+  24 hours does not sound. It stays on the board with its card saying it is
+  quiet. A wall of week-old silence on the first load of the day would
+  train an operator to ignore the strip, which is the failure the flood
+  rules exist to prevent.
+
+### #297 — walking wounded off the working board
+
+MINOR who can move themselves have their own labelled list; their count
+stays on the board whether that list is open or shut. A MINOR who cannot
+get out, or cannot move, stays on the working board — severity is medical,
+being stuck is structural, and the structural fact wins. Getting worse
+puts them straight back with an alarm; going quiet does the same. Rescued
+pins are off the map by default and small, grey and unlabelled when shown.
+A permanent chip names everything currently out of sight, with one button
+that shows all of it, and filters reset when a new alert starts.
+
+Note for the record: there is no team-assignment feature in the product
+yet, so "what happens to someone already assigned to a team" cannot arise
+today. The rule agreed with Paul is written into the code comments for
+when it does: they do not move on their own, because moving them would
+leave a team walking towards something no longer on the board.
+
+### #298 — the false promise
+
+"It does come through Do Not Disturb, so they will see it" is gone. The
+dialog now states only facts: who it goes to by name *and* code, the exact
+words, that it will not siren, that a Focus mode can hide it completely so
+no answer proves nothing either way, what it costs their battery, and that
+the operator's name and the time go on the record.
+
+Sweep for the same fault: 8 places found. 2 on the dashboard, fixed here.
+6 in the phone app (setup's "Delivered instantly", "Arrives straight
+away", "so you don't miss the alert", "Alerts always come through", and
+two "always comes through" lines in settings) — fixed in the phone batch,
+because they need a build either way.
+
+### Deferred on purpose
+
+- **#303** (Paul called it #279): alert only phones last known inside an
+  area the operator draws. Needs the drawing tool first. After the pilot.
+- **#304** (Paul called it #278): ask everyone in a damaged area to check
+  in, and surface clustered silence — as a question, never a conclusion,
+  because it is also what a mast failure looks like. After the pilot.
+- **#305**: tremor notices on by default for new installs, with a
+  one-time "want fewer?" question after the first week. In the phone batch.
