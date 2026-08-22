@@ -73,3 +73,34 @@ ON: a recognised signal, not emphasis."
 
 Everything else stays sentence case. If a sweep is tempted to change one of
 the above, the answer is no — read this line instead.
+
+## The layout rule (#282, 2026-08-22 — third recurrence, fixed at the cause)
+
+A footer or header that sits over scrollable text must be a FLEX SIBLING of
+the scroll area. Never `position: absolute` with a reserved padding on the
+content. Both earlier attempts reserved space — first a magic number, then a
+measured height — and both put a button on top of the safety steps at a
+larger system text size, because both were guessing about a box whose height
+depends on the words in it.
+
+Absolute positioning is allowed for two things only:
+  * decoration with no text underneath (glow rings, gradients);
+  * overlays on a map canvas.
+
+And: no fixed `height` on any container whose content is text. `minHeight`.
+A fixed 340pt hero clipped the rescue code under the phone's status bar.
+
+Check every screen at the largest system text size and at the smallest
+device width, at the top, the middle AND the bottom of the scroll.
+
+## One source per fact (#280)
+
+If two screens state the same fact, they must read it from the same place.
+The Notifications screen once said "Critical Alerts turned OFF" and "always
+on and cannot be switched off" one under the other, because three screens
+each decided it for themselves. Duplication is the bug; fix it by deleting
+the copies, not by editing the sentences.
+
+A first pass at that fix still left two conditions for the same fact, and a
+live check found the reassurance still printing under the warning. One
+computed boolean, consumed everywhere. Never a condition repeated per screen.
