@@ -105,9 +105,12 @@ if (Platform.OS !== "web") {
         payload?.data ??
         payload;
       const kind = String(body?.kind ?? "").trim();
-      if (kind === "cancel_reminders") {
+      // #296: a stand-down is also a cancel. The backend sends both pushes,
+      // but a phone that receives only one of them must still stop nagging.
+      if (kind === "cancel_reminders" || kind === "alert_stood_down" ||
+          kind === "incident_closed") {
         await cancelCheckInReminders();
-        console.log("[QuakeAngel] reminders cancelled by operator kill switch");
+        console.log("[QuakeAngel] reminders cancelled:", kind);
       }
     } catch (e) {
       console.log("[QuakeAngel] cancel-reminders task err:", (e as Error)?.message);
@@ -571,6 +574,8 @@ export default function RootLayout() {
       // check-in screen for an incident that no longer exists.
       if (kind === "alert_stood_down" || kind === "incident_closed") {
         clearActiveAlert().catch(() => {});
+        // #296: same as the tap path — called off means the reminders stop.
+        cancelCheckInReminders().catch(() => {});
         // If the user tapped this notification, take them home.
         // Publishing on the bus is a signal to any mounted /alert
         // screen; the home screen itself needs no message here.
@@ -678,6 +683,10 @@ export default function RootLayout() {
       // Silent push — no navigation from the receipt path, only state.
       if (kind === "alert_stood_down" || kind === "incident_closed") {
         clearActiveAlert().catch(() => {});
+        // #296: the alert no longer exists, so neither should the phone's
+        // own "Are you safe?" ladder. Without this the reminders kept
+        // arriving for another 11½ minutes after the alert was called off.
+        cancelCheckInReminders().catch(() => {});
         publishAlert({
           magnitude: null, distance_km: null, intensity: null,
           depth_km: null, region: null, unid: data.unid ?? null,

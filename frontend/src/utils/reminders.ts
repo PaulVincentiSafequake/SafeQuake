@@ -70,6 +70,22 @@ export async function ensureNotificationSetup(): Promise<boolean> {
 // nagged every ~90s until they tap I'm Safe. iOS local notifications don't
 // support open-ended repeating with a custom interval, so we schedule a small
 // batch and top up as needed.
+//
+// #207 / #296 (2026-08-24 — Paul, live test): only the FIRST reminder is a
+// Critical Alert. The rest are `time-sensitive`.
+//
+// Why: Critical Alerts ignore the physical silent switch and play at full
+// volume regardless of what the user has chosen. That is the right trade for
+// the alert itself, and for ONE reminder in case they slept through it. It is
+// the wrong trade eight times over: Paul received four in a row on one phone
+// during testing, which drains the battery, risks the entitlement Apple
+// granted us through visible overuse, and — worst of all — teaches people
+// that a Critical Alert from this app can safely be ignored. The one alarm
+// that must never be ignored is the one they learn to.
+//
+// `time-sensitive` still breaks through Focus and Do Not Disturb, so a
+// reminder still reaches someone who is not looking at their phone. Same
+// doctrine as the trapped re-checks in backend/apns.py.
 export async function scheduleCheckInReminders(
   count = 8,
   everySeconds = 90,
@@ -85,10 +101,7 @@ export async function scheduleCheckInReminders(
           title: "Are you safe?",
           body: "Earthquake alert active. Tap to open Quake Angel and mark yourself safe.",
           sound: "default",
-          // 'critical' bypasses the physical silent switch, DND, and Focus
-          // modes. Requires the com.apple.developer.usernotifications.
-          // critical-alerts entitlement (approved by Apple for this app).
-          interruptionLevel: "critical",
+          interruptionLevel: i === 0 ? "critical" : "timeSensitive",
           data: { kind: "quakeguard-reminder", action_url: "/alert" },
           ...(Platform.OS === "android" && {
             channelId: CHANNEL_ID,

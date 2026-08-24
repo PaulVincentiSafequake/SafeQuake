@@ -3469,6 +3469,31 @@ async def alert_stand_down(
         else {"payload": None, "events": []}
     )
 
+    # #296 (2026-08-24 — Paul, live test): calling the alert off cleared the
+    # check-in screen but left the phone's OWN reminder ladder running, so
+    # "Are you safe?" kept arriving as a CRITICAL notification roughly every
+    # 90 seconds for another 11½ minutes after the alert no longer existed.
+    # Those reminders are scheduled ON the device, so nothing server-side
+    # reached them except the operator's separate kill-switch button — which
+    # an operator standing down an alert has no reason to know they must
+    # also press. Stand-down now cancels them itself, in the same action.
+    #
+    # Deliberately the same set as the stand-down (#274): a person who is
+    # still asking for help keeps their screen and their reminders.
+    reminder_result = (
+        await send_silent_cancel_reminders(
+            db=db,
+            devices=ios,
+            idempotency_key=f"stand-down-reminders-{uuid.uuid4().hex}",
+            reason="stand_down",
+        )
+        if ios
+        else {"payload": None, "events": []}
+    )
+    reminders_cancelled = sum(
+        1 for e in (reminder_result.get("events") or []) if e.get("delivered")
+    )
+
     await db.push_events.insert_one({
         "kind": "alert_stood_down",
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -3485,6 +3510,10 @@ async def alert_stand_down(
         "cleared_count": len(ios),
         "kept_on_board_count": split["staying_count"],
         "kept_on_board": split["staying_people"],
+        # #296: proof in the record that the phones' own reminder ladders
+        # were called off too, not just the check-in screen.
+        "reminders_cancelled": reminders_cancelled,
+        "reminder_apns_events": reminder_result.get("events") or [],
     })
 
     return {
@@ -3494,6 +3523,7 @@ async def alert_stand_down(
         "cleared_count": len(ios),
         "kept_on_board_count": split["staying_count"],
         "kept_on_board": split["staying_people"],
+        "reminders_cancelled": reminders_cancelled,
     }
 
 

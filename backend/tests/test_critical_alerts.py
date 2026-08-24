@@ -84,9 +84,18 @@ class TestRemindersTs:
         assert re.search(r"allowCriticalAlerts\s*:\s*true", src), "allowCriticalAlerts:true missing"
         assert not re.search(r"allowCriticalAlerts\s*:\s*false", src), "stale allowCriticalAlerts:false remains"
 
-    def test_interruption_level_critical(self, src):
-        assert re.search(r'interruptionLevel\s*:\s*"critical"', src), "interruptionLevel:'critical' missing"
-        assert 'interruptionLevel: "timeSensitive"' not in src, "stale timeSensitive remains"
+    def test_only_the_first_reminder_is_a_critical_alert(self, src):
+        # #207/#296 (2026-08-24): the first reminder still breaches the
+        # silent switch, in case they slept through the alert. The rest go
+        # out `time-sensitive` — still through Focus and Do Not Disturb, but
+        # not eight full-volume Critical Alerts in a row, which is how you
+        # teach people to ignore the one alarm that matters.
+        assert re.search(
+            r'interruptionLevel:\s*i === 0 \? "critical" : "timeSensitive"', src,
+        ), "reminder ladder should be critical for i===0 and timeSensitive after"
+        assert 'interruptionLevel: "critical"' not in src, (
+            "an unconditionally critical reminder is back — see #296"
+        )
 
     def test_sound_default_preserved(self, src):
         assert re.search(r'sound\s*:\s*"default"', src)

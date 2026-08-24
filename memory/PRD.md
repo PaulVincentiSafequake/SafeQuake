@@ -2539,3 +2539,64 @@ What was wrong, and what was done:
 
 Result: 910 passed, 7 skipped (all env-gated), 0 failed — stable across
 three consecutive full runs. No product code was changed.
+
+## 2026-08-24 — Paul's live test day. Numbering note first.
+
+Paul's numbers are authoritative from here. The board/phone batch of
+2026-08-23 used #288–#306 for different items; those are now suffixed
+`-agent` in this document (#296-agent = the ISA-18.1 alarms, #297-agent =
+walking wounded off the working board, #291-agent = name prompt on Home,
+#289-agent = location permission step, #290-agent = Back to Home,
+#293-agent = watch wording, #294-agent = no iOS badge, #295-agent =
+stale-board warning). Paul's #281–#297 refer to today's list.
+
+Closed today on Paul's own live evidence: #277 (board updates without a
+refresh), #194 (board says out loud when it loses the backend), #129
+(portrait exports), #131 (solid watermark).
+
+### #296 — the alert was called off and the phone kept asking "Are you safe?"
+
+Paul triggered test alerts, called them off, and then received at least
+four CRITICAL "Are you safe?" notifications about a minute apart on one
+phone.
+
+Cause, found and confirmed in the code: those reminders are LOCAL
+notifications, scheduled on the device by `scheduleCheckInReminders()` —
+eight of them, 90 seconds apart, over 11½ minutes. Nothing server-side
+could reach them except one specific silent push, which was wired only to
+a separate operator button ("stop the repeating reminders"). Calling the
+alert off sent a different push, which cleared the check-in SCREEN and
+left the ladder running. An operator standing down a false alarm has no
+reason to know they must also press a second button — so the product was
+relying on knowledge nobody had.
+
+Fixed in three places, deliberately overlapping:
+
+1. **The stand-down cancels them itself** (`server.py`). Same action, same
+   set of phones as the stand-down (#274 — a person still asking for help
+   keeps their screen and their reminders), and it now reports
+   `reminders_cancelled` in the response and in the `push_events` record.
+   This lands on phones ALREADY IN THE FIELD, including v1.0.44 — the app
+   has handled the cancel push since batch 5.
+2. **The phone stops itself** (`_layout.tsx`). A stand-down arriving by any
+   of the three paths — background task, foreground receipt, or the user
+   tapping it — now cancels the ladder too. A dropped cancel push must not
+   mean eleven more minutes of sirens.
+3. **The operator is told** (dashboard call-off toast): "The repeating
+   'Are you safe?' reminders on N phones were stopped too."
+
+### #207 — a reminder must not look identical to the alert
+
+Same ladder, and the real cause of what Paul saw. The backend re-checks
+were already fixed in batch 7 (time-sensitive, escalating to critical
+exactly once), but the phone's own reminder ladder was hardcoded
+`interruptionLevel: "critical"` for all eight.
+
+Now: the FIRST reminder is still a Critical Alert — someone may have slept
+through the alert itself, and that is exactly the case the entitlement is
+for. Reminders two to eight go out `time-sensitive`, which still breaks
+through Focus and Do Not Disturb but respects the silent switch and the
+volume the user chose. Eight full-volume Critical Alerts in a row drains
+the battery, invites Apple to look at the entitlement, and teaches people
+that a Critical Alert from this app can be ignored — which would cost us
+the one alarm that must never be ignored.
