@@ -3038,6 +3038,13 @@
   }
   .qg-alarm-headline { font-size: 15px; font-weight: 700; margin-top: 2px; }
   .qg-alarm-action { font-size: 13.5px; line-height: 1.45; margin-top: 3px; color: #FFE2E2; }
+  /* #289: what has happened since the alarm was raised. Readable, not
+     shouted — it is context for a decision, not a second alarm. */
+  .qg-alarm-since {
+    font-size: 13px; line-height: 1.45; margin-top: 4px; color: #FFF3C4;
+    background: rgba(0,0,0,0.28); border-left: 3px solid #FFD34D;
+    padding: 5px 8px; border-radius: 4px;
+  }
   .qg-alarm-meta { font-size: 12px; margin-top: 4px; color: #E0BDBD; }
   .qg-alarm-ack {
     background: #fff; color: #7A0B0B; border: 0; border-radius: 8px;
@@ -5806,9 +5813,25 @@ window.QuakeAngelRescue = (function () {
     var authCurrent = document.getElementById('qg-authority-current');
     if (authInput && s.authority_name && !authInput.value) authInput.value = s.authority_name;
     if (authCurrent) {
-      authCurrent.textContent = s.authority_name
-        ? 'Current: "' + s.authority_name + '" — appears on printed report footers.'
-        : 'Current: (unset) — reports use the generic "the responsible authorities" wording.';
+      // #297 (2026-08-24 — Paul): "Authority: Emergency test name" was
+      // printed on a real public report. A saved name that reads like a
+      // test entry is no longer printed, and this line says so out loud —
+      // otherwise it sits here looking like the name on the documents.
+      if (s.authority_name_ignored) {
+        authCurrent.textContent =
+          'Saved: "' + s.authority_name + '" — NOT printed. It reads like a ' +
+          'test entry, and this name goes on reports that leave this room. ' +
+          'Reports currently say "the responsible authorities". Type the real ' +
+          'name, or clear the box.';
+        authCurrent.style.color = 'var(--brand-red, #B0141A)';
+        authCurrent.style.fontWeight = '700';
+      } else {
+        authCurrent.textContent = s.authority_name
+          ? 'Current: "' + s.authority_name + '" — appears on printed report footers.'
+          : 'Current: (unset) — reports use the generic "the responsible authorities" wording.';
+        authCurrent.style.color = '';
+        authCurrent.style.fontWeight = '';
+      }
     }
   }
   refreshSettings();
@@ -6412,12 +6435,11 @@ window.QuakeAngelRescue = (function () {
   function renderSignedOut(summary) {
     if (summary && summary.counts) {
       var c = summary.counts;
-      updateCountPills({
-        safe: c.safe || 0, trapped: c.trapped || 0, danger: c.not_responding || 0,
-        rescued: c.rescued || 0, waiting: c.unknown || 0,
-      });
+      lastCounts = c;
+      lastCountNotes = summary.count_notes || [];
+      updateCountPills(pillsFromServerCounts(c));
       // #268: the exclusions travel with the public numbers too.
-      renderCountNotes(summary.count_notes || [], c);
+      renderCountNotes(lastCountNotes, c);
     }
     renderOffBoard([], {});
     renderBoardNotices([]);
@@ -6470,6 +6492,15 @@ window.QuakeAngelRescue = (function () {
       var testCount = allUsers.filter(function (u) { return u.isTest; }).length;
       var users = showTestEntries ? allUsers : allUsers.filter(function (u) { return !u.isTest; });
       lastUsers = users;
+      // #283: the counts that match what is on screen. The server sends
+      // both populations, counted by the same function, so the toggle
+      // changes which set is read — never how it is calculated.
+      lastCounts = showTestEntries
+        ? (data.counts || {})
+        : (data.counts_without_test || data.counts || {});
+      lastCountNotes = showTestEntries
+        ? (data.count_notes || [])
+        : (data.count_notes_without_test || data.count_notes || []);
       // #295: the read succeeded, so the board IS live as of this instant.
       // Recorded before any drawing, because a drawing fault is a different
       // fault from a dead connection and each has to be reported as itself.
@@ -6487,7 +6518,7 @@ window.QuakeAngelRescue = (function () {
       });
       drawStep("the board notices", function () { renderBoardNotices(data.notices || []); });
       drawStep("the count notes", function () {
-        renderCountNotes(data.count_notes || [], data.counts || {});
+        renderCountNotes(lastCountNotes, lastCounts);
       });
       drawStep("the test-entry toggle", function () { updateTestToggle(testCount); });
       drawStep("the map", function () { renderMap(users); applyFilterVisibility(); });
@@ -6502,6 +6533,10 @@ window.QuakeAngelRescue = (function () {
 
   // ── #146: test-entry visibility + tagging ─────────────────────────────
   var showTestEntries = false;
+  // #283: the server's numbers for the population on screen, and the
+  // matching sentences. Set on every poll; read by the stat boxes.
+  var lastCounts = {};
+  var lastCountNotes = [];
 
   function updateTestToggle(count) {
     var wrap = document.getElementById("qg-test-toggle-wrap");
@@ -6567,18 +6602,16 @@ window.QuakeAngelRescue = (function () {
     }).join("");
   }
 
+  // #283 (2026-08-24 — Paul): this used to write its own three silence
+  // lines from the counts object and then claim "all three are counted in
+  // the numbers above" — which read as a breakdown of the stat box beside
+  // it and never matched it (44 against 18). The sentences now come from
+  // the server, from the same function that produces every number, so the
+  // board cannot say one thing and the PDF another.
   function renderCountNotes(notes, counts) {
     var el = document.getElementById("qg-count-notes");
     if (!el) return;
     var lines = [];
-    var w = counts.waiting_for_answer || 0, d = counts.phone_went_dark || 0;
-    var na = counts.no_answer || 0;
-    if (w || d || na) {
-      lines.push("Waiting for an answer: " + w + ".");
-      lines.push("Got our question, no answer: " + na + ".");
-      lines.push("Phone went dark, we cannot confirm they got it: " + d + ".");
-      lines.push("All three are counted in the numbers above.");
-    }
     (notes || []).forEach(function (n) { lines.push(n); });
     // #272: name the clock, once, where the numbers are explained. Every
     // time on this page is Malta time — see window.qgTime.
@@ -7424,8 +7457,9 @@ window.QuakeAngelRescue = (function () {
       if (!trappedIds.has(id)) selectedForRescue.delete(id);
     });
 
-    var counts = computeCounts(users);
-    updateCountPills(counts);
+    // #283: the board no longer counts anything itself. These are the
+    // server's numbers, for the population currently being shown.
+    updateCountPills(pillsFromServerCounts(lastCounts));
     updateBulkBar();
 
     var sig = sidebarSignature(users);
@@ -7472,11 +7506,17 @@ window.QuakeAngelRescue = (function () {
     var minor = visible.filter(function (u) {
       return u.status === "trapped" && (u.severity === "green" || !u.severity);
     });
+    // #289 (2026-08-24 — Paul): "we have not been told whether they can
+    // get out" is NOT walking wounded. Somebody who chose MINOR and then
+    // left the way-out question used to land in the lowest-priority list
+    // on an assumption. Same rule as people_counts.is_walking_wounded, so
+    // the list and the count cannot disagree.
+    var wayOutUnknown = function (u) { return u.egress === "not_answered"; };
     var walking = minor.filter(function (u) {
-      return !u.needsExtraction && u.mobility !== "trapped";
+      return !u.needsExtraction && u.mobility !== "trapped" && !wayOutUnknown(u);
     }).sort(byLongestTrapped);
     var minorStuck = minor.filter(function (u) {
-      return u.needsExtraction || u.mobility === "trapped";
+      return u.needsExtraction || u.mobility === "trapped" || wayOutUnknown(u);
     }).sort(byLongestTrapped);
     var rescued = visible.filter(function (u) { return u.status === "rescued"; }).sort(byRecency);
     var other = visible.filter(function (u) { return u.status !== "trapped" && u.status !== "rescued"; }).sort(byRecency);
@@ -7484,7 +7524,7 @@ window.QuakeAngelRescue = (function () {
     container.innerHTML = "";
     container.appendChild(buildGroup("🔴 IMMEDIATE — seriously injured / can't move", "group-red", red, true, openState));
     container.appendChild(buildGroup("🟡 SERIOUS — STABLE — hurt but stable", "group-yellow", yellow, true, openState));
-    container.appendChild(buildGroup("🟢 MINOR — hurt lightly but cannot get out, still needs a team", "group-green", minorStuck, true, openState));
+    container.appendChild(buildGroup("🟢 MINOR — hurt lightly, and cannot get out or we have not been told", "group-green", minorStuck, true, openState));
     // Item 5: Rescued defaults COLLAPSED — finished work must not push
     // live cases off the bottom of the screen. Count stays visible in the
     // summary; Undo Rescued still works inside once expanded.
@@ -7501,25 +7541,23 @@ window.QuakeAngelRescue = (function () {
     window.scrollTo(sx, sy);
   }
 
-  function computeCounts(users) {
-    var safe = 0, trapped = 0, danger = 0, rescued = 0, walking = 0;
-    users.forEach(function (u) {
-      if (u.status === "safe") safe += 1;
-      else if (u.status === "trapped") {
-        trapped += 1;
-        // #297: counted in BOTH numbers on purpose. They are still people
-        // who reported an injury (so the trapped total stays honest), and
-        // they are also the number who will need treating somewhere.
-        if ((u.severity === "green" || !u.severity) && !u.needsExtraction &&
-            u.mobility !== "trapped") walking += 1;
-      }
-      else if (u.status === "not_responding") danger += 1;
-      else if (u.status === "rescued") rescued += 1;
-    });
+  // #283: one translation from the server's count names to the five stat
+  // boxes. No arithmetic here — if a number is wrong it is wrong in one
+  // place, for everyone, and the PDF says the same wrong thing.
+  //
+  // Walking wounded are counted in BOTH the trapped total and their own
+  // box on purpose (#297-agent): they did report an injury, and they are
+  // also the number who will need treating somewhere rather than digging
+  // out.
+  function pillsFromServerCounts(c) {
+    c = c || {};
     return {
-      safe: safe, trapped: trapped, danger: danger, rescued: rescued,
-      walking: walking,
-      waiting: users.length - safe - trapped - danger - rescued,
+      safe: c.safe || 0,
+      trapped: c.trapped || 0,
+      danger: c.not_responding || 0,
+      rescued: c.rescued || 0,
+      waiting: c.unknown || 0,
+      walking: c.walking_wounded || 0,
     };
   }
 
@@ -7947,7 +7985,10 @@ window.QuakeAngelRescue = (function () {
         names = '<details class="qg-alarm-names"><summary>Show me who (' + g.count + ')</summary>' +
           g.people.map(function (p) {
             return "<div>" + window.qgEsc(p.headline || p.who || "") +
-              (p.acknowledged ? "" : " — not acknowledged") + "</div>";
+              (p.acknowledged ? "" : " — not acknowledged") +
+              (p.since_report && p.since_report.words
+                ? "<br><i>Since: " + window.qgEsc(p.since_report.words) + "</i>"
+                : "") + "</div>";
           }).join("") + "</details>";
       }
       return '<div class="qg-alarm ' + (acked ? "is-acked" : "is-new") + '">' +
@@ -7956,6 +7997,17 @@ window.QuakeAngelRescue = (function () {
           '<div class="qg-alarm-word">' + window.qgEsc(g.word || "") + "</div>" +
           '<div class="qg-alarm-headline">' + window.qgEsc(g.headline || "") + "</div>" +
           '<div class="qg-alarm-action">' + window.qgEsc(g.action || "") + "</div>" +
+          // #289 (2026-08-24 — Paul): an acknowledged "IMMEDIATE, cannot
+          // move" alarm sat here while the same person's card had moved on
+          // to MINOR. The alarm is right to stay — only a person clears an
+          // alarm — but the board must not contradict itself, so it says
+          // what has happened since and lets the operator decide.
+          (g.since_report && g.since_report.words
+            ? '<div class="qg-alarm-since">Since this alarm: ' +
+              window.qgEsc(g.since_report.words) +
+              (g.since_report.at ? " at " + window.qgEsc(window.qgTime(g.since_report.at)) : "") +
+              ". This alarm still needs your decision.</div>"
+            : "") +
           '<div class="qg-alarm-meta">' + window.qgEsc(window.qgTime(g.at)) + " Malta time" +
             (acked && g.ack_by
               ? " · acknowledged by " + window.qgEsc(g.ack_by) + " at " + window.qgEsc(window.qgTime(g.ack_at))
@@ -8004,13 +8056,17 @@ window.QuakeAngelRescue = (function () {
   window.__qgDebugRender = function (rawDevices, payload) {
     var users = rawDevices.map(normalizeDevice);
     lastUsers = users;
+    if (payload) {
+      lastCounts = payload.counts || {};
+      lastCountNotes = payload.count_notes || [];
+    }
     renderMap(users);
     applyFilterVisibility();
     renderSidebar(users);
     if (payload) {
-      renderOffBoard(payload.off_board || [], payload.counts || {});
+      renderOffBoard(payload.off_board || [], lastCounts);
       renderBoardNotices(payload.notices || []);
-      renderCountNotes(payload.count_notes || [], payload.counts || {});
+      renderCountNotes(lastCountNotes, lastCounts);
     }
   };
 })();
@@ -8420,8 +8476,15 @@ window.QuakeAngelRescue = (function () {
       var n = Number(data && data.recipients) || 0;
       var kept = Number(data && data.kept_on_board_count) || 0;
       var remCancelled = Number(data && data.reminders_cancelled) || 0;
-      var msg = "Alert called off. " + n + " " + (n === 1 ? "phone was" : "phones were") +
-        " told, quietly.";
+      var clearedReal = data && data.cleared_real_count != null
+        ? Number(data.cleared_real_count) : n;
+      var clearedTest = Number(data && data.cleared_test_count) || 0;
+      var msg = "Alert called off. " + clearedReal + " " +
+        (clearedReal === 1 ? "phone was" : "phones were") + " told, quietly.";
+      if (clearedTest > 0) {
+        msg += " (" + clearedTest + " test " +
+          (clearedTest === 1 ? "entry" : "entries") + " as well.)";
+      }
       // #296 (2026-08-24): say out loud that the phones' own repeating
       // "Are you safe?" reminders were stopped as part of this. Before
       // today the operator had to know to press a second button, and the
@@ -8431,10 +8494,22 @@ window.QuakeAngelRescue = (function () {
           remCancelled + " " + (remCancelled === 1 ? "phone" : "phones") +
           " were stopped too.";
       }
-      if (kept > 0) {
-        msg += " " + kept + " " + (kept === 1 ? "person is" : "people are") +
-          " still asking for help and " + (kept === 1 ? "stays" : "stay") +
+      // #283 (2026-08-24 — Paul): this said "13 phones", then "14", when
+      // there was ONE real person and thirteen test entries. The confirm
+      // dialog had already split them correctly; the result collapsed them
+      // back into one wrong number. Same split, both sides of the action.
+      var keptReal = data && data.kept_on_board_real_count != null
+        ? Number(data.kept_on_board_real_count) : kept;
+      var keptTest = Number(data && data.kept_on_board_test_count) || 0;
+      if (keptReal > 0) {
+        msg += " " + keptReal + " " + (keptReal === 1 ? "person is" : "people are") +
+          " still asking for help and " + (keptReal === 1 ? "stays" : "stay") +
           " on the board.";
+      }
+      if (keptTest > 0) {
+        msg += " " + keptTest + " test " +
+          (keptTest === 1 ? "entry was" : "entries were") +
+          " held back the same way — they are not people.";
       }
       showBanner("ok", msg, 12000);
     } catch (e) {
