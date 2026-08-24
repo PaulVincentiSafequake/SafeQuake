@@ -8419,8 +8419,18 @@ window.QuakeAngelRescue = (function () {
       var data = await res.json();
       var n = Number(data && data.recipients) || 0;
       var kept = Number(data && data.kept_on_board_count) || 0;
+      var remCancelled = Number(data && data.reminders_cancelled) || 0;
       var msg = "Alert called off. " + n + " " + (n === 1 ? "phone was" : "phones were") +
         " told, quietly.";
+      // #296 (2026-08-24): say out loud that the phones' own repeating
+      // "Are you safe?" reminders were stopped as part of this. Before
+      // today the operator had to know to press a second button, and the
+      // reminders kept arriving for another 11½ minutes if they didn't.
+      if (remCancelled > 0) {
+        msg += " The repeating \u201CAre you safe?\u201D reminders on " +
+          remCancelled + " " + (remCancelled === 1 ? "phone" : "phones") +
+          " were stopped too.";
+      }
       if (kept > 0) {
         msg += " " + kept + " " + (kept === 1 ? "person is" : "people are") +
           " still asking for help and " + (kept === 1 ? "stays" : "stay") +
