@@ -34,7 +34,7 @@ Design decisions
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict, replace
+from dataclasses import dataclass, asdict, field, replace
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -111,6 +111,17 @@ class Counts:
     # box and the sentence under it disagreed. Counted here instead, with
     # everything else, from the same rows.
     walking_wounded: int = 0
+    # #283 (2026-08-25 — Paul): the sentence explaining where the quiet
+    # people sit used to name three categories from memory — "Safe,
+    # Trapped and Not responding" — and they only added to 2 of 7,
+    # because it never said "Rescued". Counted here instead of written by
+    # hand, so the sentence can only ever name the categories the quiet
+    # people are actually in. Keys are the effective_status values;
+    # `quiet_rescued` is pulled out because Paul asked whether an
+    # already-rescued person's silence should worry anybody (it should
+    # not, and the note now says so).
+    quiet_by_status: Dict[str, int] = field(default_factory=dict)
+    quiet_rescued: int = 0
 
     def to_dict(self) -> Dict[str, int]:
         return asdict(self)
@@ -329,6 +340,16 @@ def _tally(
     counts = _bucket(board, include_test=True)
     st_of = lambda r: r["record_state"]["state"]  # noqa: E731
     counted = lambda r: r["record_state"].get("count_in_status_buckets") is not False  # noqa: E731
+    # #283: which status buckets do the quiet people actually sit in? Read
+    # off the rows rather than remembered in a sentence.
+    quiet_rows = [
+        r for r in board
+        if st_of(r) in (rs.WAITING, rs.DARK, rs.NO_ANSWER) and counted(r)
+    ]
+    quiet_by_status: Dict[str, int] = {}
+    for r in quiet_rows:
+        st = effective_status(r)
+        quiet_by_status[st] = quiet_by_status.get(st, 0) + 1
     # Held on the board because an alert is live, but the phone has told us
     # the app is gone. Counted here, and never inside "not responding".
     held_removed = [
@@ -352,6 +373,8 @@ def _tally(
         resolved_by_operator=sum(1 for r in off_board if st_of(r) == rs.RESOLVED),
         off_board_total=len(off_board),
         walking_wounded=sum(1 for r in board if is_walking_wounded(r)),
+        quiet_by_status=quiet_by_status,
+        quiet_rescued=quiet_by_status.get("rescued", 0),
     )
 
 
@@ -411,6 +434,38 @@ def counts_notes_short(c: Counts) -> str:
     )
 
 
+_STATUS_WORDS = {
+    "safe": "Safe",
+    "trapped": "Needing help",
+    "not_responding": "Not responding",
+    "rescued": "Rescued",
+    "unknown": "Not known yet",
+}
+
+
+def _quiet_spread_words(c: Counts) -> str:
+    """"…spread across Safe, Rescued and Not responding." (#283)
+
+    Paul, 2026-08-25: "those three only add to 2." The sentence used to
+    name three categories from memory and left out Rescued, so the
+    breakdown it offered did not add up to the number in front of it — on
+    a page whose whole job is that the numbers agree.
+
+    Now it names the categories the quiet people are ACTUALLY in, with
+    the number in each, taken from the same rows as every other figure.
+    """
+    parts = [
+        f"{n} {_STATUS_WORDS.get(st, st)}"
+        for st, n in sorted(c.quiet_by_status.items(), key=lambda kv: -kv[1])
+        if n
+    ]
+    if not parts:
+        return "inside the status numbers above."
+    if len(parts) == 1:
+        return f"inside {parts[0]}."
+    return "spread across " + ", ".join(parts[:-1]) + " and " + parts[-1] + "."
+
+
 def counts_notes(c: Counts) -> List[str]:
     """"Every number must say what it counts and what it leaves out."
 
@@ -449,9 +504,19 @@ def counts_notes(c: Counts) -> List[str]:
         notes.append(
             "Those "
             + ("one is" if quiet == 1 else f"{quiet} are")
-            + " already counted above, spread across Safe, Trapped and Not "
-            "responding. They are not extra people."
+            + " already counted above, "
+            + _quiet_spread_words(c)
+            + " They are not extra people."
         )
+        if c.quiet_rescued:
+            n = c.quiet_rescued
+            notes.append(
+                f"\u2014 {n} of them "
+                + ("has" if n == 1 else "have")
+                + " already been rescued, so their silence is not a worry. "
+                + ("That one is" if n == 1 else "Those are")
+                + " listed here only so the numbers add up."
+            )
     if c.app_removed:
         thing = "record" if c.app_removed == 1 else "records"
         notes.append(

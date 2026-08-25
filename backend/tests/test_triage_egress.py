@@ -13,8 +13,12 @@ Two problems Paul reported, both small, both real:
    surfaced as "minor, walking wounded" while physically unable to leave, and
    never appeared as an extraction case. Mobility is not egress: mobility
    describes the body, egress describes the building. Green now gets
-   "Can you get out on your own?" — and only green: red already implies
-   immobility, yellow keeps its mobility question.
+   "Is your way out blocked?" — and only green: red already implies
+   immobility, yellow keeps its mobility question. (The title was
+   "Can you get out on your own?" until 2026-08-25, when Paul reported it
+   as the mobility question appearing where it should be skipped: it was
+   worded so closely to the mobility question that it read as the same
+   question asked twice. See #51 / #290.)
 """
 import os
 
@@ -91,10 +95,19 @@ class TestEgressIsAskedOfGreenOnly:
         assert 'submitCheckIn("trapped", severity, "trapped", null, true)' in src
 
     def test_question_is_about_the_building_not_the_body(self):
+        """#51 / #290 (Paul, 2026-08-25): the old title, "Can you get out on
+        your own?", was word-for-word what the MOBILITY question sounds
+        like, so a green report answering this one read as being asked the
+        mobility question it is supposed to skip. The title now names the
+        way out and nothing else."""
         src = _alert_src()
-        assert "Can you get out on your own?" in src
+        assert "Is your way out blocked?" in src
         assert 'testID="egress-can-exit"' in src
         assert 'testID="egress-cannot-exit"' in src
+        assert "About the building, not your injuries." in src
+        # The answers must read as answers to THIS question.
+        assert "No \u2014 I can get out" in src
+        assert "Yes \u2014 I&apos;m blocked in" in src
 
 
 class TestEgressEndToEnd:

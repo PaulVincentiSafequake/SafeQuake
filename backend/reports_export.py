@@ -1989,7 +1989,10 @@ async def casualty_report_operational_pdf(
     story.append(Paragraph(
         "END OF TEAM REPORT — For public communications, use the \u201Csafe to share\u201D public report which "
         "exposes aggregate numbers only. Do NOT share this document publicly, with press, or with "
-        f"next-of-kin before {authority} has completed formal notification.",
+        # #297 (Paul, 2026-08-25): "…authorities has completed" read wrong.
+        # `authority` can be one body or several, so the sentence now uses a
+        # verb form that is correct either way instead of guessing.
+        f"next-of-kin before {authority} completes formal notification.",
         footer_style,
     ))
 

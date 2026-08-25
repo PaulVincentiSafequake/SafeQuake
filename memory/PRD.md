@@ -2780,3 +2780,137 @@ operator mid-task was signed out by nothing more than a clock.
 - 9 tests: `tests/test_session_refresh_135.py`.
 
 Full suite after this batch: **1002 passed, 7 skipped, 0 failed.**
+
+---
+
+## 2026-08-25 — live test batch #2: #285, #286, #301, #290, #283, #297, #299, #298, #300, #51
+
+### #285 — the alarm sound never played (the loudness was never the problem)
+
+Measured through a browser audio probe, the new alarm comes out at 0.81 of
+maximum — near full output. What was broken was ARMING:
+- A browser refuses to make any sound until the person has interacted with
+  the page, and Safari (and a backgrounded tab) SUSPENDS the audio channel
+  again afterwards.
+- The old code created the channel on the first alarm — with no
+  interaction behind it, so it started suspended — asked it to resume
+  without waiting for an answer, DROPPED that alarm, and left a one-line
+  note at the bottom of a panel as the only sign the board had gone deaf.
+  Paul saw exactly that note, which is what confirmed the diagnosis.
+
+Four fixes, one per hole:
+1. **Arm on any interaction** — pointerdown, click, keydown, touchstart —
+   not clicks alone (an operator on a tablet or working from the keyboard
+   never armed it at all), and wait for the resume to actually succeed.
+2. **Keep the channel alive** — an inaudible 1 Hz oscillator at 0.0001 gain
+   runs for as long as the board is open, so the browser cannot suspend it
+   again the moment the operator looks at their phone.
+3. **Never drop the first alarm** — a sound asked for while the channel is
+   waking up is remembered and played the instant it wakes.
+4. **Say so, loudly** — a permanent control in the alarm panel: "🔇 ALARM
+   SOUND IS OFF … Switch the sound on", or "🔔 Alarm sound is ON" with a
+   **Test the sound** button, so an operator proves the alarm works at the
+   start of a shift instead of discovering it during an incident.
+   `qgSound.armed()`, `.arm()` and `.test()` are the API.
+
+### #301 — test people now behave like real reports (only when asked)
+
+Paul: "the 33 test people appeared as markers but didn't change any stat
+box, didn't appear in the alarm panel, aren't even clickable." Alarms
+returned early for anything test-flagged, and the seeder wrote rows
+straight into the board so nothing ever went through the alarm decision.
+
+His ruling: identical everywhere — counts, list, map, alarms — but only
+while "Show test entries" is ticked, always labelled.
+- `board_alarms` no longer skips test devices; every alarm row carries
+  `is_test`, and the silence sweep includes them.
+- `GET /api/admin/alarms?include_test=1` mirrors the tick. The dashboard
+  passes it and re-reads the alarms the moment the tick changes, so the
+  board and the alarm panel can never disagree about which population is
+  on show, even for four seconds.
+- Seeding raises alarms (12 of the 33 are trapped); clearing RESOLVES them
+  (never deletes — the ledger still reads back honestly).
+- Acknowledge-all only touches what the operator can see (`include_test`
+  in the payload), so hidden test alarms are never silenced behind their
+  back and a visible rehearsal is not left half-acknowledged.
+- Every test row is labelled `TEST` in the panel, and the panel carries a
+  banner: "TEST PEOPLE ARE INCLUDED in these alarms and in the numbers…".
+
+### #290 — a worse report re-opens an acknowledged alarm
+
+An acknowledgement means "I have seen THIS fact and I am dealing with it".
+Getting worse is a new fact, so the acknowledgement no longer covers it.
+`raise_alarm(..., re_raise=True)` UN-acknowledges the existing alarm rather
+than creating a second one (no duplicate rows on the strip), records
+`re_raised_at`, `re_raise_count`, `previous_ack_by/at`, and puts the row
+back in the unacknowledged count with sound and flashing.
+
+Paul's boundary (his choice of three options): **only worse re-alarms.** A
+same-or-better report updates the yellow note and nothing else — otherwise
+every routine check-in from somebody already being helped would sound the
+alarm again, which is how a room learns to ignore it. Needing help again
+after reporting safe counts as worse.
+
+### #298 — every alarm explains itself
+
+Paul: "if I was an operator, I have no idea what all that was about." Each
+alarm now carries a `story`: what was reported when it was raised, what the
+person has said since, who acknowledged it, and whether a worse report
+re-opened it — rendered as a "What happened" expander. Built from fields
+already on the alarm row, so fifty alarms cost exactly what they did
+before (no extra queries).
+
+### #283 — the breakdown now names the categories it counts
+
+"…spread across Safe, Trapped and Not responding" was written from memory
+and left out Rescued, so it added to 2 of 7. `Counts.quiet_by_status` is
+now computed from the same rows as every other figure, and the sentence
+lists what is actually there: "spread across 5 Rescued, 1 Needing help and
+1 Safe."
+
+Paul's separate question — should rescued people be in "gone quiet" at
+all? They stay: removing them is how a total stops adding up, which is the
+original complaint. Instead the page says out loud: "— 5 of them have
+already been rescued, so their silence is not a worry. Those are listed
+here only so the numbers add up."
+
+### #299 — a stand-down is no longer reported as a failed trigger
+
+`/api/audit` read EVERY row in `push_events` and stamped `TRIGGER` on all
+of them. A stand-down has no magnitude and no recipients, so it rendered as
+"⚠️ TRIGGER FAILED · M? · 0 people" — the feed was inventing a failure that
+never happened. Trigger rows are now selected explicitly (`kind: trigger`,
+or missing for rows written before the field existed) and stand-downs are
+returned as their own `stand_down` kind, rendered "🔇 ALERT CALLED OFF ·
+false alarm · N phones told · by <who>".
+
+### #297 — grammar
+
+"before {authority} has completed formal notification" → "before
+{authority} completes formal notification", which is right whether
+`authority` is one body or several.
+
+### #51 — the egress question no longer reads as the mobility question
+
+Green does not get the mobility question — it gets the egress question, and
+its title was "Can you get out on your own?", word-for-word what the
+mobility question sounds like. Retitled "Is your way out blocked?", answers
+"No — I can get out" / "Yes — I'm blocked in".
+
+### #300 — the radius override box
+
+Could not be reproduced here (it renders 5000 for me), so the fix removes
+every plausible cause rather than guessing: the value is written as a DOM
+property after the box exists (a `value` attribute a browser considers
+invalid is silently not displayed), `step` relaxed from 50 to 1, a
+placeholder added, and Save falls back to the known active value if the box
+is empty rather than telling the operator off.
+
+### #291 — not reproducible from here
+
+Those four rescued records live in production data this environment cannot
+see. Most likely cause: the map hides rescued people by default ("Showing
+less than everything: rescued people are off the map" with a "Show me
+everything" button). Paul to confirm with that filter on.
+
+Full suite after this batch: **1021 passed, 7 skipped, 0 failed.**

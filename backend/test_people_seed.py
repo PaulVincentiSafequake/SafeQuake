@@ -249,13 +249,38 @@ def register_test_people_routes(api_router, db) -> None:
         if people:
             await db.device_status.insert_many([dict(p) for p in people])
 
+        # #301 (Paul, 2026-08-25): "the 33 test people didn't appear in the
+        # alarm panel at all — this defeats the whole purpose of test
+        # people." The rows were written straight into the board, so
+        # nothing ever went through the code that decides what is an
+        # alarm. They now raise the same alarms a real report would, each
+        # flagged as a test so the board can hide them until an operator
+        # ticks "Show test entries".
+        import board_alarms
+        alarms = 0
+        for p in people:
+            if p.get("status") != "trapped":
+                continue
+            row = dict(p)
+            row["is_test"] = True
+            a = await board_alarms.raise_alarm(
+                db, kind=board_alarms.NEEDS_HELP, device_id=row["device_id"],
+                row=row, headline=f"{board_alarms._who(row)} needs help",
+                action=board_alarms._help_action(row),
+            )
+            if a:
+                alarms += 1
+
         return {
             "seeded": len(people),
+            "alarms_raised": alarms,
             "seed_tag": SEED_TAG,
             "notes": (
                 "Seeded rows are visibly TEST-prefixed and use short codes "
-                "starting with Z. No pushes were sent; no re-check ladder "
-                "was queued."
+                "starting with Z. They behave like real reports everywhere "
+                "on the board — counts, map and alarm panel — but only while "
+                "\u201cShow test entries\u201d is ticked. No pushes were sent; "
+                "no re-check ladder was queued."
             ),
         }
 
@@ -268,7 +293,15 @@ def register_test_people_routes(api_router, db) -> None:
         require_role(principal, "admin", "operator")
 
         result = await db.device_status.delete_many({"_test_seed": SEED_TAG})
+        # #301: the rehearsal's alarms go with it. Resolved rather than
+        # deleted, so the alarm ledger still reads back honestly.
+        alarms = await db.board_alarms.update_many(
+            {"is_test": True, "resolved_at": None},
+            {"$set": {"resolved_at": datetime.now(timezone.utc).isoformat(),
+                      "resolved_reason": "Test people were cleared."}},
+        )
         return {
             "removed": int(result.deleted_count),
+            "alarms_cleared": int(alarms.modified_count),
             "seed_tag": SEED_TAG,
         }

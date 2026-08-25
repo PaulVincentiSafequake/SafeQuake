@@ -656,6 +656,7 @@ async def get_devices(
 @api_router.get("/admin/alarms")
 async def get_board_alarms(
     request: Request,
+    include_test: int = 0,
     x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
 ):
     """Every alarm that is not yet resolved, grouped, with the count of
@@ -664,11 +665,15 @@ async def get_board_alarms(
     Server-side on purpose: two operators looking at the same incident must
     see the same alarms and the same acknowledgements, and an acknowledgement
     has to survive a page reload — it will be read back in an inquiry.
+
+    #301: `include_test=1` mirrors the board's "Show test entries" tick, so
+    the alarm panel can be rehearsed with test people instead of only ever
+    being used for real for the first time during an incident.
     """
     principal = await resolve_principal(request, x_admin_token, ADMIN_TRIGGER_PASSWORD, db)
     require_role(principal, "admin", "operator")
     import board_alarms
-    return await board_alarms.list_open(db)
+    return await board_alarms.list_open(db, include_test=bool(include_test))
 
 
 @api_router.post("/admin/alarms/ack")
@@ -699,9 +704,15 @@ async def ack_board_alarms(
     # ones would.
     ack_all = bool(payload.get("all"))
     if ack_all and not ids:
-        rows = await db.board_alarms.find(
-            {"resolved_at": None, "ack_at": None}, {"_id": 0, "id": 1},
-        ).to_list(1000)
+        q: dict = {"resolved_at": None, "ack_at": None}
+        # #301: acknowledge what the operator can actually SEE. If test
+        # entries are hidden, "acknowledge all" must not quietly silence
+        # test alarms the operator was never shown — and if they are
+        # shown, it must include them, because they are part of the
+        # rehearsal they are running.
+        if not bool(payload.get("include_test")):
+            q["is_test"] = {"$ne": True}
+        rows = await db.board_alarms.find(q, {"_id": 0, "id": 1}).to_list(1000)
         ids = [r.get("id") for r in rows if r.get("id")]
         if not ids:
             return {"status": "ok", "acknowledged": 0,
@@ -958,7 +969,16 @@ async def get_audit_log(
 
     # ---- Trigger events ----
     if kind in (None, "trigger"):
-        tq: dict = {}
+        # #299 (Paul, 2026-08-25): "a TRIGGER FAILED · M? · 0 people entry
+        # appeared around the time of a stand-down." It was the stand-down.
+        # `push_events` holds several kinds of row — the alert itself, the
+        # stand-down, the reminder-cancelling push — and this query used to
+        # read all of them and stamp TRIGGER on every one. A stand-down has
+        # no magnitude and no recipients, so it rendered as a failed
+        # trigger: the feed was inventing a failure that never happened.
+        # Trigger rows only from here on (rows written before the `kind`
+        # field existed are triggers, hence the $exists arm).
+        tq: dict = {"$or": [{"kind": "trigger"}, {"kind": {"$exists": False}}]}
         if since:
             tq["created_at"] = {"$gte": since}
         rows = await db.push_events.find(tq, {"_id": 0}).sort("created_at", -1).to_list(limit)
@@ -973,6 +993,27 @@ async def get_audit_log(
                 "ios_count": r.get("ios_count") or 0,
                 "android_count": r.get("android_count") or 0,
                 "delivered": bool(r.get("push_delivered")),
+                "error": r.get("push_error"),
+            })
+
+    # ---- Stand-downs (#299) ----
+    # Calling an alert off is a decision an operator made, and it belongs in
+    # the feed under its own name. It used to be shown as a failed trigger.
+    if kind in (None, "stand_down"):
+        sq: dict = {"kind": "alert_stood_down"}
+        if since:
+            sq["created_at"] = {"$gte": since}
+        for r in await db.push_events.find(sq, {"_id": 0}).sort(
+            "created_at", -1,
+        ).to_list(limit):
+            events.append({
+                "kind": "stand_down",
+                "at": r.get("created_at"),
+                "stood_down_by": (r.get("stood_down_by") or r.get("triggered_by")
+                                  or "dashboard"),
+                "recipients_total": (r.get("recipients_total")
+                                     or r.get("recipients") or 0),
+                "reason": r.get("reason"),
                 "error": r.get("push_error"),
             })
 

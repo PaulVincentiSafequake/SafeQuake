@@ -1504,16 +1504,22 @@ export default function AlertScreen() {
               ]}
             >
               <View style={styles.triageHandle} />
-              <Text style={styles.triageTitle}>Can you get out on your own?</Text>
+              {/* #51 / #290 (Paul, 2026-08-25): "the mobility question
+                  still appears after selecting the green option." It was
+                  never the mobility question — it was this one, worded so
+                  closely ("Can you get out on your own?") that it read as
+                  the same question asked twice. It now asks about the way
+                  out and nothing else. */}
+              <Text style={styles.triageTitle}>Is your way out blocked?</Text>
               <Text style={styles.triageSubtitle}>
-                Not about your injuries — about the building. A jammed door or
-                blocked stairwell counts as no. Your report is already sent
-                — this adds one detail to it.
+                About the building, not your injuries. A jammed door or a
+                blocked stairwell counts as blocked.
+                Your report is already sent — this adds one detail to it.
               </Text>
 
               <TriageOption
                 color="#2E7D32"
-                label="Yes, I can get out"
+                label="No — I can get out"
                 sublabel="Nothing is blocking my way out"
                 icon="exit"
                 onPress={() => chooseEgress("can_exit")}
@@ -1521,7 +1527,7 @@ export default function AlertScreen() {
               />
               <TriageOption
                 color="#C21818"
-                label="No, I can&apos;t get out"
+                label="Yes — I&apos;m blocked in"
                 sublabel="Blocked, jammed or pinned — a team will be needed"
                 icon="lock-closed"
                 onPress={() => chooseEgress("cannot_exit")}

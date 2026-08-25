@@ -1517,20 +1517,99 @@
   //     say "sound is not working yet" rather than pretending.
   window.qgSound = (function () {
     var ctx = null, muteUntil = 0, lastPlay = 0, everBlocked = false;
+    var keepAlive = null, pendingKind = null, armListeners = [];
+    // #285 (Paul, 2026-08-25 — live test): "the alarm sound has not played
+    // at all, either time", while the flashing frame worked both times.
+    //
+    // The sound itself was never the problem — measured through a browser
+    // audio probe it comes out at 0.81 of maximum. ARMING was the problem.
+    // A browser refuses to make any sound until the person has interacted
+    // with the page, and Safari (and a backgrounded tab) SUSPENDS the audio
+    // channel again afterwards. The old code created the channel on the
+    // first alarm — with no interaction behind it, so it started suspended
+    // — asked it to resume without waiting for an answer, dropped that
+    // alarm, and left a one-line note at the bottom of a panel as the only
+    // sign that the board had gone deaf.
+    //
+    // Four changes, each closing one of those holes:
+    //   1. ARM ON ANY INTERACTION — click, key, touch — not clicks alone,
+    //      and wait for the resume to actually succeed before believing it.
+    //   2. KEEP THE CHANNEL ALIVE. A silent oscillator runs for as long as
+    //      the board is open, which stops the browser suspending it again
+    //      the moment the operator looks at their phone instead.
+    //   3. NEVER DROP THE FIRST ALARM. If a sound is asked for while the
+    //      channel is still waking up, it is remembered and played the
+    //      instant it wakes.
+    //   4. SAY SO, LOUDLY. `armed()` and `blocked()` drive a permanent
+    //      control in the alarm panel — "Alarm sound is OFF, switch it on"
+    //      — plus a Test button, so an operator can prove the alarm works
+    //      at the start of a shift instead of discovering it during an
+    //      incident.
+    function onArmed(fn) { armListeners.push(fn); }
+    function fireArmed() {
+      armListeners.forEach(function (fn) { try { fn(); } catch (_) {} });
+    }
+    function startKeepAlive(c) {
+      if (keepAlive) return;
+      try {
+        var osc = c.createOscillator(), g = c.createGain();
+        // Inaudible: 1 Hz below anything a speaker reproduces, at a gain
+        // low enough to be silence. Its only job is to keep the audio
+        // channel in use so the browser does not suspend it.
+        osc.frequency.value = 1;
+        g.gain.value = 0.0001;
+        osc.connect(g); g.connect(c.destination);
+        osc.start();
+        keepAlive = osc;
+      } catch (_) {}
+    }
     function ensure() {
       try {
         var C = window.AudioContext || window.webkitAudioContext;
         if (!C) { everBlocked = true; return null; }
         if (!ctx) ctx = new C();
-        if (ctx.state === "suspended") { ctx.resume(); everBlocked = true; }
+        if (ctx.state === "running") {
+          everBlocked = false;
+          startKeepAlive(ctx);
+        } else {
+          everBlocked = true;
+          // resume() only succeeds inside (or shortly after) a real
+          // interaction. When it does, anything that was waiting is played
+          // and the panel is told to redraw.
+          try {
+            var p = ctx.resume();
+            if (p && p.then) {
+              p.then(function () {
+                if (ctx && ctx.state === "running") {
+                  everBlocked = false;
+                  startKeepAlive(ctx);
+                  var k = pendingKind; pendingKind = null;
+                  if (k) { lastPlay = 0; api.play(k); }
+                  fireArmed();
+                }
+              }).catch(function () {});
+            }
+          } catch (_) {}
+        }
         return ctx;
       } catch (_) { everBlocked = true; return null; }
     }
-    // Any click anywhere is the gesture browsers demand before audio.
-    document.addEventListener("click", function () {
-      var c = ensure();
-      if (c && c.state === "running") everBlocked = false;
-    }, true);
+    // Any interaction is the gesture browsers demand before audio. Keys and
+    // touches count: an operator working the board from a keyboard, or on a
+    // tablet, was previously never arming the sound at all.
+    ["pointerdown", "click", "keydown", "touchstart"].forEach(function (ev) {
+      document.addEventListener(ev, function () {
+        var c = ensure();
+        if (c && c.state === "running") { everBlocked = false; fireArmed(); }
+      }, true);
+    });
+    // Coming back to the tab: re-arm immediately rather than waiting for the
+    // operator to click something. If the browser refuses, `blocked()` turns
+    // true and the panel says so.
+    document.addEventListener("visibilitychange", function () {
+      if (!document.hidden) ensure();
+    });
+    window.addEventListener("focus", function () { ensure(); });
     // #285 (Paul, 2026-08-24): "the alarm is too quiet." A single sine
     // wave at 0.14 gain is a polite notification chime, not a control-room
     // alarm. Everything below is now routed through a limiter and pushed
@@ -1572,7 +1651,7 @@
       osc.start(c.currentTime + at);
       osc.stop(c.currentTime + at + dur + 0.05);
     }
-    return {
+    var api = {
       // kind: "alarm" (something needs an operator) | "fault" (the board
       // itself has stopped working). Two clearly different sounds, because
       // they need two different actions.
@@ -1582,7 +1661,14 @@
         // long enough to swallow a repeat that was deliberately asked for.
         if (Date.now() - lastPlay < 1200) return false;
         var c = ensure();
-        if (!c || c.state !== "running") return false;
+        if (!c || c.state !== "running") {
+          // #285: remember it. The alarm that arrives while the audio
+          // channel is waking up used to be thrown away silently — the
+          // single most likely alarm to be thrown away, because it is the
+          // first one.
+          pendingKind = kind || "alarm";
+          return false;
+        }
         lastPlay = Date.now();
         var out = master(c);
         if (kind === "fault") {
@@ -1604,8 +1690,39 @@
       mute: function (ms) { muteUntil = Date.now() + ms; },
       unmute: function () { muteUntil = 0; },
       muteRemainingMs: function () { return Math.max(0, muteUntil - Date.now()); },
-      blocked: function () { return everBlocked && !(ctx && ctx.state === "running"); }
+      blocked: function () { return everBlocked && !(ctx && ctx.state === "running"); },
+      // #285: is the board able to make a noise right now? The alarm panel
+      // shows this permanently — an operator should never have to guess.
+      armed: function () { return !!(ctx && ctx.state === "running"); },
+      // Called by the "switch the sound on" button. Returns a promise that
+      // resolves to whether it worked, so the panel can say either "sound
+      // is on" or "your browser is still refusing".
+      arm: function () {
+        var c = ensure();
+        if (c && c.state === "running") { fireArmed(); return Promise.resolve(true); }
+        if (!c) return Promise.resolve(false);
+        try {
+          return Promise.resolve(c.resume()).then(function () {
+            var ok = !!(ctx && ctx.state === "running");
+            if (ok) { startKeepAlive(ctx); everBlocked = false; fireArmed(); }
+            return ok;
+          }).catch(function () { return false; });
+        } catch (_) { return Promise.resolve(false); }
+      },
+      // The shift-start check: play the real alarm, once, ignoring the
+      // repeat guard and any mute, and report honestly whether it played.
+      test: function () {
+        var self = this;
+        return this.arm().then(function (ok) {
+          if (!ok) return false;
+          muteUntil = 0;
+          lastPlay = 0;
+          return self.play("alarm");
+        });
+      },
+      onArmed: onArmed
     };
+    return api;
   })();
 
 
@@ -2710,7 +2827,9 @@
           can never be silently left on.
         </div>
         <div class="qa-pv-radius-row">
-          <input type="number" min="100" max="5000" step="50" value="${escapeHtml(defaultVal)}"
+          <input type="number" min="100" max="5000" step="1" inputmode="numeric"
+                 value="${escapeHtml(defaultVal)}" data-value="${escapeHtml(defaultVal)}"
+                 placeholder="${escapeHtml(defaultVal)}"
                  data-action="set-radius-input" aria-label="Override radius in kilometres">
           <span style="font-size:12px;color:#7A5300">km (100–5000)</span>
           <button type="button" class="qa-pv-btn-save" data-action="save-radius">Save</button>
@@ -2856,6 +2975,19 @@
     container.querySelectorAll("[data-action]").forEach(el => {
       el.addEventListener("click", handleAction);
     });
+
+    // #300 (Paul, 2026-08-25): "the radius override number box shows blank
+    // even when a value (5000 km) is active." A number input renders its
+    // value from an attribute, and browsers quietly refuse to display one
+    // they consider invalid (a value off the step grid, a stray space, a
+    // decimal). The value is now written as a PROPERTY after the box
+    // exists, which always displays, and the active number is repeated in
+    // words underneath so an empty box can never be mistaken for "no
+    // override".
+    const radiusInput = container.querySelector("[data-action=set-radius-input]");
+    if (radiusInput && radiusInput.dataset.value) {
+      radiusInput.value = radiusInput.dataset.value;
+    }
   }
 
   // ── Actions ──────────────────────────────────────────────────────────
@@ -2889,7 +3021,11 @@
         // TEST-ONLY radius override. Server enforces 100..5000 and
         // stamps its own 7-day auto-expiry — we just send the number.
         const inputEl = container.querySelector("[data-action=set-radius-input]");
-        const km = parseInt(inputEl && inputEl.value, 10);
+        // #300: if the box is empty (or the browser refused to display the
+        // active value), fall back to the value we know is active rather
+        // than telling the operator off for something they did not do.
+        const raw = (inputEl && inputEl.value) || (inputEl && inputEl.dataset.value) || "";
+        const km = parseInt(raw, 10);
         if (!km || km < 100 || km > 5000) {
           showBanner("err", "Radius must be between 100 and 5000 km.");
           return;
@@ -3247,8 +3383,35 @@
     .qg-av-frame, .qg-av-tag { animation: none; }
     .qg-av-frame { border-color: #FF2A2A; }
   }
-  /* #286 — one action for a flood of alarms. */
-  .qg-annun-bulk {
+  /* #285 — the state of the sound, permanently in view. */
+  .qg-annun-sound {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    border-radius: 8px; padding: 8px 10px; font-size: 13px;
+  }
+  .qg-annun-sound.is-on { background: #10281A; border: 1px solid #2F7D4F; color: #C9F3D8; }
+  .qg-annun-sound.is-off {
+    background: #4A2A00; border: 1px solid #FFB84D; color: #FFE9C7;
+    font-weight: 700;
+  }
+  .qg-annun-sound-text { flex: 1 1 260px; }
+  .qg-annun-sound button {
+    background: #fff; color: #1a1a1a; border: 0; border-radius: 8px;
+    padding: 8px 12px; font-size: 13px; font-weight: 800; cursor: pointer;
+    min-height: 40px;
+  }
+  /* #301 — a test row can never be mistaken for a real casualty. */
+  .qg-alarm-test {
+    display: inline-block; background: #6B21A8; color: #fff; font-weight: 800;
+    font-size: 11px; letter-spacing: .06em; padding: 1px 6px;
+    border-radius: 4px; margin-right: 6px; vertical-align: 1px;
+  }
+  /* #298 — what this alarm was about, in order. */
+  .qg-alarm-story { margin-top: 6px; }
+  .qg-alarm-story summary { cursor: pointer; font-size: 12.5px; color: #FFD9D9; }
+  .qg-alarm-story ol { margin: 6px 0 0 18px; padding: 0; }
+  .qg-alarm-story li { font-size: 12.5px; line-height: 1.45; margin-bottom: 3px; }
+  .qg-alarm-story .qg-story-at { color: #B9C7D3; }
+  /* #286 — one action for a flood of alarms. */  .qg-annun-bulk {
     display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
     background: #490D0D; border: 1px solid #FF8A8A; border-radius: 8px;
     padding: 8px 10px;
@@ -3368,6 +3531,11 @@
              invisible — this line stays in view whether anything is
              sounding or not. -->
         <div class="qg-annun-note" id="qg-annun-quiet" hidden></div>
+        <!-- #285: whether this board can make a noise is a fact an
+             operator must be able to see and act on, not a sentence in a
+             note. Permanent, with a way to switch it on and a way to
+             prove it works. -->
+        <div class="qg-annun-sound" id="qg-annun-sound"></div>
         <!-- #286: at mass-casualty scale nobody can click forty-seven
              buttons. One action silences the board so the operator can
              start working the list; every individual row stays below. -->
@@ -4500,6 +4668,24 @@
             esc(e.recipients_total || 0) + ' ' + (e.recipients_total === 1 ? 'person' : 'people') +
             ' (' + counts + ') · by <code>' + esc(e.triggered_by || "dashboard") + '</code></div>' +
           err + '<div class="qg-audit-at">' + whenWords(e.at) + '</div></div>';
+    }
+    if (e.kind === "stand_down") {
+      // #299 (Paul, 2026-08-25): "a TRIGGER FAILED · M? · 0 people entry
+      // appeared around the time of a stand-down." It WAS the stand-down.
+      // Calling an alert off is a decision somebody made, and it now reads
+      // like one instead of like a failure that never happened.
+      var reasonWords = {
+        false_alarm: "false alarm",
+        incident_closed: "incident closed",
+        test: "test",
+      }[e.reason] || e.reason || "";
+      return '<div class="qg-audit-row">' +
+          '<div class="qg-audit-title">\uD83D\uDD07 ALERT CALLED OFF' +
+            (reasonWords ? " \u00B7 " + esc(reasonWords) : "") +
+            " \u00B7 " + esc(e.recipients_total || 0) + " " +
+            (e.recipients_total === 1 ? "phone" : "phones") + " told" +
+            ' \u00B7 by <code>' + esc(e.stood_down_by || "dashboard") + "</code></div>" +
+          '<div class="qg-audit-at">' + whenWords(e.at) + "</div></div>";
     }
     if (e.kind === "rescued") {
       var priorSev = e.prior_severity && window.qgSeverityChip
@@ -6789,6 +6975,11 @@ window.QuakeAngelRescue = (function () {
     box.addEventListener("change", function () {
       showTestEntries = box.checked;
       refresh();
+      // #301: one tick governs everything — counts, list, map AND alarms.
+      // Refreshed immediately rather than at the next poll, so the board
+      // and the alarm panel never disagree about which population is on
+      // show, even for four seconds.
+      refreshAlarms();
     });
   })();
 
@@ -8147,7 +8338,11 @@ window.QuakeAngelRescue = (function () {
   async function refreshAlarms() {
     try {
       if (!isSignedIn()) { alarmData = null; renderAlarms(); return; }
-      var res = await window.qaApi("/api/admin/alarms");
+      // #301: the alarm panel follows the board's "Show test entries" tick,
+      // so a rehearsal with test people exercises the alarms too — the
+      // thing test people exist for — and a real incident never shows one.
+      var res = await window.qaApi(
+        "/api/admin/alarms" + (showTestEntries ? "?include_test=1" : ""));
       if (!res.ok) throw new Error("HTTP " + res.status);
       alarmData = await res.json();
       alarmFault = "";
@@ -8179,6 +8374,20 @@ window.QuakeAngelRescue = (function () {
     } catch (e) {
       banner("err", "We could not record that. Nothing has been acknowledged.");
     }
+  }
+
+  // #298 — the alarm's own history, in order, in plain words. Built from
+  // fields the server already sends with the alarm, so opening it costs
+  // nothing and it can never disagree with the card above it.
+  function storyHtml(p) {
+    var steps = (p && p.story) || [];
+    if (!steps.length) return "";
+    return '<details class="qg-alarm-story"><summary>What happened</summary><ol>' +
+      steps.map(function (s) {
+        return "<li>" + window.qgEsc(s.words || "") +
+          (s.at ? ' <span class="qg-story-at">(' + window.qgEsc(window.qgTime(s.at)) +
+                  " Malta time)</span>" : "") + "</li>";
+      }).join("") + "</ol></details>";
   }
 
   function renderAlarms() {
@@ -8216,8 +8425,13 @@ window.QuakeAngelRescue = (function () {
     var notes = [];
     if (alarmData && alarmData.flood && alarmData.flood_note) notes.push(alarmData.flood_note);
     if (alarmFault) notes.push(alarmFault);
-    if (window.qgSound.blocked()) {
-      notes.push("Sound is off until you click anywhere on this page once — your browser will not let us play it before that.");
+    // #301: if the rehearsal is on show, say so above everything else. An
+    // operator must never wonder whether a number in front of them
+    // includes people who do not exist.
+    if (showTestEntries) {
+      notes.push("TEST PEOPLE ARE INCLUDED in these alarms and in the numbers, " +
+        "because \u201cShow test entries\u201d is ticked. Every test row is " +
+        "labelled TEST. Untick it to see only real reports.");
     }
     var muteLeft = window.qgSound.muteRemainingMs();
     if (muteLeft > 0) {
@@ -8226,6 +8440,24 @@ window.QuakeAngelRescue = (function () {
     }
     noteEl.hidden = notes.length === 0;
     noteEl.textContent = notes.join(" ");
+
+    // #285 (Paul, 2026-08-25 — "the alarm sound has not played at all").
+    // The state of the sound is now a permanent control, not a sentence
+    // buried in a note. Two things an operator can do at the start of a
+    // shift: switch it on if the browser is blocking it, and prove it
+    // works.
+    var soundEl = document.getElementById("qg-annun-sound");
+    if (soundEl) {
+      var armed = window.qgSound.armed();
+      soundEl.className = "qg-annun-sound" + (armed ? " is-on" : " is-off");
+      soundEl.innerHTML = armed
+        ? '<span class="qg-annun-sound-text">\uD83D\uDD14 Alarm sound is ON.</span>' +
+          '<button type="button" id="qg-annun-sound-test">Test the sound</button>'
+        : '<span class="qg-annun-sound-text">\uD83D\uDD07 ALARM SOUND IS OFF. ' +
+          'Your browser will not let this page make a noise until you switch it on. ' +
+          'The flashing still works, but nobody will hear anything.</span>' +
+          '<button type="button" id="qg-annun-sound-on">Switch the sound on</button>';
+    }
 
     // #306 — the day-old silences. Always in view, never a sound, and it
     // names them on request so nobody has to scroll and notice.
@@ -8294,21 +8526,30 @@ window.QuakeAngelRescue = (function () {
     rowsEl.innerHTML = groups.map(function (g) {
       var glyph = SHAPE_GLYPH[g.shape] || "■";
       var acked = !!g.acknowledged;
+      var testTag = g.is_test ? '<span class="qg-alarm-test">TEST</span>' : "";
       var names = "";
       if (g.count > 1) {
         names = '<details class="qg-alarm-names"><summary>Show me who (' + g.count + ')</summary>' +
           g.people.map(function (p) {
-            return "<div>" + window.qgEsc(p.headline || p.who || "") +
+            return "<div>" +
+              (p.is_test ? '<span class="qg-alarm-test">TEST</span>' : "") +
+              window.qgEsc(p.headline || p.who || "") +
               (p.acknowledged ? "" : " — not acknowledged") +
               (p.since_report && p.since_report.words
                 ? "<br><i>Since: " + window.qgEsc(p.since_report.words) + "</i>"
-                : "") + "</div>";
+                : "") +
+              storyHtml(p) + "</div>";
           }).join("") + "</details>";
       }
+      // #298 (Paul, 2026-08-25): "if I was an operator, I have no idea what
+      // all that was about." A single-person alarm now carries its own
+      // story — what was reported, what has happened since, who
+      // acknowledged it, and whether a worse report re-opened it.
+      var story = g.count === 1 ? storyHtml(g.people && g.people[0]) : "";
       return '<div class="qg-alarm ' + (acked ? "is-acked" : "is-new") + '">' +
         '<div class="qg-alarm-shape" aria-hidden="true">' + glyph + "</div>" +
         '<div class="qg-alarm-body">' +
-          '<div class="qg-alarm-word">' + window.qgEsc(g.word || "") + "</div>" +
+          '<div class="qg-alarm-word">' + testTag + window.qgEsc(g.word || "") + "</div>" +
           '<div class="qg-alarm-headline">' + window.qgEsc(g.headline || "") + "</div>" +
           '<div class="qg-alarm-action">' + window.qgEsc(g.action || "") + "</div>" +
           // #289 (2026-08-24 — Paul): an acknowledged "IMMEDIATE, cannot
@@ -8326,6 +8567,7 @@ window.QuakeAngelRescue = (function () {
             (acked && g.ack_by
               ? " · acknowledged by " + window.qgEsc(g.ack_by) + " at " + window.qgEsc(window.qgTime(g.ack_at))
               : "") + "</div>" +
+          story +
           names +
         "</div>" +
         (acked ? "" : '<button type="button" class="qg-alarm-ack" data-group="' +
@@ -8350,7 +8592,33 @@ window.QuakeAngelRescue = (function () {
     if (ev.target && ev.target.id === "qg-annun-ack-all") {
       ev.target.disabled = true;
       ev.target.textContent = "Acknowledging…";
-      ackAlarm({ all: true });
+      // #301: acknowledge exactly what is on show. Hidden test alarms are
+      // not silenced behind the operator's back.
+      ackAlarm({ all: true, include_test: showTestEntries });
+      return;
+    }
+    // #285 — switch the sound on, and prove it works.
+    if (ev.target && ev.target.id === "qg-annun-sound-on") {
+      ev.target.disabled = true;
+      ev.target.textContent = "Switching on…";
+      window.qgSound.arm().then(function (ok) {
+        renderAlarms();
+        if (ok) banner("ok", "Alarm sound is on. Use \u201cTest the sound\u201d to hear it.");
+        else banner("err", "Your browser is still refusing to let this page make a noise. " +
+          "Check the sound settings for this site, and that the tab is not muted. " +
+          "The flashing alarm still works.");
+      });
+      return;
+    }
+    if (ev.target && ev.target.id === "qg-annun-sound-test") {
+      ev.target.disabled = true;
+      ev.target.textContent = "Playing…";
+      window.qgSound.test().then(function (played) {
+        renderAlarms();
+        if (played) banner("ok", "That is the alarm. If you heard nothing, turn the volume up — " +
+          "the board played it.");
+        else banner("err", "We could not play the sound. Check the volume and that this tab is not muted.");
+      });
       return;
     }
     var btn = ev.target.closest && ev.target.closest(".qg-alarm-ack");
@@ -8379,6 +8647,10 @@ window.QuakeAngelRescue = (function () {
     if (Date.now() - lastAlarmSound <= ALARM_SOUND_EVERY_MS) return;
     if (window.qgSound.play("alarm")) lastAlarmSound = Date.now();
   }, 1000);
+
+  // #285 — the moment the browser lets us make a noise, the panel says so
+  // rather than waiting for the next poll.
+  window.qgSound.onArmed(function () { renderAlarms(); });
 
   refresh();
   setInterval(refresh, 4000);

@@ -137,8 +137,19 @@ def _help_action(row: Dict[str, Any]) -> str:
     return "Send a team" + (f" — {tail}." if tail else ".")
 
 
-async def _open_alarm(db, device_id: str, kind: str) -> Optional[dict]:
-    return await db.board_alarms.find_one(
+def _looks_like_test(row: Dict[str, Any]) -> bool:
+    """One test-or-not answer, shared with the board and the counts (#301).
+
+    Imported lazily because `deps` pulls in the app's settings, and this
+    module is imported by scripts that have no app."""
+    try:
+        from deps import is_test_device
+        return bool(is_test_device(row or {}))
+    except Exception:
+        return False
+
+
+async def _open_alarm(db, device_id: str, kind: str) -> Optional[dict]:    return await db.board_alarms.find_one(
         {"device_id": device_id, "kind": kind, "resolved_at": None},
         {"_id": 0},
     )
@@ -152,12 +163,62 @@ async def raise_alarm(
     row: Dict[str, Any],
     headline: str,
     action: str,
+    re_raise: bool = False,
     now: Optional[datetime] = None,
 ) -> Optional[dict]:
     """Create one alarm, unless an unresolved one of the same kind already
-    exists for this person. Returns the alarm, or None if it was a repeat."""
+    exists for this person. Returns the alarm, or None if it was a repeat.
+
+    #290 (Paul, 2026-08-25 — reconfirmed three times): "when a new report
+    arrives for a person whose last alarm was already acknowledged, the
+    card never regains an Acknowledge button and is never counted in the
+    alarm total." That was the dedupe rule doing its job too well. An
+    acknowledgement means "I have seen THIS fact and I am dealing with
+    it". A person getting WORSE is a new fact, so the acknowledgement no
+    longer covers it and the alarm has to be put back in front of the
+    operator — sound, flashing, button, counted. This is standard
+    re-alarming: `re_raise` below un-acknowledges the existing alarm
+    rather than creating a second one, so the strip never shows the same
+    person twice for the same thing.
+
+    Paul's ruling on the boundary (2026-08-25): ONLY worse re-alarms. A
+    same-or-better report updates the yellow note and nothing else —
+    otherwise every routine check-in from someone already being helped
+    would sound the alarm again, which is how a room learns to ignore it.
+    """
     n = _now(now)
-    if await _open_alarm(db, device_id, kind):
+    existing = await _open_alarm(db, device_id, kind)
+    if existing:
+        if re_raise and existing.get("ack_at"):
+            try:
+                await db.board_alarms.update_one(
+                    {"id": existing["id"]},
+                    {"$set": {
+                        "ack_by": None,
+                        "ack_at": None,
+                        "headline": headline,
+                        "action": action,
+                        "severity": row.get("severity"),
+                        "re_raised_at": _iso(n),
+                        # Kept so the audit trail shows the alarm was
+                        # acknowledged once and then re-opened by a new
+                        # fact, rather than looking like it was never
+                        # acknowledged at all.
+                        "previous_ack_by": existing.get("ack_by"),
+                        "previous_ack_at": existing.get("ack_at"),
+                    },
+                     "$inc": {"re_raise_count": 1}},
+                )
+            except Exception as e:
+                logging.warning(f"board_alarms re-raise failed: {e}")
+                return None
+            out = dict(existing)
+            out.update({
+                "ack_by": None, "ack_at": None, "headline": headline,
+                "action": action, "re_raised_at": _iso(n),
+                "re_raise_count": int(existing.get("re_raise_count") or 0) + 1,
+            })
+            return out
         return None
     doc = {
         "id": str(uuid.uuid4()),
@@ -171,6 +232,14 @@ async def raise_alarm(
         "word": WORDS[kind],
         "shape": SHAPES[kind],
         "created_at": _iso(n),
+        # #301 (Paul, 2026-08-25): test people used to be dropped before an
+        # alarm was ever written, which is why "Add 33 test people" could
+        # never be used to rehearse the alarm panel — the thing it exists
+        # for. They now raise alarms like anybody else, flagged, and the
+        # flag is what lets the board hide them until an operator ticks
+        # "Show test entries". Nothing labelled TEST can ever be mistaken
+        # for a real casualty, and nothing real is ever hidden.
+        "is_test": bool(row.get("is_test") or row.get("synthetic")) or _looks_like_test(row),
         # Grouping bucket: same kind, same minute. Thirty people reporting
         # in one minute is one decision for the operator, not thirty.
         "group_key": f"{kind}:{n.strftime('%Y-%m-%dT%H:%M')}",
@@ -199,12 +268,11 @@ async def on_status_change(
     device_id = doc.get("device_id") or ""
     if not device_id:
         return raised
-    # Test entries never sound an alarm. They are visible on the board when
-    # an operator asks for them, but an alarm means "act now", and nobody
-    # should be pulled out of a real incident by a rehearsal.
-    from deps import is_test_device
-    if is_test_device({**doc, **(prior or {})}):
-        return raised
+    # #301 (Paul, 2026-08-25): test people used to return here, so the
+    # alarm panel could never be rehearsed with them — the reason they
+    # exist. They now go through exactly the same path, and the alarm row
+    # carries a test flag so the board can keep them out of sight until an
+    # operator ticks "Show test entries".
     prior = prior or {}
     was = str(prior.get("status") or "")
     now_status = str(doc.get("status") or "")
@@ -213,7 +281,12 @@ async def on_status_change(
         a = await raise_alarm(
             db, kind=NEEDS_HELP, device_id=device_id, row=doc,
             headline=f"{_who(doc)} needs help",
-            action=_help_action(doc), now=now,
+            action=_help_action(doc),
+            # #290: needing help again after being safe is a new fact, and
+            # a worse one. If an old acknowledged alarm is still open, put
+            # it back in front of the operator rather than silently
+            # stamping a note on it.
+            re_raise=True, now=now,
         )
         if a:
             raised.append(a)
@@ -233,7 +306,10 @@ async def on_status_change(
                 head = f"{_who(doc)} now cannot get out"
             a = await raise_alarm(
                 db, kind=WORSE, device_id=device_id, row=doc,
-                headline=head, action=_help_action(doc), now=now,
+                headline=head, action=_help_action(doc),
+                # #290: getting worse is exactly the case an old
+                # acknowledgement no longer covers.
+                re_raise=True, now=now,
             )
             if a:
                 raised.append(a)
@@ -315,8 +391,6 @@ async def sweep_silence(db, rows: List[Dict[str, Any]], now: Optional[datetime] 
         try:
             if not r.get("ever_needed_help"):
                 continue
-            if r.get("is_test") or r.get("synthetic"):
-                continue
             state = (r.get("record_state") or {}).get("state")
             device_id = r.get("device_id") or ""
             if not device_id:
@@ -344,6 +418,7 @@ async def sweep_silence(db, rows: List[Dict[str, Any]], now: Optional[datetime] 
                 long_quiet.append({
                     "device_id": device_id,
                     "who": _who(r),
+                    "is_test": bool(r.get("is_test") or r.get("synthetic")),
                     "hours": int(quiet_hours) if quiet_hours is not None else None,
                 })
             if state in (DARK, NO_ANSWER) and fresh:
@@ -423,9 +498,62 @@ async def ack(db, ids: List[str], who: str, now: Optional[datetime] = None) -> i
         return 0
 
 
-async def list_open(db, now: Optional[datetime] = None) -> Dict[str, Any]:
+def _story(alarm: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The alarm's own history, in order, in plain words (#298).
+
+    Paul, 2026-08-25: "if I was an operator, I have no idea what all that
+    was about." An alarm card used to show one line and a button. Now it
+    can show what was reported when it was raised, what the person has
+    said since, whether somebody acknowledged it, and whether a worse
+    report re-opened it afterwards.
+
+    Everything here comes off the alarm row itself — no extra queries, so
+    a board with fifty alarms costs exactly what it did before.
+    """
+    steps: List[Dict[str, Any]] = []
+    sev = str(alarm.get("severity") or "").lower()
+    raised = alarm.get("headline") or "Alarm raised"
+    if sev in SEVERITY_WORD:
+        raised = f"{raised} — reported {SEVERITY_WORD[sev]}"
+    steps.append({"at": alarm.get("created_at"), "words": raised})
+    since = alarm.get("since_report") or {}
+    if since.get("words"):
+        steps.append({"at": since.get("at"),
+                      "words": f"Since then, they {since['words']}"})
+    if alarm.get("previous_ack_at"):
+        steps.append({
+            "at": alarm.get("previous_ack_at"),
+            "words": ("Acknowledged by "
+                      + str(alarm.get("previous_ack_by") or "an operator")),
+        })
+    if alarm.get("re_raised_at"):
+        steps.append({
+            "at": alarm.get("re_raised_at"),
+            "words": ("Sounded again, because they got worse after that "
+                      "acknowledgement — it needs a fresh decision."),
+        })
+    if alarm.get("ack_at"):
+        steps.append({
+            "at": alarm.get("ack_at"),
+            "words": ("Acknowledged by " + str(alarm.get("ack_by") or "an operator")
+                      + " — still on the board until they are reached."),
+        })
+    else:
+        steps.append({"at": None, "words": "Not acknowledged by anybody yet."})
+    return steps
+
+
+async def list_open(db, now: Optional[datetime] = None,
+                    include_test: bool = False) -> Dict[str, Any]:
     """Everything the strip needs, grouped, with the unacknowledged count
-    the board must always show."""
+    the board must always show.
+
+    #301: `include_test` mirrors the board's "Show test entries" tick. Off,
+    an operator sees only real casualties; on, the rehearsal appears here
+    too — same shapes, same sounds, same buttons — so the alarm panel can
+    actually be practised on. Test alarms are labelled, never silent
+    substitutes for real ones.
+    """
     n = _now(now)
     try:
         rows = await db.board_alarms.find(
@@ -434,6 +562,8 @@ async def list_open(db, now: Optional[datetime] = None) -> Dict[str, Any]:
     except Exception as e:
         logging.warning(f"board_alarms read failed: {e}")
         rows = []
+    if not include_test:
+        rows = [r for r in rows if not r.get("is_test")]
 
     unacked = [r for r in rows if not r.get("ack_at")]
     # #306 (Paul, 2026-08-23): "quiet for a day does not mean resolved...
@@ -445,6 +575,8 @@ async def list_open(db, now: Optional[datetime] = None) -> Dict[str, Any]:
         long_quiet = (meta or {}).get("people") or []
     except Exception as e:
         logging.warning(f"board_alarms long-quiet read failed: {e}")
+    if not include_test:
+        long_quiet = [p for p in long_quiet if not p.get("is_test")]
     window_start = _iso(n - timedelta(minutes=FLOOD_WINDOW_MINUTES))
     recent = [r for r in rows if str(r.get("created_at") or "") >= window_start]
     flood = len(recent) > FLOOD_LIMIT
@@ -488,6 +620,7 @@ async def list_open(db, now: Optional[datetime] = None) -> Dict[str, Any]:
             g["headline"] = verb
             g["action"] = "Open the list and work down it. Every name is below."
         g["count"] = count
+        g["is_test"] = all(bool(m.get("is_test")) for m in g["members"])
         g["acknowledged"] = len(g["unacked_ids"]) == 0
         # #289: what has happened SINCE. For a single-person alarm it is the
         # person's newest report; in a group it would be several different
@@ -518,6 +651,19 @@ async def list_open(db, now: Optional[datetime] = None) -> Dict[str, Any]:
                 "ack_by": m.get("ack_by"),
                 "ack_at": m.get("ack_at"),
                 "since_report": m.get("since_report"),
+                # #301: labelled, never hidden inside a real-looking row.
+                "is_test": bool(m.get("is_test")),
+                # #298 (Paul, 2026-08-25): "if I was an operator, I have no
+                # idea what all that was about." Every alarm now carries its
+                # own short story — what was reported when it was raised,
+                # what has happened since, whether it was acknowledged and
+                # then re-opened by a worse report, and by whom. Built from
+                # the alarm row itself, so reading it costs nothing.
+                "severity": m.get("severity"),
+                "created_at": m.get("created_at"),
+                "re_raised_at": m.get("re_raised_at"),
+                "re_raise_count": int(m.get("re_raise_count") or 0),
+                "story": _story(m),
             }
             for m in g["members"]
         ]
