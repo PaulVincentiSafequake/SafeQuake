@@ -64,7 +64,12 @@ def _ack(ids):
 
 def test_a_worse_report_reopens_an_acknowledged_alarm():
     """The exact sequence Paul ran: alarm, acknowledge, then a worse
-    report. The card must come back needing a decision."""
+    report. The card must come back needing a decision.
+
+    #303 update: one card per person, so we now assert on the person's
+    single card rather than a separate "worse"-kind row alongside a
+    "needs_help" one. The card's primary kind is the newest fact, which
+    for this sequence is `worse`."""
     did = _did()
     _report(did, "trapped", "red")           # NEEDS HELP alarm
     rows, _ = _mine(did)
@@ -76,62 +81,86 @@ def test_a_worse_report_reopens_an_acknowledged_alarm():
     # Now worse: still IMMEDIATE, but they can no longer get out.
     _report(did, "trapped", "red", egress="cannot_exit")
     rows, data = _mine(did)
-    worse = [r for r in rows if r["kind"] == "worse"]
-    assert worse, rows
-    assert worse[0]["acknowledged"] is False
-    assert worse[0]["id"] in [i for g in data["groups"] for i in g["unacked_ids"]]
+    # #303: one card per person. Freshest fact leads.
+    assert len(rows) == 1, rows
+    card = rows[0]
+    assert card["kind"] == "worse", card
+    assert card["acknowledged"] is False
     assert data["unacknowledged"] >= 1
 
 
 def test_a_re_raised_alarm_is_the_same_alarm_not_a_second_one():
     """Re-alarming must not print the same person twice for the same
-    thing — the strip would become a scroll of duplicates."""
+    thing — the strip would become a scroll of duplicates.
+
+    #303: one card per person, whether the re-raise is on the same kind
+    or bumps them to a new kind, so the assertion is the number of
+    cards, not the number of rows of a given kind."""
     did = _did()
     _report(did, "trapped", "yellow")
     _report(did, "trapped", "red")                       # WORSE alarm
     rows, _ = _mine(did)
-    worse = [r for r in rows if r["kind"] == "worse"]
-    assert len(worse) == 1
-    _ack([r["id"] for r in rows])
+    assert len(rows) == 1, rows                          # one card
+    _ack([rows[0]["id"]])                                # ack the card
 
     _report(did, "trapped", "red", egress="cannot_exit")  # worse again
     rows, _ = _mine(did)
-    worse2 = [r for r in rows if r["kind"] == "worse"]
-    assert len(worse2) == 1, worse2
-    assert worse2[0]["id"] == worse[0]["id"]
-    assert worse2[0]["acknowledged"] is False
-    assert worse2[0]["re_raise_count"] == 1
-    assert worse2[0]["re_raised_at"]
+    assert len(rows) == 1, rows                          # still one card
+    assert rows[0]["acknowledged"] is False
+    # A person who has been re-raised has that history in their story.
+    words = " ".join(s["words"] for s in rows[0]["story"])
+    assert "got worse" in words or "cannot get out" in words, words
 
 
-def test_a_same_or_better_report_does_not_re_alarm():
-    """Paul's boundary. An improvement is information, not an alarm — it
-    updates the note and leaves the acknowledgement standing."""
+def test_any_new_report_reopens_an_acknowledged_alarm():
+    """#303 (Paul, 2026-08-26 — supersedes #290's boundary): an
+    acknowledgement means "I have seen THIS fact." Any new fact — worse,
+    same, or even better — is something the operator has not seen since
+    they acknowledged, so the card has to go back into needs-action.
+
+    This replaces the old "same-or-better is only information" rule,
+    which allowed a brand-new report to sit on the board camouflaged as
+    already-handled."""
     did = _did()
     _report(did, "trapped", "red")
     rows, _ = _mine(did)
     _ack([rows[0]["id"]])
-
-    _report(did, "trapped", "green")     # better
     rows, _ = _mine(did)
-    assert all(r["acknowledged"] for r in rows), rows
+    assert rows[0]["acknowledged"] is True
+
+    # A "better" report is still a new fact.
+    _report(did, "trapped", "green")
+    rows, _ = _mine(did)
+    assert rows[0]["acknowledged"] is False, rows
     assert any((r["since_report"] or {}).get("words") for r in rows)
 
+    # And the newest report is on the card so the operator knows what to
+    # re-triage.
+    _ack([rows[0]["id"]])
     _report(did, "trapped", "green")     # same again
     rows, _ = _mine(did)
-    assert all(r["acknowledged"] for r in rows), rows
+    assert rows[0]["acknowledged"] is False, rows
 
 
 def test_an_unacknowledged_alarm_is_still_not_duplicated():
     """The original dedupe rule stands where it was right: nobody is
-    shouted about twice for a fact nobody has looked at yet."""
+    shouted about twice for a fact nobody has looked at yet.
+
+    #303: verified at the card level (one per person) rather than at the
+    kind level — the strip never shows the same person twice."""
     did = _did()
     _report(did, "trapped", "yellow")
     _report(did, "trapped", "red")
     _report(did, "trapped", "red", egress="cannot_exit")
     rows, _ = _mine(did)
-    assert len([r for r in rows if r["kind"] == "worse"]) == 1
-    assert len([r for r in rows if r["kind"] == "needs_help"]) == 1
+    assert len(rows) == 1, rows                          # one card
+    # And the underlying rows are still deduped per kind in Mongo, so
+    # opening the story does not show duplicates either.
+    story_words = [s["words"] for s in rows[0]["story"]]
+    # At most one "needs help" step (from the initial raise) and at most
+    # one "got worse" step — nobody is announced twice for the same
+    # fact.
+    assert sum("needs help" in w for w in story_words) <= 1, story_words
 
 
 def test_needing_help_again_after_being_safe_re_alarms():

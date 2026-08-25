@@ -729,6 +729,20 @@ async def ack_board_alarms(
     return {"status": "ok", "acknowledged": n, "acknowledged_by": who}
 
 
+@api_router.post("/admin/alarms/dedupe")
+async def dedupe_alarms(
+    request: Request,
+    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
+):
+    """#303 — snapshot any device_ids with more than one open row into
+    `board_alarms_backup`, so if the runtime per-device merge ever looks
+    wrong the pre-merge state is still readable. Idempotent."""
+    principal = await resolve_principal(request, x_admin_token, ADMIN_TRIGGER_PASSWORD, db)
+    require_role(principal, "admin", "operator")
+    import board_alarms
+    return await board_alarms.dedupe_open_alarms(db)
+
+
 # ---------- Per-person full history (B3, 2026-08-17) ----------
 @api_router.get("/admin/device-history/{device_id}")
 async def get_device_history(
@@ -4613,6 +4627,14 @@ async def start_board_alarm_indexes():
         await board_alarms.ensure_indexes(db)
     except Exception as e:
         logger.warning("board_alarms index setup failed: %s", e)
+    # #303 (Paul, 2026-08-26): back up any pre-303 duplicate open rows to
+    # `board_alarms_backup` on startup so an inquiry can still read the
+    # pre-merge state. Idempotent — safe on every boot.
+    try:
+        import board_alarms
+        await board_alarms.dedupe_open_alarms(db)
+    except Exception as e:
+        logger.warning("board_alarms 303 dedupe snapshot failed: %s", e)
 
 
 @app.on_event("startup")

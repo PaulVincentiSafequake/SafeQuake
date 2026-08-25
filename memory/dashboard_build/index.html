@@ -8684,7 +8684,8 @@ window.QuakeAngelRescue = (function () {
           names +
         "</div>" +
         (acked ? "" : '<button type="button" class="qg-alarm-ack" data-group="' +
-          window.qgEsc(g.group_key) + '">Acknowledge</button>') +
+          window.qgEsc(g.group_key) + '" data-ids="' +
+          window.qgEsc((g.ids || []).join(",")) + '">Acknowledge</button>') +
         "</div>";
     }).join(""));
 
@@ -8769,7 +8770,16 @@ window.QuakeAngelRescue = (function () {
       return true;
     }
     var ack = target.closest && target.closest(".qg-alarm-ack");
-    if (ack) { ackAlarm({ group_key: ack.dataset.group }); return true; }
+    if (ack) {
+      // #303 — send every underlying alarm ID for this person, so a
+      // single Acknowledge press silences all of that person's rows even
+      // when they span more than one alarm kind or minute.
+      var idsAttr = (ack.dataset.ids || "").trim();
+      var ids = idsAttr ? idsAttr.split(",").filter(Boolean) : [];
+      if (ids.length) { ackAlarm({ ids: ids }); return true; }
+      ackAlarm({ group_key: ack.dataset.group });
+      return true;
+    }
     return false;
   }
 

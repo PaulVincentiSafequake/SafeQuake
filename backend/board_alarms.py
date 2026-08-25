@@ -320,6 +320,22 @@ async def on_status_change(
         db, device_id, kinds=[GONE_QUIET],
         reason="Their phone reported again.", now=now,
     )
+    # #303 (Paul, 2026-08-26 — live, urgent): a brand-new report from a
+    # person whose open cards were already acknowledged was being
+    # presented as "already handled". An acknowledgement means "I have
+    # seen THIS fact and I am dealing with it"; a new fact — of any kind,
+    # not only strictly-worse — is something the operator has not seen
+    # yet, so the card has to go back into needs-action.
+    #
+    # #290 already did this for strictly-worse re-alarms via the
+    # `re_raise` path inside `raise_alarm`, but that path only fires when
+    # a fresh alarm of the same kind is being raised. It does not fire
+    # when the person reports again at the SAME severity, and it does not
+    # touch open rows of a DIFFERENT kind (which is how QQ43D ended up
+    # with two acknowledged cards on the board at the same time). This
+    # widens the rule to every status report: any new fact clears
+    # acknowledgement on all of that person's open cards.
+    await _clear_ack_on_new_report(db, device_id, doc, now=now)
     # #289 (2026-08-24 — Paul, live test): an acknowledged "IMMEDIATE,
     # cannot move" alarm sat in the strip while the same person's card had
     # since moved to MINOR, twice. The alarm is RIGHT to stay — only a
@@ -331,6 +347,56 @@ async def on_status_change(
     # them.
     await _stamp_latest_report(db, device_id, doc, now=now)
     return raised
+
+
+async def _clear_ack_on_new_report(
+    db, device_id: str, doc: Dict[str, Any], now: Optional[datetime] = None,
+) -> int:
+    """#303 — any new status report un-acknowledges that person's open
+    cards.
+
+    The old acknowledgement stays visible in the timeline (`previous_ack_by`
+    / `previous_ack_at`) so an inquiry can still see who saw what and when.
+    We do NOT touch rows that were never acknowledged — nothing to clear —
+    and we do NOT create rows here; that is `raise_alarm`'s job.
+
+    Returns the number of rows whose acknowledgement was cleared, so the
+    caller (and tests) can see whether a new fact re-opened anything.
+    """
+    n = _now(now)
+    try:
+        rows = await db.board_alarms.find(
+            {"device_id": device_id, "resolved_at": None,
+             "ack_at": {"$ne": None}},
+            {"_id": 0},
+        ).to_list(50)
+    except Exception as e:
+        logging.warning(f"board_alarms clear-ack read failed: {e}")
+        return 0
+    if not rows:
+        return 0
+    cleared = 0
+    for r in rows:
+        try:
+            await db.board_alarms.update_one(
+                {"id": r["id"]},
+                {"$set": {
+                    "ack_by": None,
+                    "ack_at": None,
+                    "re_raised_at": _iso(n),
+                    "previous_ack_by": r.get("ack_by"),
+                    "previous_ack_at": r.get("ack_at"),
+                    # Keep the newest fact on the row itself so a
+                    # re-opened card carries the report that re-opened it,
+                    # not just a stale headline from when it was raised.
+                    "severity": doc.get("severity") or r.get("severity"),
+                 },
+                 "$inc": {"re_raise_count": 1}},
+            )
+            cleared += 1
+        except Exception as e:
+            logging.warning(f"board_alarms clear-ack update failed: {e}")
+    return cleared
 
 
 async def _stamp_latest_report(
@@ -553,6 +619,15 @@ async def list_open(db, now: Optional[datetime] = None,
     too — same shapes, same sounds, same buttons — so the alarm panel can
     actually be practised on. Test alarms are labelled, never silent
     substitutes for real ones.
+
+    #303 (Paul, 2026-08-26 — live, urgent): one card per person, not one
+    per past trigger event. The strip used to show one row per
+    (device_id, kind), so a single person who had gone worse and then
+    also gone quiet — or whose old NEEDS_HELP never resolved before a new
+    WORSE arrived — appeared as two cards side by side. This dedupes by
+    device_id BEFORE grouping, so the operator sees each person exactly
+    once and their full history is inside "What happened". The underlying
+    rows are kept in Mongo so an inquiry can still see everything.
     """
     n = _now(now)
     try:
@@ -564,6 +639,56 @@ async def list_open(db, now: Optional[datetime] = None,
         rows = []
     if not include_test:
         rows = [r for r in rows if not r.get("is_test")]
+
+    # #303 — collapse to one card per person. The card's headline, action,
+    # severity, kind, shape, group_key, and ack fields come from the
+    # NEWEST row (so a person who has since gone worse is displayed at
+    # their newest state), but the ID list contains every open row for
+    # that person so a single "Acknowledge" press silences them all at
+    # once and an inquiry can still read every underlying row.
+    def _sort_key(r):
+        # Newest fact first by when the row was BORN. A re-raised older
+        # row is still an older row conceptually — the fresh row that
+        # arrived alongside it is the newer fact and should lead the
+        # card. Re-raise time is only a tiebreak, so a row that only
+        # ever existed as a re-raise still sorts sensibly.
+        return (str(r.get("created_at") or ""),
+                str(r.get("re_raised_at") or ""))
+
+    per_device: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        did = r.get("device_id") or ""
+        if not did:
+            continue
+        bundle = per_device.get(did)
+        if bundle is None:
+            per_device[did] = {"primary": r, "all": [r]}
+        else:
+            bundle["all"].append(r)
+            if _sort_key(r) > _sort_key(bundle["primary"]):
+                bundle["primary"] = r
+
+    # Rebuild `rows` as one synthetic row per device. Each synthetic row
+    # carries the underlying row IDs (in `_all_ids`) and every underlying
+    # row (in `_all_rows`) so the story below can walk the whole timeline.
+    merged_rows: List[Dict[str, Any]] = []
+    for bundle in per_device.values():
+        primary = bundle["primary"]
+        all_rows = sorted(bundle["all"], key=_sort_key)
+        card = dict(primary)
+        card["_all_ids"] = [r.get("id") for r in all_rows if r.get("id")]
+        # If ANY of the underlying rows is unacknowledged, the whole card
+        # is unacknowledged — otherwise a person whose newest row happens
+        # to be an acked GONE_QUIET could hide an unacked NEEDS_HELP
+        # underneath it.
+        any_unacked = any(not r.get("ack_at") for r in all_rows)
+        if any_unacked:
+            card["ack_at"] = None
+            card["ack_by"] = None
+        card["_all_rows"] = all_rows
+        merged_rows.append(card)
+    merged_rows.sort(key=_sort_key, reverse=True)
+    rows = merged_rows
 
     unacked = [r for r in rows if not r.get("ack_at")]
     # #306 (Paul, 2026-08-23): "quiet for a day does not mean resolved...
@@ -585,6 +710,14 @@ async def list_open(db, now: Optional[datetime] = None,
     groups: Dict[str, Dict[str, Any]] = {}
     for r in rows:
         key = r.get("group_key") or r.get("id")
+        # Count of alarms for this row: every underlying row for the
+        # device, so the group summary and the top-of-panel count still
+        # match Mongo.
+        ids = r.get("_all_ids") or [r.get("id")]
+        unacked_ids = [
+            rr.get("id") for rr in (r.get("_all_rows") or [r])
+            if not rr.get("ack_at")
+        ]
         g = groups.get(key)
         if not g:
             groups[key] = {
@@ -593,23 +726,23 @@ async def list_open(db, now: Optional[datetime] = None,
                 "word": r.get("word"),
                 "shape": r.get("shape"),
                 "at": r.get("created_at"),
-                "ids": [r.get("id")],
-                "unacked_ids": [] if r.get("ack_at") else [r.get("id")],
+                "ids": list(ids),
+                "unacked_ids": list(unacked_ids),
                 "headline": r.get("headline"),
                 "action": r.get("action"),
                 "members": [r],
             }
         else:
-            g["ids"].append(r.get("id"))
-            if not r.get("ack_at"):
-                g["unacked_ids"].append(r.get("id"))
+            g["ids"].extend(ids)
+            g["unacked_ids"].extend(unacked_ids)
             g["members"].append(r)
             if str(r.get("created_at") or "") > str(g["at"] or ""):
                 g["at"] = r.get("created_at")
 
     out: List[Dict[str, Any]] = []
     for g in groups.values():
-        count = len(g["ids"])
+        # #303: `count` is people, not rows. One card per person.
+        count = len(g["members"])
         if count > 1:
             plural = "people" if count > 1 else "person"
             verb = {
@@ -636,10 +769,16 @@ async def list_open(db, now: Optional[datetime] = None,
                  "at": None} if _since else None
             )
         # Who acknowledged, for the operator to read now and an inquiry to
-        # read later.
-        acked = [m for m in g["members"] if m.get("ack_at")]
-        g["ack_by"] = acked[0].get("ack_by") if acked else None
-        g["ack_at"] = acked[0].get("ack_at") if acked else None
+        # read later. Only report an ack at the group level when EVERY
+        # member of the group is acked — otherwise a card could show
+        # "acknowledged by X" while still needing action.
+        if g["acknowledged"]:
+            first = g["members"][0]
+            g["ack_by"] = first.get("ack_by")
+            g["ack_at"] = first.get("ack_at")
+        else:
+            g["ack_by"] = None
+            g["ack_at"] = None
         g["people"] = [
             {
                 "id": m.get("id"),
@@ -647,9 +786,14 @@ async def list_open(db, now: Optional[datetime] = None,
                 "who": _who(m),
                 "headline": m.get("headline"),
                 "action": m.get("action"),
-                "acknowledged": bool(m.get("ack_at")),
-                "ack_by": m.get("ack_by"),
-                "ack_at": m.get("ack_at"),
+                # #303: card-level ack reflects all of that person's rows.
+                "acknowledged": not any(
+                    not rr.get("ack_at") for rr in (m.get("_all_rows") or [m])
+                ),
+                "ack_by": (m.get("_all_rows") or [m])[-1].get("ack_by") if
+                    all(rr.get("ack_at") for rr in (m.get("_all_rows") or [m])) else None,
+                "ack_at": (m.get("_all_rows") or [m])[-1].get("ack_at") if
+                    all(rr.get("ack_at") for rr in (m.get("_all_rows") or [m])) else None,
                 "since_report": m.get("since_report"),
                 # #301: labelled, never hidden inside a real-looking row.
                 "is_test": bool(m.get("is_test")),
@@ -663,7 +807,10 @@ async def list_open(db, now: Optional[datetime] = None,
                 "created_at": m.get("created_at"),
                 "re_raised_at": m.get("re_raised_at"),
                 "re_raise_count": int(m.get("re_raise_count") or 0),
-                "story": _story(m),
+                # #303: story is now merged across ALL open rows for this
+                # person, chronologically, so "What happened" carries the
+                # entire history of that person's incidents.
+                "story": _merged_story(m.get("_all_rows") or [m]),
             }
             for m in g["members"]
         ]
@@ -672,6 +819,13 @@ async def list_open(db, now: Optional[datetime] = None,
 
     out.sort(key=lambda g: str(g.get("at") or ""), reverse=True)
     n_lq = len(long_quiet)
+    # #303: the top-of-panel "unacknowledged" number is people, not rows,
+    # so it never disagrees with the number of cards on screen.
+    unacked_people = sum(
+        1 for r in rows
+        if any(not rr.get("ack_at") for rr in (r.get("_all_rows") or [r]))
+    )
+    open_people = len(rows)
     return {
         "generated_at": _iso(n),
         "long_quiet": {
@@ -685,8 +839,8 @@ async def list_open(db, now: Optional[datetime] = None,
             ) if n_lq else None,
             "people": long_quiet,
         },
-        "unacknowledged": len(unacked),
-        "open": len(rows),
+        "unacknowledged": unacked_people,
+        "open": open_people,
         "flood": flood,
         "flood_note": (
             f"More than {FLOOD_LIMIT} alarms in {FLOOD_WINDOW_MINUTES} minutes. "
@@ -694,4 +848,82 @@ async def list_open(db, now: Optional[datetime] = None,
             "the board stays readable. Nothing has been dropped."
         ) if flood else None,
         "groups": out,
+    }
+
+
+def _merged_story(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """#303 — the full history of one person's incidents, in order, built
+    from every open row we have for them.
+
+    Each underlying row contributes its own `_story` steps, prefixed with
+    "Earlier alarm — " for anything that came before the newest raise, so
+    the operator can see at a glance that this person's card is the
+    combined story of more than one alarm event."""
+    if not rows:
+        return []
+    # Sort earliest first.
+    ordered = sorted(rows, key=lambda r: str(r.get("created_at") or ""))
+    steps: List[Dict[str, Any]] = []
+    for idx, r in enumerate(ordered):
+        prefix = "" if idx == len(ordered) - 1 else "Earlier alarm — "
+        for s in _story(r):
+            steps.append({
+                "at": s.get("at"),
+                "words": prefix + str(s.get("words") or ""),
+            })
+    return steps
+
+
+async def dedupe_open_alarms(db, now: Optional[datetime] = None) -> Dict[str, Any]:
+    """#303 (Paul, 2026-08-26): "keep a hidden backup copy of what was
+    merged. Nothing in this project gets permanently deleted."
+
+    This snapshots every open board_alarms row for any device that has
+    more than one open row into `board_alarms_backup`, so if the merge
+    ever looks wrong, the exact pre-merge state is still readable. It
+    does NOT delete or resolve anything — the runtime dedupe happens in
+    `list_open` — so this is safe to run repeatedly on startup.
+
+    Returns a summary the admin endpoint can echo back.
+    """
+    n = _now(now)
+    try:
+        rows = await db.board_alarms.find(
+            {"resolved_at": None}, {"_id": 0},
+        ).to_list(2000)
+    except Exception as e:
+        logging.warning(f"board_alarms dedupe read failed: {e}")
+        return {"scanned": 0, "backed_up": 0, "devices": 0, "error": str(e)}
+    by_dev: Dict[str, List[Dict[str, Any]]] = {}
+    for r in rows:
+        did = r.get("device_id") or ""
+        if not did:
+            continue
+        by_dev.setdefault(did, []).append(r)
+    to_backup: List[Dict[str, Any]] = []
+    devices = 0
+    for did, rlist in by_dev.items():
+        if len(rlist) <= 1:
+            continue
+        devices += 1
+        for r in rlist:
+            snap = dict(r)
+            snap["_snapshot_at"] = _iso(n)
+            snap["_snapshot_reason"] = "303-per-device-dedupe"
+            snap["_source_id"] = r.get("id")
+            # Give the backup a fresh key so re-runs do not collide.
+            snap["_backup_id"] = str(uuid.uuid4())
+            to_backup.append(snap)
+    if to_backup:
+        try:
+            await db.board_alarms_backup.insert_many(to_backup)
+        except Exception as e:
+            logging.warning(f"board_alarms backup write failed: {e}")
+            return {"scanned": len(rows), "backed_up": 0,
+                    "devices": devices, "error": str(e)}
+    return {
+        "scanned": len(rows),
+        "backed_up": len(to_backup),
+        "devices": devices,
+        "at": _iso(n),
     }

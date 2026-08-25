@@ -79,11 +79,17 @@ def test_safe_is_information_and_never_an_alarm():
 
 
 def test_getting_worse_raises_a_second_alarm():
+    """#303 update: one card per person. Getting worse now shows on a
+    single card whose primary kind is `worse` (the newest fact), and the
+    earlier `needs_help` step is preserved inside the card's story."""
     did = _real_id()
     _post_status(did, "trapped", severity="green", name="Carl")
     _post_status(did, "trapped", severity="red", name="Carl")
-    kinds = [m["kind"] for m in _mine(_alarms(), did)]
-    assert "needs_help" in kinds and "worse" in kinds, kinds
+    cards = _mine(_alarms(), did)
+    assert len(cards) == 1, cards
+    assert cards[0]["kind"] == "worse", cards
+    story = " ".join(s["words"] for s in cards[0]["story"]).lower()
+    assert ("needs help" in story or "needs_help" in story), story
 
 
 def test_acknowledge_records_who_and_does_not_clear():
