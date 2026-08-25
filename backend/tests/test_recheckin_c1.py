@@ -342,18 +342,20 @@ def test_recheck_payload_default_is_time_sensitive_not_critical():
     assert p["body"]["check_id"] == "c1"
 
 
-def test_recheck_payload_escalates_when_asked():
-    """#207: the sweeper decides when to escalate. Payload builder
-    honours it via `escalate=True`."""
+def test_recheck_payload_is_never_a_critical_alert():
+    """#207 (closed 2026-08-24): an escalated re-check is still only
+    `time-sensitive`. `critical` belongs to the earthquake alert alone.
+    The escalation is recorded, not shouted."""
     from apns import _build_recheck_payload
     p = _build_recheck_payload(
         "t", "b", check_id="c1", device_id="d1",
         consecutive_missed=3, escalate=True,
     )
     aps = p["aps"]
-    assert aps["interruption-level"] == "critical"
-    assert aps["sound"]["critical"] == 1
-    assert aps["sound"]["name"] == "recheck.wav"
+    assert aps["interruption-level"] == "time-sensitive"
+    assert aps["sound"] == "recheck.wav"
+    assert p["body"]["escalated"] is True
+    assert p["body"]["escalated_to_critical"] is False
 
 
 def test_critical_alert_payload_still_carries_no_category():

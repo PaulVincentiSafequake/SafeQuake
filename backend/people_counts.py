@@ -106,6 +106,11 @@ class Counts:
     never_used: int = 0
     resolved_by_operator: int = 0
     off_board_total: int = 0
+    # #283 (2026-08-24 — Paul): the board used to count these itself, in
+    # JavaScript, from the rows it happened to be showing — so the stat
+    # box and the sentence under it disagreed. Counted here instead, with
+    # everything else, from the same rows.
+    walking_wounded: int = 0
 
     def to_dict(self) -> Dict[str, int]:
         return asdict(self)
@@ -167,6 +172,10 @@ class Board:
     counts: Counts
     notices: List[Dict[str, Any]]
     notes: List[str]
+    # #283: the same rows counted with test entries left out, so a
+    # consumer showing "real people only" never has to recount.
+    counts_without_test: Optional[Counts] = None
+    notes_without_test: Optional[List[str]] = None
 
 
 async def load_board(db, include_test: bool = False, now=None) -> Board:
@@ -251,34 +260,16 @@ async def load_board(db, include_test: bool = False, now=None) -> Board:
     board = [r for r in kept if r["record_state"]["on_working_board"]]
     off_board = [r for r in kept if not r["record_state"]["on_working_board"]]
 
-    counts = _bucket(board, include_test=True)
-    st_of = lambda r: r["record_state"]["state"]  # noqa: E731
-    # Held on the board because an alert is live, but the phone has told us
-    # the app is gone. Counted here, and never inside "not responding".
-    held_removed = [
-        r for r in board
-        if r["record_state"].get("app_removed_at")
-        and r["record_state"].get("count_in_status_buckets") is False
-    ]
-    counts = replace(
-        counts,
-        include_test=include_test,
-        test_filtered_out=filtered,
-        waiting_for_answer=sum(
-            1 for r in board if st_of(r) == rs.WAITING
-            and r["record_state"].get("count_in_status_buckets") is not False),
-        phone_went_dark=sum(
-            1 for r in board if st_of(r) == rs.DARK
-            and r["record_state"].get("count_in_status_buckets") is not False),
-        no_answer=sum(
-            1 for r in board if st_of(r) == rs.NO_ANSWER
-            and r["record_state"].get("count_in_status_buckets") is not False),
-        app_removed=(sum(1 for r in off_board if st_of(r) == rs.APP_REMOVED)
-                     + len(held_removed)),
-        app_removed_held_on_board=len(held_removed),
-        never_used=sum(1 for r in off_board if st_of(r) == rs.NEVER_USED),
-        resolved_by_operator=sum(1 for r in off_board if st_of(r) == rs.RESOLVED),
-        off_board_total=len(off_board),
+    counts = _tally(board, off_board,
+                    include_test=include_test, already_filtered=filtered)
+    # #283: the same rows, counted twice on purpose — once as the operator
+    # works (real people only) and once including test entries. Both are
+    # returned so no consumer has to recount anything to answer "how many
+    # of those are real?", which is how the board and the sentence under
+    # it came to disagree.
+    counts_without_test = (
+        counts if not include_test
+        else _tally(board, off_board, include_test=False, already_filtered=0)
     )
 
     # Mass-dark: many phones stopping at roughly the same moment is a
@@ -287,7 +278,8 @@ async def load_board(db, include_test: bool = False, now=None) -> Board:
     # #276: a confirmed-but-unanswered question is NOT evidence of a
     # network failure — the phone plainly had a network. Only the
     # unconfirmed silences feed the mass-dark test.
-    dark_stamps = [r.get("updated_at") for r in board if st_of(r) == rs.DARK]
+    dark_stamps = [r.get("updated_at") for r in board
+                   if (r["record_state"]["state"]) == rs.DARK]
     reporting_total = sum(1 for r in board if r.get("updated_at"))
     notice = rs.detect_mass_dark(dark_stamps, reporting_total, now=now)
     if notice:
@@ -296,7 +288,96 @@ async def load_board(db, include_test: bool = False, now=None) -> Board:
     return Board(
         board=board, off_board=off_board, counts=counts,
         notices=notices, notes=counts_notes(counts),
+        counts_without_test=counts_without_test,
+        notes_without_test=counts_notes(counts_without_test),
     )
+
+
+def _tally(
+    board_rows: List[Dict[str, Any]],
+    off_board_rows: List[Dict[str, Any]],
+    *,
+    include_test: bool,
+    already_filtered: int,
+) -> Counts:
+    """Every number on every surface, built once from the same rows.
+
+    #283 (2026-08-24 — Paul): three surfaces were each doing their own
+    sum — the call-off toast, the sentence under the dashboard's stat
+    boxes, and the team PDF's breakdown — and all three disagreed with
+    the box beside them. A wrong number on a life-safety screen is a
+    false fact, so there is now exactly one function that produces them
+    and it is called with the population you want, never re-derived.
+
+    `already_filtered` carries test rows dropped BEFORE classification
+    (load_board does that when include_test is False) so the "N test
+    entries hidden" figure stays truthful either way.
+    """
+    import record_state as rs
+
+    def _keep(rows):
+        return rows if include_test else [r for r in rows if not r.get("is_test")]
+
+    board = _keep(board_rows)
+    off_board = _keep(off_board_rows)
+    filtered = (
+        already_filtered
+        + (len(board_rows) - len(board))
+        + (len(off_board_rows) - len(off_board))
+    )
+
+    counts = _bucket(board, include_test=True)
+    st_of = lambda r: r["record_state"]["state"]  # noqa: E731
+    counted = lambda r: r["record_state"].get("count_in_status_buckets") is not False  # noqa: E731
+    # Held on the board because an alert is live, but the phone has told us
+    # the app is gone. Counted here, and never inside "not responding".
+    held_removed = [
+        r for r in board
+        if r["record_state"].get("app_removed_at") and not counted(r)
+    ]
+    return replace(
+        counts,
+        include_test=include_test,
+        test_filtered_out=filtered,
+        waiting_for_answer=sum(
+            1 for r in board if st_of(r) == rs.WAITING and counted(r)),
+        phone_went_dark=sum(
+            1 for r in board if st_of(r) == rs.DARK and counted(r)),
+        no_answer=sum(
+            1 for r in board if st_of(r) == rs.NO_ANSWER and counted(r)),
+        app_removed=(sum(1 for r in off_board if st_of(r) == rs.APP_REMOVED)
+                     + len(held_removed)),
+        app_removed_held_on_board=len(held_removed),
+        never_used=sum(1 for r in off_board if st_of(r) == rs.NEVER_USED),
+        resolved_by_operator=sum(1 for r in off_board if st_of(r) == rs.RESOLVED),
+        off_board_total=len(off_board),
+        walking_wounded=sum(1 for r in board if is_walking_wounded(r)),
+    )
+
+
+def is_walking_wounded(row: Dict[str, Any]) -> bool:
+    """Someone who reported an injury but can get themselves out.
+
+    They stay inside the trapped total — they did report an injury — and
+    are also counted separately, because they are the number who will
+    need treating somewhere rather than digging out (#297-agent).
+
+    #289 (2026-08-24 — Paul): "we do not know whether they can get out"
+    is NOT walking wounded. A person who chose MINOR and then never
+    answered the way-out question used to land in the lowest-priority
+    list on an assumption. They stay on the working board until somebody
+    knows.
+    """
+    if effective_status(row) != "trapped":
+        return False
+    sev = (row.get("severity") or "").lower()
+    if sev not in ("", "green"):
+        return False
+    if row.get("needs_extraction"):
+        return False
+    if (row.get("egress") or "") == "not_answered":
+        return False
+    return (row.get("mobility") or "") != "trapped"
 
 
 def moved_by_words(row: Dict[str, Any]) -> str:
@@ -345,6 +426,32 @@ def counts_notes(c: Counts) -> List[str]:
         "That number leaves out records we have set aside. They are listed "
         "under \u201cNot on the working board\u201d.",
     ]
+    # #283 (2026-08-24 — Paul): these three used to be written by hand on
+    # the dashboard, under a sentence claiming "all three are counted in
+    # the numbers above" — which read as a breakdown of the box beside
+    # them and never matched it. Silence is not a status: a person who
+    # reported safe an hour ago and has said nothing since is quiet AND
+    # safe. So the lines now say which numbers they sit inside, and say
+    # out loud that they are not extra people.
+    quiet = c.waiting_for_answer + c.no_answer + c.phone_went_dark
+    if quiet:
+        notes.append(
+            f"Gone quiet: {quiet} of the {c.total} "
+            + ("person" if c.total == 1 else "people")
+            + " on the board."
+        )
+        notes.append(f"\u2014 waiting for an answer: {c.waiting_for_answer}.")
+        notes.append(f"\u2014 got our question, no answer: {c.no_answer}.")
+        notes.append(
+            "\u2014 we asked, no answer, and their phone never confirmed "
+            f"our question arrived: {c.phone_went_dark}."
+        )
+        notes.append(
+            "Those "
+            + ("one is" if quiet == 1 else f"{quiet} are")
+            + " already counted above, spread across Safe, Trapped and Not "
+            "responding. They are not extra people."
+        )
     if c.app_removed:
         thing = "record" if c.app_removed == 1 else "records"
         notes.append(

@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 
 from auth import (
     AuthError,
+    decode_app_jwt,
     issue_app_jwt,
     require_role,
     resolve_principal,
@@ -148,6 +149,53 @@ async def auth_google(payload: GoogleLoginPayload):
     # particular the newly-set google_sub on first login).
     user = await db.users.find_one({"_id": user["_id"]})
     token, exp = issue_app_jwt(user)
+    return {
+        "token": token,
+        "expires_at": exp.isoformat(),
+        "user": _user_public(user),
+    }
+
+
+@api_router.post("/auth/refresh")
+async def auth_refresh(request: Request):
+    """Renew a still-valid dashboard session (#135).
+
+    Paul, 2026-08-24: "It signed me out in the middle of a task."
+
+    The dashboard calls this while the operator is working, before the
+    current token expires. It exists so the CLOCK never signs anybody out
+    while they are using the board — only a real reason does: account
+    disabled, role changed, session revoked, account expired, or the
+    absolute session cap for the shift reached.
+
+    Deliberate properties:
+      * An ALREADY-EXPIRED token cannot be renewed. Renewal is for an
+        active session, not a resurrection.
+      * `auth_iat` (the moment the human signed in with Google) is carried
+        through unchanged, so renewal slides the expiry forward but can
+        never push it past the absolute cap.
+      * Every check `resolve_principal` performs on a normal admin request
+        is performed here too — allowlist, disabled, session_version,
+        account expiry. Renewal is not a way around revocation.
+      * The legacy shared token has no session to renew and is refused.
+    """
+    auth_header = request.headers.get("authorization", "")
+    if not auth_header.lower().startswith("bearer "):
+        raise AuthError("No session to renew", status_code=401)
+    claims = decode_app_jwt(auth_header.split(" ", 1)[1].strip())
+
+    # Same checks as any other authenticated call — disable / demote /
+    # revoke / expiry all take effect here.
+    principal = await resolve_principal(
+        request, request.headers.get("x-admin-token"), ADMIN_TRIGGER_PASSWORD, db,
+    )
+    if principal.get("is_legacy"):
+        raise AuthError("Legacy shared token has no session to renew", status_code=400)
+
+    user = await db.users.find_one({"google_sub": claims["sub"]})
+    if not user:
+        raise AuthError("Access revoked", status_code=403)
+    token, exp = issue_app_jwt(user, auth_iat=claims.get("auth_iat") or claims.get("iat"))
     return {
         "token": token,
         "expires_at": exp.isoformat(),

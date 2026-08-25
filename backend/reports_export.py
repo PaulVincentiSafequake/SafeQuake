@@ -116,10 +116,54 @@ async def _get_authority_name() -> str:
     when no specific authority has been configured — this is intentional:
     naming an authority we have no agreement with (e.g. "Malta Civil
     Protection") in a distributable PDF creates a legal + reputational
-    exposure that a generic phrase does not."""
+    exposure that a generic phrase does not.
+
+    #297 (2026-08-24 — Paul, live test): "Authority: Emergency test name"
+    was printed on a real downloadable public report. It was not an
+    unfilled template — somebody typed that during a test and every
+    export faithfully repeated it for weeks. A placeholder-looking value
+    now falls back to the neutral wording instead of being published, and
+    the settings endpoint refuses to accept one in the first place. Two
+    layers on purpose: the refusal protects new mistakes, the fallback
+    protects the value already saved in a live database.
+    """
     settings = await _get_dashboard_settings()
     name = (settings.get("authority_name") or "").strip()
-    return name or "the responsible authorities"
+    if not name or looks_like_a_placeholder(name):
+        return "the responsible authorities"
+    return name
+
+
+# Words that mean "somebody was trying this out". A distributable report is
+# read by families, journalists and possibly a court; none of them can tell
+# a placeholder from a real agency name, so we refuse to print one.
+_PLACEHOLDER_WORDS = (
+    "test", "testing", "example", "sample", "demo", "dummy", "placeholder",
+    "tbd", "tba", "todo", "xxx", "asdf", "foo", "bar", "lorem",
+)
+_PLACEHOLDER_PHRASES = ("your name", "name here", "enter ")
+
+
+def looks_like_a_placeholder(value: str) -> bool:
+    """True when a typed authority name reads as a test entry.
+
+    Matched on WORD boundaries, not substrings: "Attest Rescue" contains
+    the letters of "test" and is somebody's real name. Refusing a real
+    agency would be its own kind of wrong.
+
+    Deliberately conservative on the other side too: a name is refused if
+    it is a single character or has no letters or digits in it, because
+    that is nobody's agency either.
+    """
+    v = (value or "").strip().lower()
+    if len(v) < 2:
+        return True
+    if not any(ch.isalnum() for ch in v):
+        return True
+    if any(p in v for p in _PLACEHOLDER_PHRASES):
+        return True
+    words = set(_re.findall(r"[a-z0-9]+", v))
+    return bool(words & set(_PLACEHOLDER_WORDS))
 
 
 async def _get_authority_cooperation_claim() -> bool:
@@ -1155,7 +1199,11 @@ async def export_audit_log_csv(
     _c = _board_csv.counts
     writer.writerow(_pad(["people_on_working_board", str(_c.total)]))
     writer.writerow(_pad(["waiting_for_an_answer", str(_c.waiting_for_answer)]))
-    writer.writerow(_pad(["phone_went_dark", str(_c.phone_went_dark)]))
+    # #291: the row name said "phone_went_dark", which asserts something
+    # about the phone we do not know. All we know is that we asked and
+    # heard nothing, and the phone never confirmed our question arrived.
+    writer.writerow(_pad(["asked_no_answer_delivery_not_confirmed",
+                          str(_c.phone_went_dark)]))
     writer.writerow(_pad(["no_answer", str(_c.no_answer)]))
     writer.writerow(_pad(["not_on_working_board_app_removed", str(_c.app_removed)]))
     writer.writerow(_pad(["not_on_working_board_never_used_app", str(_c.never_used)]))
@@ -1695,16 +1743,25 @@ async def casualty_report_operational_pdf(
         ["Status not yet reported",       str(current_counts.unknown)],
         ["Total",                         str(current_counts.total)],
     ]
-    # ── #268 (2026-08-21 — Paul): "Every number must say what it counts
-    # and what it leaves out." These rows are indented and do NOT add
-    # into the Total above: the first two describe silence among the
-    # people already counted above, and the last three are records
-    # deliberately NOT on the working board at all.
+    # ── #268 / #283 (Paul): "Every number must say what it counts and
+    # what it leaves out." These rows are indented and do NOT add into the
+    # Total above. The first three describe SILENCE among the people
+    # already counted above — silence is not a status, so a person who
+    # reported safe an hour ago and has said nothing since is quiet AND
+    # safe, and appears in both places. Paul read the old heading ("inside
+    # the rows above") as a breakdown of the "Not responding" line
+    # directly above it, and 0 + 1 + 6 = 7 flatly contradicted the 1
+    # printed there. The heading now names the total and says out loud
+    # that these are not extra people.
+    _quiet = (current_counts.waiting_for_answer + current_counts.no_answer
+              + current_counts.phone_went_dark)
     summary_data[-1:-1] = [
-        ["Silence right now — inside the rows above:", ""],
+        [f"Gone quiet — {_quiet} of the {current_counts.total} above, "
+         "not extra people:", ""],
         ["  — waiting for an answer",     str(current_counts.waiting_for_answer)],
         ["  — got our question, no answer", str(current_counts.no_answer)],
-        ["  — phone went dark",           str(current_counts.phone_went_dark)],
+        ["  — we asked, no answer, arrival not confirmed",
+         str(current_counts.phone_went_dark)],
         ["Not on the working board — NOT in the rows above:", ""],
         ["  — app removed from this phone", str(current_counts.app_removed)],
         ["  — never used the app",          str(current_counts.never_used)],

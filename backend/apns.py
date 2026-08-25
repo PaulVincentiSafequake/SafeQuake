@@ -407,23 +407,24 @@ def _build_recheck_payload(
 ) -> dict:
     """APNs payload for a periodic re-check of someone who reported trapped.
 
-    #207 (Batch 7): re-checks are now sent at `time-sensitive` interruption
-    level by default. `time-sensitive` still breaches Focus / Do Not
-    Disturb — which is what a trapped person needs — WITHOUT the full
-    Critical Alert treatment that ignores the physical silent switch and
-    plays at full volume regardless of user preferences.
+    #207 (closed 2026-08-24 — Paul: "remove interruption-level: critical
+    from automated re-check pushes, keep it only for the first real
+    alert"). EVERY automated re-check — including one sent after several
+    unanswered asks — goes out at `time-sensitive`. `time-sensitive` still
+    breaches Focus / Do Not Disturb, which is what a trapped person needs.
+    `critical` now belongs to exactly one thing: the earthquake alert
+    itself (`_build_critical_payload`). Nothing this function can be asked
+    to do produces a Critical Alert.
 
-    Escalation to `critical` happens EXACTLY ONCE per person per incident,
-    driven by the CALLER via the `escalate` flag (never by this function
-    guessing from the count). The sweeper sets `escalate=True` only when:
-      1. `consecutive_missed >= 3`, AND
-      2. the device row does NOT already carry a `critical_escalated`
-         sticky flag from an earlier escalation in this same trapped run.
-    Once escalated, the sticky flag is written back and subsequent
-    sweeps send at `time-sensitive` again — no matter how many further
-    checks go unanswered. The intent: breach the silent switch ONCE, at
-    the moment silence turns from ambiguous into worrying, and never
-    train the user to mute the whole app.
+    Why the rule is absolute rather than "once per incident": a repeating
+    full-volume siren that ignores the silent switch teaches people to mute
+    the whole app, and it is also the fastest route to Apple revoking the
+    Critical Alert entitlement — which would take the siren away from the
+    one push that genuinely needs it.
+
+    `escalate` is kept as a caller signal, but it now only marks the send
+    as escalated for the diagnostics panel and the audit trail. The
+    interruption level and the sound do not change.
 
     Entitlement justification (agreed with Paul 2026-08-17, quote verbatim in
     any App Review response): this is sent ONLY to a person who has themselves
@@ -441,14 +442,11 @@ def _build_recheck_payload(
     time-critical answer, and it must not be the easiest button to hit by
     accident.
     """
-    if escalate:
-        sound = {"critical": 1, "name": "recheck.wav", "volume": 0.8}
-        interruption = "critical"
-    else:
-        # Same short chime file, played at normal volume through
-        # `time-sensitive` — bypasses Focus/DND but not the silent switch.
-        sound = "recheck.wav"
-        interruption = "time-sensitive"
+    # #207: one level for every automated re-check. Same short chime file,
+    # played at normal volume through `time-sensitive` — bypasses Focus/DND
+    # but never the silent switch, and never a Critical Alert.
+    sound = "recheck.wav"
+    interruption = "time-sensitive"
 
     body_data: dict = {
         # kind is REQUIRED — the mobile handler routes by this field, and a
@@ -459,9 +457,15 @@ def _build_recheck_payload(
         "device_id": device_id,
         "battery_saving": battery_saving,
         # Diagnostic breadcrumb — appears on the tremor-diagnostics panel
-        # so the operator can see WHY a specific check escalated.
+        # so the operator can see how many asks went unanswered, and
+        # whether the sweeper considered this send an escalation. Neither
+        # field changes how loudly the push arrives (#207).
         "consecutive_missed": int(consecutive_missed or 0),
-        "escalated_to_critical": bool(escalate),
+        "escalated": bool(escalate),
+        # Kept, always false: nothing in the re-check path is a Critical
+        # Alert any more. Explicitly present so a diagnostics reader can
+        # see the answer rather than infer it from a missing key.
+        "escalated_to_critical": False,
     }
     if ladder_step is not None:
         body_data["ladder_step"] = ladder_step

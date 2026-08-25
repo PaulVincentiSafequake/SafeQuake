@@ -597,8 +597,12 @@ export default function AlertScreen() {
     severity: TriageSeverity | null = null,
     mobility: Mobility | null = null,
     egress: Egress | null = null,
+    // #289 (2026-08-24 — Paul): a follow-up answer UPDATES a report that
+    // has already been sent. Without this the guard below would swallow
+    // it, because the first send happens the moment a severity is chosen.
+    isFollowUp = false,
   ) => {
-    if (status === "sending" || status === "sent") return;
+    if (!isFollowUp && (status === "sending" || status === "sent")) return;
     // 1) IMMEDIATELY silence the siren and cancel pending reminders. The user
     //    tapping I'm Safe / a triage option is an explicit, unambiguous
     //    intent to stop the alarm — it must not wait for GPS acquisition,
@@ -819,9 +823,21 @@ export default function AlertScreen() {
     stopSiren();
     setTriageOpen(false);
 
+    // #289 (2026-08-24 — Paul, live test): "a real MINOR report didn't
+    // appear anywhere on the board on first submission". It never reached
+    // the board because NOTHING was sent until the follow-up question was
+    // answered — and both sheets can be left, which lost the whole report.
+    // Both sheets even promised "This does not delay your report" while
+    // being the thing delaying it.
+    //
+    // So the report goes NOW, on the severity tap, and the follow-up
+    // answer updates it. A person who has told us they are hurt is on the
+    // board from that moment, whatever they do next.
     if (severity === "yellow") {
-      // Only yellow needs the follow-up — mobility is genuinely ambiguous.
+      // Only yellow needs the mobility follow-up — mobility is genuinely
+      // ambiguous for a serious-but-stable injury.
       setPendingSeverity(severity);
+      submitCheckIn("trapped", severity, null);
       setMobilityOpen(true);
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
       return;
@@ -834,13 +850,16 @@ export default function AlertScreen() {
       // able to give it. NOT extended to red: red already implies immobility
       // and gets maximum response anyway. Yellow keeps its mobility question.
       setPendingSeverity(severity);
+      submitCheckIn("trapped", severity, "mobile", "not_answered");
       setEgressOpen(true);
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
       return;
     }
 
     // Red → seriously injured / can't move → mobility is "trapped".
-    submitCheckIn("trapped", severity, "trapped");
+    // Passed as a follow-up so that changing MINOR or SERIOUS to
+    // IMMEDIATE after the first send still gets through.
+    submitCheckIn("trapped", severity, "trapped", null, true);
   };
 
   const chooseMobility = (mobility: Mobility) => {
@@ -851,7 +870,7 @@ export default function AlertScreen() {
     setMobilityOpen(false);
     const sev = pendingSeverity;
     setPendingSeverity(null);
-    submitCheckIn("trapped", sev, mobility);
+    submitCheckIn("trapped", sev, mobility, null, true);
   };
 
   const chooseEgress = (egress: Egress) => {
@@ -859,11 +878,13 @@ export default function AlertScreen() {
     setEgressOpen(false);
     const sev = pendingSeverity;
     setPendingSeverity(null);
-    submitCheckIn("trapped", sev, "mobile", egress);
+    submitCheckIn("trapped", sev, "mobile", egress, true);
   };
 
-  // Back arrow inside the mobility sheet: reopen severity picker so the
-  // user can re-answer without losing their place in the flow.
+  // Back arrow inside a follow-up sheet: reopen the severity picker so the
+  // user can re-answer without losing their place in the flow. #289: the
+  // report has ALREADY been sent by this point, so nothing is lost either
+  // way — changing the severity simply sends an update.
   const backToSeverity = () => {
     stopSiren();
     setMobilityOpen(false);
@@ -1430,7 +1451,8 @@ export default function AlertScreen() {
               <Text style={styles.triageTitle}>Can you move?</Text>
               <Text style={styles.triageSubtitle}>
                 Tell rescuers whether you&apos;re free to move or physically
-                pinned. This does not delay your report.
+                pinned. Your report is already sent — this adds one
+                detail to it.
               </Text>
 
               <TriageOption
@@ -1485,7 +1507,8 @@ export default function AlertScreen() {
               <Text style={styles.triageTitle}>Can you get out on your own?</Text>
               <Text style={styles.triageSubtitle}>
                 Not about your injuries — about the building. A jammed door or
-                blocked stairwell counts as no. This does not delay your report.
+                blocked stairwell counts as no. Your report is already sent
+                — this adds one detail to it.
               </Text>
 
               <TriageOption

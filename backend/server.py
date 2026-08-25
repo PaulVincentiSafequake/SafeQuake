@@ -223,7 +223,12 @@ class StatusInPayload(BaseModel):
     # just told us they can walk, and "minor injury but cannot get out" was
     # otherwise invisible to the operator, so nobody was dispatched with
     # cutting gear.
-    egress: Optional[str] = Field(default=None, pattern=r"^(can_exit|cannot_exit)$")
+    # #289 (2026-08-24 — Paul): `not_answered` is a real answer. The phone
+    # sends it when someone chose a severity and then left the "can you get
+    # out?" question, so the board can say "we do not know" instead of
+    # quietly filing them as walking wounded — the lowest priority there is.
+    egress: Optional[str] = Field(
+        default=None, pattern=r"^(can_exit|cannot_exit|not_answered)$")
 
     # Optional first name a responder should see next to the pin. Asked once
     # at first app launch and editable at any time from the main screen.
@@ -634,8 +639,16 @@ async def get_devices(
         # a network failure rather than many missing people).
         "notices": board.notices,
         # "What this counts and what it leaves out", in words.
+        # #283: BOTH populations, counted server-side by the same
+        # function. `counts` includes test entries (it matches `devices`,
+        # which also carries them, each flagged `is_test`);
+        # `counts_without_test` is what the operator sees by default.
+        # The dashboard picks one — it no longer sums anything itself.
         "counts": board.counts.to_dict(),
         "count_notes": board.notes,
+        "counts_without_test": (board.counts_without_test.to_dict()
+                                if board.counts_without_test else None),
+        "count_notes_without_test": board.notes_without_test,
     }
 
 
@@ -676,7 +689,24 @@ async def ack_board_alarms(
 
     ids = payload.get("ids") or []
     group_key = str(payload.get("group_key") or "").strip()
-    if group_key and not ids:
+    # #286 (Paul, 2026-08-24): "47 individual acknowledge buttons is not
+    # usable." At mass-casualty scale the operator needs one action that
+    # silences the board so they can start working the list. `all: true`
+    # acknowledges every alarm that is currently open and unacknowledged.
+    # It changes nothing else: every alarm stays on the board, highlighted,
+    # and every row still records WHO acknowledged it and WHEN, so a bulk
+    # acknowledgement reads back in an inquiry exactly like 47 individual
+    # ones would.
+    ack_all = bool(payload.get("all"))
+    if ack_all and not ids:
+        rows = await db.board_alarms.find(
+            {"resolved_at": None, "ack_at": None}, {"_id": 0, "id": 1},
+        ).to_list(1000)
+        ids = [r.get("id") for r in rows if r.get("id")]
+        if not ids:
+            return {"status": "ok", "acknowledged": 0,
+                    "acknowledged_by": (principal.get("email") if principal else None) or "unknown"}
+    elif group_key and not ids:
         rows = await db.board_alarms.find(
             {"group_key": group_key, "resolved_at": None}, {"_id": 0, "id": 1},
         ).to_list(500)
@@ -1557,10 +1587,21 @@ async def dashboard_settings_get():
     authority name if set, and last-updated metadata. Called on every
     dashboard load — kept small and fast (single-doc find)."""
     s = await _get_dashboard_settings()
+    from reports_export import looks_like_a_placeholder
+    saved = (s.get("authority_name") or "").strip() or None
+    # #297: a name already saved before the check existed is still in the
+    # database. The reports refuse to print it, so the settings panel has
+    # to say so — otherwise the operator sees it listed as current and
+    # assumes it is on their documents.
+    ignored = bool(saved and looks_like_a_placeholder(saved))
     # Deliberately DON'T include _id or updated_by metadata in the
     # anonymous public response — that's operator identity.
     return {
-        "authority_name": s.get("authority_name") or None,
+        "authority_name": saved,
+        "authority_name_ignored": ignored,
+        "authority_name_printed": (
+            "the responsible authorities" if (ignored or not saved) else saved
+        ),
         "logo_b64": s.get("logo_b64") or None,
         "logo_mime": s.get("logo_mime") or None,
     }
@@ -1678,6 +1719,24 @@ async def dashboard_settings_set_authority(
             upsert=True,
         )
         return {"ok": True, "authority_name": None}
+    # #297 (2026-08-24 — Paul): "Emergency test name" reached a real
+    # downloadable public report and stayed there. This name is printed on
+    # documents read by families, journalists and possibly a court, and
+    # none of them can tell a placeholder from a real agency. So a
+    # test-looking name is refused here, in plain words, rather than
+    # published.
+    from reports_export import looks_like_a_placeholder
+    if looks_like_a_placeholder(name):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"\u201c{name}\u201d reads like a test entry, and this name is "
+                "printed on reports that go outside this room. Type the real "
+                "name of the authority, or leave it empty \u2014 the reports "
+                "then say \u201cthe responsible authorities\u201d, which is "
+                "always true."
+            ),
+        )
     await db.dashboard_settings.update_one(
         {"_id": DASHBOARD_SETTINGS_ID},
         {"$set": {
@@ -3398,9 +3457,19 @@ async def _stand_down_split() -> Dict[str, Any]:
     # people in the dialog would bury the one real name in it, which is
     # the whole point of the list.
     test_staying = sum(1 for r in staying_rows if r.get("is_test"))
+    # #283 (2026-08-24 — Paul): the CONFIRM dialog split real people from
+    # test entries correctly, and then the result toast reported one
+    # collapsed total — "13 phones", then "14" — when there was one real
+    # person and thirteen test entries. Same split, same source, both
+    # sides of the action.
+    test_ids = {str(r.get("device_id")) for r in board.board if r.get("is_test")}
+    test_ids |= {str(r.get("device_id")) for r in board.off_board if r.get("is_test")}
+    clearing_test = sum(1 for d in clearing if str(d.get("user_id")) in test_ids)
     return {
         "clearing": clearing,
         "clearing_count": len(clearing),
+        "clearing_test_count": clearing_test,
+        "clearing_real_count": len(clearing) - clearing_test,
         "staying_count": len(staying_rows),
         "staying_real_count": len(people),
         "staying_test_count": test_staying,
@@ -3508,7 +3577,12 @@ async def alert_stand_down(
         # #274: the exact split, in the record, so an inquiry can see who
         # was cleared and who was deliberately left on the working board.
         "cleared_count": len(ios),
+        # #283: real people and test entries, never one collapsed number.
+        "cleared_real_count": split["clearing_real_count"],
+        "cleared_test_count": split["clearing_test_count"],
         "kept_on_board_count": split["staying_count"],
+        "kept_on_board_real_count": split["staying_real_count"],
+        "kept_on_board_test_count": split["staying_test_count"],
         "kept_on_board": split["staying_people"],
         # #296: proof in the record that the phones' own reminder ladders
         # were called off too, not just the check-in screen.
@@ -3521,7 +3595,11 @@ async def alert_stand_down(
         "recipients": len(ios),
         "reason": body.reason or "false_alarm",
         "cleared_count": len(ios),
+        "cleared_real_count": split["clearing_real_count"],
+        "cleared_test_count": split["clearing_test_count"],
         "kept_on_board_count": split["staying_count"],
+        "kept_on_board_real_count": split["staying_real_count"],
+        "kept_on_board_test_count": split["staying_test_count"],
         "kept_on_board": split["staying_people"],
         "reminders_cancelled": reminders_cancelled,
     }
@@ -3545,6 +3623,8 @@ async def alert_stand_down_preview(
     return {
         "total": split["total_phones"],
         "clearing_count": split["clearing_count"],
+        "clearing_real_count": split["clearing_real_count"],
+        "clearing_test_count": split["clearing_test_count"],
         "staying_count": split["staying_count"],
         "staying_real_count": split["staying_real_count"],
         "staying_test_count": split["staying_test_count"],

@@ -272,3 +272,41 @@ agent_communication:
       was matching the B1 inside random short codes like FB1FC — now a
       word-boundary match, which is the same false positive noted in
       iteration 34.
+
+## 2026-08-24 — Paul's live test day, batch 1 (#296 #207 #283 #291 #289/#290 #297)
+
+  - agent: "main"
+    message: |
+      983 backend tests passing, 0 failing. Every fix below was verified
+      against the running preview backend, not just unit-tested.
+
+      #296/#207 — repeating CRITICAL "Are you safe?". The ladder is LOCAL
+      to the phone (8 notifications, 90s apart). Stand-down now sends the
+      silent cancel push itself (works on v1.0.44 phones already in the
+      field), the phone cancels on any stand-down path, and only the FIRST
+      reminder is critical. See tests/test_reminders_cancelled_on_stand_down_296.py.
+
+      #283 — one source for every count. people_counts._tally() is the only
+      producer; /api/devices returns both populations; the dashboard's
+      computeCounts() is DELETED and a test fails if arithmetic reappears in
+      the pill mapper. NOTE for future work: if you add a number to the
+      board, add it to Counts, not to the JavaScript.
+
+      #291 — "Phone went dark" is gone from every user-facing surface. A
+      broadcast alert no longer reads as having asked someone personally
+      (that is why rescued people were showing as dark after a test alert).
+      States and counts unchanged on purpose.
+
+      #289/#290 — the phone now sends the report on the severity tap, and
+      the follow-up sheet answer is an update. egress="not_answered" is a
+      new value in both StatusInPayload and the Egress type, and it keeps a
+      person OFF the walking wounded list. Board list rule and server count
+      rule are kept identical by test.
+
+      #297 — a test-looking authority name is refused on save and never
+      printed if already saved. Word-boundary matching ("Attest Rescue" is
+      a real name).
+
+      Dashboard pushed to PaulVincentiSafequake/SafeQuake main (f60da31).
+      NOT verifiable here: notification behaviour and haptics need a real
+      build on a device.

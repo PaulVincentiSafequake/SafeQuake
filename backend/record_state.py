@@ -105,7 +105,13 @@ RESOLVED = "resolved_by_operator"
 # from every operator-facing surface by this table.
 LABELS: Dict[str, str] = {
     WAITING: "Waiting for an answer",
-    DARK: "Phone went dark",
+    # #291 (2026-08-24 — Paul, live test): "Phone went dark" asserts a
+    # fact about the phone that we do not have. All we know is that we
+    # asked and heard nothing, and that the phone never confirmed our
+    # question arrived — which is what this now says. Paul found the old
+    # wording on two RESCUED people's map cards, where it read as an
+    # emergency about someone already found.
+    DARK: "We asked, no answer",
     # #276: the worrying one. Their phone confirmed our question arrived
     # and nobody has answered it. Said in six words an operator can repeat
     # over a radio after hearing it once.
@@ -299,7 +305,7 @@ def classify(
             "We could not reach this phone. "
             f"Apple gave the reason: {dead_reason or 'not given'}. "
             "That does not prove the app was removed. "
-            "So we treat this as a phone that went dark."
+            "So we treat this person as still needing an answer."
         )
 
     # #271: what did WE ask, and when? Two sources: the last broadcast
@@ -314,6 +320,13 @@ def classify(
     asked_since_last_report = bool(
         (last_ask and (not last or last < last_ask)) or rc_missed >= 1
     )
+    # #291: a broadcast alert goes to everyone; asking ONE person to check
+    # in is a different act with a different meaning. Silence after a
+    # broadcast is not evidence that we cannot reach that phone — nobody
+    # has tried. The operator's next step is to ask them, so the card says
+    # so instead of announcing a phone that "went dark".
+    direct_ask_at = parse_dt(asks.get("last_at"))
+    broadcast_only_ask = bool(last_ask and not direct_ask_at and rc_missed == 0)
     _asked_words = f" at {_clock(last_ask)}" if last_ask else ""
     ask_count = int(asks.get("count") or 0)
     if ask_count > 1:
@@ -370,6 +383,16 @@ def classify(
                     f"Nobody has answered for {dur_words(unanswered_minutes)}. "
                     f"Last heard {_clock(last)}. "
                     "The status and place shown are the last we knew."
+                )
+            if broadcast_only_ask:
+                return DARK, (
+                    f"The alert at {_clock(last_ask)} went to this phone. "
+                    "Nobody has asked this person on their own since. "
+                    "Their phone never confirmed the alert arrived, so we "
+                    "cannot tell whether they saw it. "
+                    f"Last heard {_clock(last)}. "
+                    "The status and place shown are the last we knew. "
+                    "Ask them to check in to find out."
                 )
             return DARK, (
                 f"We asked{_asked_words}. No answer for "
@@ -430,7 +453,10 @@ def classify(
                 "That is not a message saying they are safe."
             )
         return RecordState(
-            state=state, label=_label(state, last), detail=detail,
+            state=state,
+            label=_label(state, last, last_ask=last_ask,
+                         broadcast_only_ask=broadcast_only_ask),
+            detail=detail,
             on_working_board=True, held_reason=held, off_board_reason=None,
             silent_minutes=silent_minutes, dark_after_minutes=dark_after,
             ever_needed_help=True, app_removed_at=removed_at,
@@ -470,7 +496,8 @@ def classify(
             state, detail = _clock_state()
             return RecordState(
                 state=state or WAITING,
-                label=_label(state or WAITING, last),
+                label=_label(state or WAITING, last, last_ask=last_ask,
+                             broadcast_only_ask=broadcast_only_ask),
                 detail=detail,
                 on_working_board=True,
                 held_reason=(
@@ -511,7 +538,10 @@ def classify(
     # 5 ── ordinary case: the clock decides, and nobody leaves the board.
     state, detail = _clock_state()
     return RecordState(
-        state=state, label=_label(state, last), detail=detail,
+        state=state,
+        label=_label(state, last, last_ask=last_ask,
+                     broadcast_only_ask=broadcast_only_ask),
+        detail=detail,
         on_working_board=True, held_reason=None, off_board_reason=None,
         silent_minutes=silent_minutes, dark_after_minutes=dark_after,
         ever_needed_help=False, app_removed_at=removed_at,
@@ -519,13 +549,26 @@ def classify(
     )
 
 
-def _label(state: Optional[str], last: Optional[datetime]) -> str:
+def _label(
+    state: Optional[str],
+    last: Optional[datetime],
+    *,
+    last_ask: Optional[datetime] = None,
+    broadcast_only_ask: bool = False,
+) -> str:
     """#271: "Not asked since 21:08" — the label names the time, because
     the state describes what WE have done, not what the person has done.
     Paul: "'Quiet' invites the reader to imagine something is wrong."
+
+    #291: when the only thing that has asked is a BROADCAST alert, the
+    label says exactly that. The state stays the same, so the counts and
+    the alarms are untouched — this is about not printing a fact we do
+    not have.
     """
     if state == NOT_ASKED:
         return f"Not asked since {_clock(last)}" if last else "Never asked"
+    if state == DARK and broadcast_only_ask and last_ask:
+        return f"Not asked since the alert at {_clock(last_ask)}"
     return LABELS.get(state, "Answering")
 
 

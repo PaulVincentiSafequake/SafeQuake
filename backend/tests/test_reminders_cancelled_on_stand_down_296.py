@@ -33,6 +33,20 @@ def client():
     return TestClient(app)
 
 
+def _split(clearing, staying_real=0, staying_test=0, staying_people=None):
+    """The shape `_stand_down_split()` returns, with #283's real/test split."""
+    return {
+        "clearing": clearing,
+        "clearing_count": len(clearing),
+        "clearing_real_count": len(clearing),
+        "clearing_test_count": 0,
+        "staying_count": staying_real + staying_test,
+        "staying_real_count": staying_real,
+        "staying_test_count": staying_test,
+        "staying_people": staying_people or [],
+    }
+
+
 def _fake_events(devices, delivered=True):
     return {
         "payload": {"aps": {"content-available": 1}},
@@ -65,11 +79,9 @@ class TestStandDownCancelsReminders:
             sent_to["reason"] = kw.get("reason")
             return _fake_events(devices)
 
-        with patch("server._stand_down_split", new=AsyncMock(return_value={
-            "clearing": two_clearable_phones,
-            "staying_count": 0,
-            "staying_people": [],
-        })), patch("apns.send_stand_down", new=_fake_stand_down), \
+        with patch("server._stand_down_split",
+                   new=AsyncMock(return_value=_split(two_clearable_phones))), \
+                patch("apns.send_stand_down", new=_fake_stand_down), \
                 patch.object(server, "send_silent_cancel_reminders", new=_fake_cancel):
             r = client.post(
                 "/api/admin/alert/stand-down", headers=HDR,
@@ -98,12 +110,10 @@ class TestStandDownCancelsReminders:
                 ],
             }
 
-        with patch("server._stand_down_split", new=AsyncMock(return_value={
-            "clearing": two_clearable_phones,
-            "staying_count": 0,
-            "staying_people": [],
-        })), patch("apns.send_stand_down",
-                   new=AsyncMock(return_value=_fake_events(two_clearable_phones))), \
+        with patch("server._stand_down_split",
+                   new=AsyncMock(return_value=_split(two_clearable_phones))), \
+                patch("apns.send_stand_down",
+                      new=AsyncMock(return_value=_fake_events(two_clearable_phones))), \
                 patch.object(server, "send_silent_cancel_reminders", new=_fake_cancel):
             r = client.post(
                 "/api/admin/alert/stand-down", headers=HDR,
@@ -124,11 +134,10 @@ class TestStandDownCancelsReminders:
             called["cancel"] = True
             return {"payload": None, "events": []}
 
-        with patch("server._stand_down_split", new=AsyncMock(return_value={
-            "clearing": [],
-            "staying_count": 1,
-            "staying_people": [{"short_code": "AB12C", "why": "asked for help"}],
-        })), patch.object(server, "send_silent_cancel_reminders", new=_fake_cancel):
+        with patch("server._stand_down_split", new=AsyncMock(return_value=_split(
+                [], staying_real=1,
+                staying_people=[{"short_code": "AB12C", "why": "asked for help"}]))), \
+                patch.object(server, "send_silent_cancel_reminders", new=_fake_cancel):
             r = client.post(
                 "/api/admin/alert/stand-down", headers=HDR,
                 json={"confirmation_phrase": STAND_DOWN_CONFIRMATION},
@@ -142,12 +151,10 @@ class TestStandDownCancelsReminders:
 
 class TestTheRecordSaysSo:
     def test_the_push_event_row_records_the_cancel(self, client, two_clearable_phones):
-        with patch("server._stand_down_split", new=AsyncMock(return_value={
-            "clearing": two_clearable_phones,
-            "staying_count": 0,
-            "staying_people": [],
-        })), patch("apns.send_stand_down",
-                   new=AsyncMock(return_value=_fake_events(two_clearable_phones))), \
+        with patch("server._stand_down_split",
+                   new=AsyncMock(return_value=_split(two_clearable_phones))), \
+                patch("apns.send_stand_down",
+                      new=AsyncMock(return_value=_fake_events(two_clearable_phones))), \
                 patch.object(server, "send_silent_cancel_reminders",
                              new=AsyncMock(
                                  return_value=_fake_events(two_clearable_phones))):

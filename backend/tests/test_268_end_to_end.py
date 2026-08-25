@@ -486,7 +486,8 @@ class TestReportsAndCSV:
         assert r.status_code == 200, r.text
         csv_text = r.text
         for k in ("people_on_working_board", "waiting_for_an_answer",
-                  "phone_went_dark", "not_on_working_board_app_removed",
+                  "asked_no_answer_delivery_not_confirmed",
+                  "not_on_working_board_app_removed",
                   "not_on_working_board_never_used_app",
                   "what_these_numbers_count",
                   "not_on_working_board_record"):

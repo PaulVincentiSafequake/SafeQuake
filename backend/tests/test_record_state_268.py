@@ -199,7 +199,10 @@ class TestLabelsSurviveBeingSpoken:
     def test_four_labels_are_plain_english_and_distinct(self):
         labels = [rs.LABELS[k] for k in
                   (rs.WAITING, rs.DARK, rs.APP_REMOVED, rs.NEVER_USED)]
-        assert labels == ["Waiting for an answer", "Phone went dark",
+        # #291: the second label used to be "Phone went dark", which
+        # asserts a fact about the phone we do not have — all we know is
+        # that we asked and heard nothing back.
+        assert labels == ["Waiting for an answer", "We asked, no answer",
                           "App removed from this phone", "Never used the app"]
         firsts = [l.split()[0].lower() for l in labels]
         assert len(set(firsts)) == 4, "two labels start with the same word"

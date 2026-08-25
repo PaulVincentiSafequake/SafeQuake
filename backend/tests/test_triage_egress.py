@@ -81,9 +81,14 @@ class TestEgressIsAskedOfGreenOnly:
         assert "setMobilityOpen(true)" in src
 
     def test_red_is_not_asked_about_egress(self):
-        """Red already implies immobility and gets maximum response anyway."""
+        """Red already implies immobility and gets maximum response anyway.
+
+        #289: the trailing `true` marks it as a follow-up, so escalating to
+        IMMEDIATE after a first report has already been sent still gets
+        through the "already sending" guard.
+        """
         src = _alert_src()
-        assert 'submitCheckIn("trapped", severity, "trapped")' in src
+        assert 'submitCheckIn("trapped", severity, "trapped", null, true)' in src
 
     def test_question_is_about_the_building_not_the_body(self):
         src = _alert_src()

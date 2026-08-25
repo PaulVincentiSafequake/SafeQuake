@@ -244,7 +244,54 @@ async def on_status_change(
         db, device_id, kinds=[GONE_QUIET],
         reason="Their phone reported again.", now=now,
     )
+    # #289 (2026-08-24 — Paul, live test): an acknowledged "IMMEDIATE,
+    # cannot move" alarm sat in the strip while the same person's card had
+    # since moved to MINOR, twice. The alarm is RIGHT to stay — only a
+    # human resolves one, and a self-reported improvement must never
+    # quietly clear a report of a serious injury (adrenaline and shock
+    # make people wrong about that). But the board must not contradict
+    # itself either. So the alarm now carries what has happened SINCE it
+    # was raised, and the operator decides with both facts in front of
+    # them.
+    await _stamp_latest_report(db, device_id, doc, now=now)
     return raised
+
+
+async def _stamp_latest_report(
+    db, device_id: str, doc: Dict[str, Any], now: Optional[datetime] = None,
+) -> None:
+    """Record the person's newest report on their still-open alarms."""
+    n = _now(now)
+    status = str(doc.get("status") or "")
+    sev = str(doc.get("severity") or "").lower()
+    if status == "safe":
+        words = "reported they are safe"
+    elif status == "rescued":
+        words = "was marked rescued"
+    elif status == "trapped":
+        bits = [SEVERITY_WORD.get(sev, "severity not given")]
+        if doc.get("needs_extraction") or doc.get("egress") == "cannot_exit":
+            bits.append("cannot get out")
+        elif doc.get("egress") == "can_exit":
+            bits.append("can get out")
+        if str(doc.get("mobility") or "") == CANNOT_MOVE:
+            bits.append("cannot move")
+        words = "reported " + ", ".join(bits)
+    else:
+        words = f"reported {status or 'something we do not have a word for'}"
+    try:
+        await db.board_alarms.update_many(
+            {"device_id": device_id, "resolved_at": None,
+             "kind": {"$in": [NEEDS_HELP, WORSE]}},
+            {"$set": {"since_report": {
+                "words": words,
+                "at": _iso(n),
+                "status": status or None,
+                "severity": doc.get("severity"),
+            }}},
+        )
+    except Exception as e:
+        logging.warning(f"board_alarms since-stamp failed: {e}")
 
 
 async def sweep_silence(db, rows: List[Dict[str, Any]], now: Optional[datetime] = None) -> List[Dict[str, Any]]:
@@ -442,6 +489,19 @@ async def list_open(db, now: Optional[datetime] = None) -> Dict[str, Any]:
             g["action"] = "Open the list and work down it. Every name is below."
         g["count"] = count
         g["acknowledged"] = len(g["unacked_ids"]) == 0
+        # #289: what has happened SINCE. For a single-person alarm it is the
+        # person's newest report; in a group it would be several different
+        # facts, so the group line says how many have moved on and the
+        # names underneath carry the detail.
+        _since = [m.get("since_report") for m in g["members"] if m.get("since_report")]
+        if count == 1:
+            g["since_report"] = _since[0] if _since else None
+        else:
+            g["since_report"] = (
+                {"words": (f"{len(_since)} of these have reported again since. "
+                           "Open the list to see what each of them said."),
+                 "at": None} if _since else None
+            )
         # Who acknowledged, for the operator to read now and an inquiry to
         # read later.
         acked = [m for m in g["members"] if m.get("ack_at")]
@@ -457,6 +517,7 @@ async def list_open(db, now: Optional[datetime] = None) -> Dict[str, Any]:
                 "acknowledged": bool(m.get("ack_at")),
                 "ack_by": m.get("ack_by"),
                 "ack_at": m.get("ack_at"),
+                "since_report": m.get("since_report"),
             }
             for m in g["members"]
         ]

@@ -113,7 +113,10 @@ class TestExpoNotificationsIOSBodyNestContract:
         assert p["body"]["ladder_step"] == 2
         assert p["body"]["battery_saving"] is True
         assert p["body"]["consecutive_missed"] == 3
-        assert p["body"]["escalated_to_critical"] is True
+        # #207: an escalated re-check is marked as escalated but is never a
+        # Critical Alert any more.
+        assert p["body"]["escalated"] is True
+        assert p["body"]["escalated_to_critical"] is False
         for k in (
             "kind", "action_url", "check_id", "device_id", "ladder_step",
             "battery_saving", "consecutive_missed", "escalated_to_critical",

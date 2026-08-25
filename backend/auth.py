@@ -64,7 +64,25 @@ log = logging.getLogger("quakeangel.auth")
 JWT_ALGO = "HS256"
 JWT_ISSUER = "quake-angel-api"
 JWT_AUDIENCE = "quake-angel-dashboard"
-JWT_TTL_MINUTES = 15
+# #135 (2026-08-24 — Paul: "signed out in the middle of a task"). The old
+# 15-minute token had no renewal path: the first admin call made 15 minutes
+# after sign-in returned 401 and the dashboard dropped the session, mid-task,
+# with no warning. Two changes fix that together:
+#   1. A longer token life (60 min) so a laptop that slept through a renewal
+#      window still comes back to a working session.
+#   2. A renewal endpoint (POST /api/auth/refresh) the dashboard calls while
+#      the operator is working, so an ACTIVE operator is never signed out by
+#      the clock at all.
+# Neither weakens revocation: every request still re-reads the users doc, so
+# disable / role change / session_version bump / account expiry all take
+# effect on the very next call, exactly as before.
+JWT_TTL_MINUTES = int(os.environ.get("JWT_TTL_MINUTES", "60") or 60)
+
+# Absolute session lifetime. Renewal slides the expiry forward but can never
+# push it past `auth_iat + this`, so a tab left open on a shared workstation
+# still requires a fresh Google sign-in once per shift. 12 hours covers a long
+# incident shift without turning "sliding" into "forever".
+JWT_ABSOLUTE_SESSION_HOURS = int(os.environ.get("JWT_ABSOLUTE_SESSION_HOURS", "12") or 12)
 
 
 def _jwt_secret() -> str:
@@ -144,7 +162,7 @@ def verify_google_id_token(token: str) -> dict:
 
 
 # ── Our own application JWT (post-sign-in bearer) ───────────────────────
-def issue_app_jwt(user: dict) -> tuple[str, datetime]:
+def issue_app_jwt(user: dict, auth_iat: Optional[int] = None) -> tuple[str, datetime]:
     """Sign a short-lived JWT carrying the user's identity + role.
 
     The JWT is validated on every admin request by current_user(), which
@@ -170,6 +188,17 @@ def issue_app_jwt(user: dict) -> tuple[str, datetime]:
         raise AuthError(f"Invalid role: {user.get('role')!r}", status_code=500)
     now = datetime.now(timezone.utc)
     exp = now + timedelta(minutes=JWT_TTL_MINUTES)
+    # #135: `auth_iat` is the moment the human actually signed in with Google.
+    # It is carried UNCHANGED through every renewal, and the absolute cap is
+    # measured from it — so renewing cannot extend a session indefinitely.
+    original_auth = int(auth_iat) if auth_iat else int(now.timestamp())
+    absolute_deadline = datetime.fromtimestamp(original_auth, tz=timezone.utc) + timedelta(
+        hours=JWT_ABSOLUTE_SESSION_HOURS,
+    )
+    if exp > absolute_deadline:
+        exp = absolute_deadline
+    if exp <= now:
+        raise AuthError("Session lifetime reached — sign in again", status_code=401)
     claims = {
         "sub": user["google_sub"],
         "email": user["email_normalized"],
@@ -179,6 +208,7 @@ def issue_app_jwt(user: dict) -> tuple[str, datetime]:
         "iss": JWT_ISSUER,
         "aud": JWT_AUDIENCE,
         "iat": int(now.timestamp()),
+        "auth_iat": original_auth,
         "exp": int(exp.timestamp()),
     }
     return jwt.encode(claims, jwt_secret, algorithm=JWT_ALGO), exp

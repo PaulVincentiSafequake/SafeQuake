@@ -160,7 +160,10 @@ export interface BatteryPayload {
  * they can walk, so asking about mobility again would be noise, while "minor
  * injury but cannot get out" is otherwise invisible to the operator.
  */
-export type Egress = "can_exit" | "cannot_exit";
+// #289: "not_answered" is a real answer — they chose a severity and then
+// left the way-out question. The board says "we do not know" rather than
+// filing them as walking wounded, which is the lowest priority there is.
+export type Egress = "can_exit" | "cannot_exit" | "not_answered";
 
 export async function postStatus(opts: {
   status: CheckInStatus;

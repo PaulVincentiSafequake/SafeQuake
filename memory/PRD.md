@@ -2600,3 +2600,183 @@ volume the user chose. Eight full-volume Critical Alerts in a row drains
 the battery, invites Apple to look at the entitlement, and teaches people
 that a Critical Alert from this app can be ignored — which would cost us
 the one alarm that must never be ignored.
+
+### #283 — three screens, three different sums, all of them wrong
+
+Paul found the same defect in three places on one day: the call-off toast
+("13 phones", then "14", when it was one real person and thirteen test
+entries), the sentence under the stat boxes (never matching the box next
+to it), and the team PDF ("Not responding: 1" above a breakdown reading
+0 + 1 + 6).
+
+One cause: four surfaces each doing their own arithmetic.
+
+- `people_counts._tally()` is now the ONLY thing that produces counts,
+  and it is called with the population you want rather than re-derived.
+  `/api/devices` returns BOTH sets — with test entries and without — so
+  the board picks one instead of recalculating.
+- The dashboard's `computeCounts()` is deleted. `pillsFromServerCounts()`
+  maps names to boxes and does no arithmetic; a test fails if `+= 1` or
+  `forEach` reappears in it. Walking wounded is counted server-side too.
+- The three silence sentences moved into `counts_notes()` (one wording,
+  used by the board, the PDF and the CSV) and now say what they are:
+  "Gone quiet: 7 of the 44 people on the board... already counted above,
+  spread across Safe, Trapped and Not responding. They are not extra
+  people." The old line claimed all three were "counted in the numbers
+  above", which read as a breakdown of the box beside it.
+- The B1 heading names the total and denies being extra, so 0 + 1 + 6 can
+  no longer look like a contradiction of the line above it.
+- The call-off reports `cleared_real_count` / `cleared_test_count` and
+  `kept_on_board_real_count` / `kept_on_board_test_count` — the same
+  split the confirm dialog was already making correctly.
+
+### #291 — never print a fact we do not have
+
+"Phone went dark" appeared on two RESCUED people's map cards, in a live
+alarm, in the team PDF and in the CSV. The state was honest (we asked,
+nobody answered, the phone never confirmed our question arrived); the
+LABEL asserted the phone had died, which is the exact claim #271 said we
+must not make.
+
+- `LABELS[DARK]` is now "We asked, no answer".
+- A BROADCAST alert is not the same act as asking one person. When the
+  only thing that has asked is a broadcast, the label reads "Not asked
+  since the alert at 12:04" and the detail ends "Ask them to check in to
+  find out". This is why rescued people were reading as dark: a test
+  alert counted as asking them.
+- The STATE is unchanged in every case, so no count moved and no alarm
+  went quiet. This was about the words.
+- CSV row renamed to `asked_no_answer_delivery_not_confirmed`; the PDF
+  row and the spoken note match.
+
+### #289 / #290 — the report that never reached the board
+
+A real MINOR report did not appear anywhere. Cause: NOTHING was sent
+until the follow-up question was answered, and both follow-up sheets can
+be left — Back, a system gesture, or just putting the phone down. Both
+sheets even said "This does not delay your report" while being the thing
+delaying it.
+
+- The report now goes on the SEVERITY tap. The follow-up answer updates
+  it (`isFollowUp`, which is also what lets someone escalate to IMMEDIATE
+  after a first send). The subtitles now say "Your report is already sent
+  — this adds one detail to it", which is true.
+- `egress: "not_answered"` is a real answer, and it is NOT walking
+  wounded. Being filed as the lowest rescue priority on an assumption is
+  how somebody gets left. They stay on the working board, in a group
+  whose heading says "cannot get out or we have not been told". The board
+  list and the count use the same rule, and a test fails if they drift.
+- On #51: the mobility question IS skipped for green. What Paul saw was
+  the EGRESS question, which is deliberate — mobility describes the body,
+  egress describes the building, and only egress decides whether a team
+  with cutting gear is needed. It stays, but it can no longer cost
+  somebody their whole report.
+- Alarms now carry `since_report`: "Since this alarm: reported MINOR, can
+  get out at 14:32. This alarm still needs your decision." The alarm does
+  NOT clear — a self-reported improvement must never quietly close a
+  report of a serious injury — but the board no longer contradicts
+  itself.
+
+### #297 — "Authority: Emergency test name" on a real public report
+
+Not an unfilled template. Somebody typed it into the dashboard's
+Authority name field during a test and every export since repeated it.
+Two layers: the settings endpoint now REFUSES a test-looking name in
+plain words, and the report renderer FALLS BACK to "the responsible
+authorities" if such a name is already saved — which is the only thing
+that protects a value already sitting in a live database. Matched on word
+boundaries, so "Attest Rescue" is accepted: refusing a real agency would
+be its own kind of wrong.
+
+---
+
+## 2026-08-24 (second half) — live test batch: #285, #286, #135, #207
+
+### #285 — "The alarm is too quiet, and if it is muted nothing on screen is unmistakable"
+
+Two separate failures, fixed separately:
+- **Sound.** The old alarm was one sine wave at 0.14 gain — a polite
+  notification chime. It is now a square wave (far more energy in the band
+  small laptop and tablet speakers actually reproduce) plus a harmonic,
+  routed through a limiter at 0.95 output so stacked oscillators get loud
+  rather than distorted. Rising two-tone, repeated three times, ~1.1 s.
+- **Cadence.** Repeats every 3 s (was 10 s) **until somebody
+  acknowledges**, and it now runs on its own 1-second timer rather than on
+  the 4-second network poll: a slow or failed poll used to stop the alarm
+  silently. The alarm must be the last thing to stop working, not the first.
+- **Visual.** A new full-window overlay (`.qg-alarm-visual`): a flashing
+  12 px red frame around the entire window plus a flashing word at the
+  bottom centre — "47 alarms — nobody has acknowledged them". Driven ONLY
+  by the unacknowledged count, so silencing the sound cannot hide it.
+  `pointer-events: none`, so clicks pass straight through to the board (the
+  #265 lesson: never cover a control). Bottom-centre, not top, so it cannot
+  cover the sign-in banner. `prefers-reduced-motion` keeps the frame and the
+  word, solid instead of flashing.
+
+### #286 — bulk acknowledge
+
+`POST /api/admin/alarms/ack {"all": true}` acknowledges every open,
+unacknowledged alarm. The annunciator shows a row above the individual
+alarms: the breakdown by word ("45 IMMEDIATE · 2 GOT WORSE") and one
+button, "Acknowledge all 47". Individual rows and their own buttons stay
+exactly as they were.
+- Deliberately NOT behind a confirmation dialog. The operator is looking at
+  a flood; a second click is friction at the worst possible moment. It is
+  safe because acknowledging removes nothing: every alarm stays on the
+  board and every row records who acknowledged it and when, so a bulk
+  acknowledgement reads back in an inquiry exactly like 47 individual ones.
+- The confirmation message says so out loud: "…acknowledging stops the
+  sound, it does not mean anyone has been helped."
+- An empty payload is still a 400. `all` must be explicit — an accidental
+  whole-board acknowledgement would be an expensive typo.
+- 7 tests: `tests/test_bulk_ack_286.py`.
+
+### #207 — automated re-checks are never Critical Alerts (closed)
+
+The previous cut escalated a re-check to `interruption-level: critical`
+once per person per incident after three unanswered asks. Paul's ruling on
+2026-08-24: remove it entirely, `critical` belongs to the first real alert
+and nothing else. Every automated re-check now goes out at
+`time-sensitive` — which still breaches Focus and Do Not Disturb, what a
+trapped person needs — and no combination of arguments can make
+`_build_recheck_payload` emit `aps.sound.critical`.
+- `escalate` survives as a RECORD, not a loudness switch: the sweeper still
+  computes it and the payload still carries `escalated: true` for the
+  diagnostics panel and the audit trail. `escalated_to_critical` is kept
+  and is always `false` — an explicit answer beats a missing key.
+- Rewritten `tests/test_recheck_escalation.py` (7 tests) locks it, including
+  a test that the earthquake alert itself KEEPS `critical`.
+
+### #135 — signed out in the middle of a task
+
+Root cause was never the idle timeout (that is 2 hours, and it already
+suspends itself during an active incident). It was the token: a 15-minute
+life with **no renewal path**. The first admin call made after 15 minutes
+came back unauthenticated, the dashboard dropped the session, and an
+operator mid-task was signed out by nothing more than a clock.
+- **Longer life:** `JWT_TTL_MINUTES` 15 → 60 (env-overridable), so a laptop
+  that slept through a renewal window still wakes to a working session.
+- **Renewal:** new `POST /api/auth/refresh`. The dashboard renews 5 minutes
+  before expiry, on tab focus/visibility if the token is close to expiring,
+  and once automatically when any call comes back 401 (then retries the
+  call). Single-flight, so a dozen polling panels cannot cause a renewal
+  storm.
+- **Renewal is not a way around revocation.** It performs every check a
+  normal admin request performs: allowlist, disabled, session_version,
+  account expiry. A disabled account, a bumped session_version or an
+  expired account is refused. An already-expired token cannot be renewed —
+  renewal keeps an active session alive, it does not resurrect a dead one.
+  The legacy shared token has no session and is refused.
+- **Absolute cap:** new `auth_iat` claim records when the human actually
+  signed in with Google and is carried unchanged through every renewal.
+  Renewal can never push expiry past `auth_iat + JWT_ABSOLUTE_SESSION_HOURS`
+  (12 h — one long incident shift). A tab left open on a shared workstation
+  still needs a fresh Google sign-in once per shift.
+- **Loud sign-out:** when a session really does end, the existing
+  signed-out banner gains `.qa-so-loud` — flashing red, `role="alert"`,
+  scrolls itself into view, and plays the fault sound once (never on every
+  re-render). It stays in normal document flow: it must never cover the
+  Google button, which is exactly what #265 was.
+- 9 tests: `tests/test_session_refresh_135.py`.
+
+Full suite after this batch: **1002 passed, 7 skipped, 0 failed.**

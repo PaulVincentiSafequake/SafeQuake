@@ -260,17 +260,14 @@ async def _dispatch_rechecks(
             })
 
         if token:
-            # #207 (Batch 7): pass `consecutive_missed` alongside the
-            # target so the payload builder can decide whether this
-            # specific person's check should escalate to Critical Alert
-            # (only after 3 unanswered in this same trapped incident;
-            # a fresh incident resets the counter). ONE escalation per
-            # person per incident: `critical_escalated` is a sticky
-            # flag on the device row that suppresses further
-            # escalations for the remainder of this trapped run. The
-            # payload builder gates on the `escalate` boolean below —
-            # `consecutive_missed` alone would re-escalate on every
-            # sweep once the count crossed 3.
+            # #207 (closed 2026-08-24): `escalate` is now a RECORD, not a
+            # loudness switch. An automated re-check always goes out at
+            # `time-sensitive` — see apns._build_recheck_payload. The flag
+            # (first sweep at 3+ unanswered asks in this trapped run) is
+            # still computed and stored so the diagnostics panel and the
+            # audit trail can show when silence turned from ambiguous into
+            # worrying, and so the sticky flag keeps marking it once per
+            # person per incident rather than on every sweep.
             missed = int(rc.get("consecutive_missed") or 0)
             if pending:
                 # A pending check that has not been answered counts too.
