@@ -1546,8 +1546,28 @@
     //      at the start of a shift instead of discovering it during an
     //      incident.
     function onArmed(fn) { armListeners.push(fn); }
+    var armedNotified = false;
     function fireArmed() {
-      armListeners.forEach(function (fn) { try { fn(); } catch (_) {} });
+      // #302 (Paul, 2026-08-25): "none of the alarm-panel buttons respond
+      // to clicks." THIS was the cause, and it was mine. The arming
+      // listeners below run on `pointerdown`, and this callback re-drew the
+      // alarm panel — so the button under the operator's finger was
+      // destroyed and rebuilt between pointerdown and pointerup. A browser
+      // only fires `click` when both landed on the same element, so no
+      // click was ever generated: pointer cursor, no action, no error.
+      // Buttons in the fixed top bar (Call alert off) were untouched,
+      // which is exactly the pattern Paul described.
+      //
+      // Two guards, both needed:
+      //   * ONCE — the state only actually changes the first time.
+      //   * LATER — never inside the pointer sequence. A redraw is
+      //     deferred to a timeout so pointerdown/up always complete on
+      //     the same element.
+      if (armedNotified) return;
+      armedNotified = true;
+      setTimeout(function () {
+        armListeners.forEach(function (fn) { try { fn(); } catch (_) {} });
+      }, 0);
     }
     function startKeepAlive(c) {
       if (keepAlive) return;
@@ -1573,6 +1593,7 @@
           startKeepAlive(ctx);
         } else {
           everBlocked = true;
+          armedNotified = false;   // if it ever wakes again, say so once
           // resume() only succeeds inside (or shortly after) a real
           // interaction. When it does, anything that was waiting is played
           // and the panel is told to redraw.
@@ -3344,27 +3365,43 @@
   .qg-alarm.is-acked { background: #2B1616; border-color: #6A4A4A; }
   /* #285 (Paul, 2026-08-24): "if the sound is muted or the room is loud,
      nothing on the screen is unmistakable." A flashing frame around the
-     WHOLE window plus a word at the bottom of the screen. It is drawn over
-     everything, it cannot be clicked through by accident (pointer-events:
-     none — clicks pass straight through to the board underneath), and it
-     is driven only by the unacknowledged count, so silencing the sound
-     cannot hide it. */
+     whole window plus a word at the bottom of the screen.
+
+     #302 (Paul, 2026-08-25): "none of the alarm-panel buttons respond to
+     clicks… the flashing overlay may be sitting on top of them." The first
+     cut was ONE element covering the entire viewport with
+     `pointer-events: none` — correct in theory, and impossible to prove
+     innocent in every browser. It is now four thin strips pinned to the
+     four edges of the window and one small tag at the bottom. There is no
+     longer any element of any kind over the middle of the screen, so this
+     class of bug cannot happen again — whatever a browser decides to do
+     with `pointer-events` (which is still set, belt and braces, with
+     !important so nothing can override it).
+
+     The z-index also drops below the fixed top bars, so a flashing alarm
+     can never sit over the trigger, stand-down or sign-in controls. */
   .qg-alarm-visual {
-    position: fixed; inset: 0; z-index: 2147483000;
-    pointer-events: none; display: none;
+    position: fixed; top: 0; left: 0; width: 0; height: 0;
+    overflow: visible; z-index: 11000;
+    pointer-events: none !important;
+    display: none;
   }
   body.qg-alarm-unacked .qg-alarm-visual { display: block; }
-  .qg-av-frame {
-    position: absolute; inset: 0;
-    border: 12px solid #FF2A2A;
-    animation: qgAvFrame 0.85s steps(1, end) infinite;
+  .qg-alarm-visual * { pointer-events: none !important; }
+  .qg-av-bar {
+    position: fixed; background: #FF2A2A;
+    animation: qgAvBar 0.85s steps(1, end) infinite;
   }
-  @keyframes qgAvFrame {
-    0%, 49%   { border-color: #FF2A2A; }
-    50%, 100% { border-color: #4A0000; }
+  .qg-av-top    { top: 0;    left: 0; right: 0;  height: 12px; }
+  .qg-av-bottom { bottom: 0; left: 0; right: 0;  height: 12px; }
+  .qg-av-left   { top: 0;    bottom: 0; left: 0;  width: 12px; }
+  .qg-av-right  { top: 0;    bottom: 0; right: 0; width: 12px; }
+  @keyframes qgAvBar {
+    0%, 49%   { background: #FF2A2A; }
+    50%, 100% { background: #4A0000; }
   }
   .qg-av-tag {
-    position: absolute; left: 50%; bottom: 0; transform: translateX(-50%);
+    position: fixed; left: 50%; bottom: 0; transform: translateX(-50%);
     background: #C10000; color: #fff; font-weight: 900; font-size: 14px;
     letter-spacing: .06em; text-transform: uppercase;
     padding: 7px 16px; border-radius: 10px 10px 0 0;
@@ -3380,8 +3417,8 @@
      some people. With reduced motion asked for, the frame and the word
      stay — solid, permanent, still impossible to miss. */
   @media (prefers-reduced-motion: reduce) {
-    .qg-av-frame, .qg-av-tag { animation: none; }
-    .qg-av-frame { border-color: #FF2A2A; }
+    .qg-av-bar, .qg-av-tag { animation: none; }
+    .qg-av-bar { background: #FF2A2A; }
   }
   /* #285 — the state of the sound, permanently in view. */
   .qg-annun-sound {
@@ -3531,6 +3568,9 @@
              invisible — this line stays in view whether anything is
              sounding or not. -->
         <div class="qg-annun-note" id="qg-annun-quiet" hidden></div>
+        <!-- #302: the board checks that its own buttons are clickable and
+             says so here if something is covering them. -->
+        <div class="qg-annun-bulk" id="qg-annun-blocked" hidden></div>
         <!-- #285: whether this board can make a noise is a fact an
              operator must be able to see and act on, not a sentence in a
              note. Permanent, with a way to switch it on and a way to
@@ -8329,15 +8369,49 @@ window.QuakeAngelRescue = (function () {
     el.id = "qg-alarm-visual";
     el.className = "qg-alarm-visual";
     el.setAttribute("aria-hidden", "true");
-    el.innerHTML = '<div class="qg-av-frame"></div>' +
+    el.innerHTML =
+      '<div class="qg-av-bar qg-av-top"></div>' +
+      '<div class="qg-av-bar qg-av-bottom"></div>' +
+      '<div class="qg-av-bar qg-av-left"></div>' +
+      '<div class="qg-av-bar qg-av-right"></div>' +
       '<div class="qg-av-tag" id="qg-alarm-visual-tag"></div>';
     document.body.appendChild(el);
     return el;
   }
 
+  // #302 (Paul, 2026-08-25): "the flashing red border is still visible
+  // even after signing out completely, to an unauthorised visitor."
+  // The board's own refresh returns early when signed out — before it ever
+  // reaches the alarms — so the panel and the flashing were left exactly
+  // as they were at the moment the session ended: a stale casualty list,
+  // and a red alarm flashing at somebody with no right to see it.
+  //
+  // Paul's question, answered here: a signed-out visitor sees NO alarm at
+  // all. Alarms are an instruction to act, and somebody who cannot act on
+  // them should only ever see the calm aggregate numbers.
+  function clearAlarmsForSignedOut() {
+    alarmData = null;
+    alarmFault = "";
+    renderAlarms();               // hides the panel and the flashing
+  }
+  window.qgClearAlarmsForSignedOut = clearAlarmsForSignedOut;
+  if (window.qaAuth && window.qaAuth.onChange) {
+    window.qaAuth.onChange(function (user) {
+      if (!user) clearAlarmsForSignedOut();
+    });
+  }
+  // Belt and braces: whatever happens to the polling, a board that is not
+  // signed in cannot be left flashing. Checked on the same one-second tick
+  // as the sound.
+  setInterval(function () {
+    if (!isSignedIn() && document.body.classList.contains("qg-alarm-unacked")) {
+      clearAlarmsForSignedOut();
+    }
+  }, 1000);
+
   async function refreshAlarms() {
     try {
-      if (!isSignedIn()) { alarmData = null; renderAlarms(); return; }
+      if (!isSignedIn()) { clearAlarmsForSignedOut(); return; }
       // #301: the alarm panel follows the board's "Show test entries" tick,
       // so a rehearsal with test people exercises the alarms too — the
       // thing test people exist for — and a real incident never shows one.
@@ -8390,6 +8464,32 @@ window.QuakeAngelRescue = (function () {
       }).join("") + "</ol></details>";
   }
 
+  // #302 — write to the DOM only when the content has actually changed.
+  //
+  // Rebuilding a panel that has not changed is not just wasteful: it
+  // destroys and recreates the very buttons an operator is trying to
+  // press, and a click whose pointerdown and pointerup land on different
+  // elements is never delivered at all. The activity feed has done this
+  // since 2026-08-12 for the same reason (it used to throw away the
+  // operator's scroll position); the alarm panel must too, because here
+  // the cost is a dead Acknowledge button during an incident.
+  function setHtmlIfChanged(el, html) {
+    if (!el) return false;
+    if (el.__qgLastHtml === html) return false;
+    el.__qgLastHtml = html;
+    el.innerHTML = html;
+    return true;
+  }
+  function setTextIfChanged(el, text) {
+    if (!el) return;
+    if (el.textContent !== text) el.textContent = text;
+  }
+  // When a click changes a button's own label by hand ("Acknowledging…"),
+  // the cache above no longer matches what is on screen — so the next
+  // render would think there was nothing to do and leave the button stuck
+  // on that label forever. Forget the cache before mutating.
+  function forgetHtml(el) { if (el) el.__qgLastHtml = null; }
+
   function renderAlarms() {
     var wrap = document.getElementById("qg-annun");
     var rowsEl = document.getElementById("qg-annun-rows");
@@ -8412,13 +8512,14 @@ window.QuakeAngelRescue = (function () {
     var groups = (alarmData && alarmData.groups) || [];
     var unacked = (alarmData && alarmData.unacknowledged) || 0;
 
-    countEl.textContent = String(unacked);
-    wrap.className = unacked > 0 ? "qg-annun" : "qg-annun is-quiet";
-    headEl.textContent = unacked > 0
+    setTextIfChanged(countEl, String(unacked));
+    var wrapCls = unacked > 0 ? "qg-annun" : "qg-annun is-quiet";
+    if (wrap.className !== wrapCls) wrap.className = wrapCls;
+    setTextIfChanged(headEl, unacked > 0
       ? (unacked === 1 ? "1 alarm nobody has acknowledged" : unacked + " alarms nobody has acknowledged")
       : (groups.length
           ? "Everything showing has been acknowledged. It stays until the person is rescued or taken off the board."
-          : "No alarms. This is not the same as nobody needing help — read the list.");
+          : "No alarms. This is not the same as nobody needing help — read the list."));
 
     // Notes: the flood rule, a feed we cannot read, and a browser that
     // will not make sound until the page is clicked. All said plainly.
@@ -8439,7 +8540,7 @@ window.QuakeAngelRescue = (function () {
         ". The flashing and the count are not affected.");
     }
     noteEl.hidden = notes.length === 0;
-    noteEl.textContent = notes.join(" ");
+    setTextIfChanged(noteEl, notes.join(" "));
 
     // #285 (Paul, 2026-08-25 — "the alarm sound has not played at all").
     // The state of the sound is now a permanent control, not a sentence
@@ -8449,14 +8550,26 @@ window.QuakeAngelRescue = (function () {
     var soundEl = document.getElementById("qg-annun-sound");
     if (soundEl) {
       var armed = window.qgSound.armed();
-      soundEl.className = "qg-annun-sound" + (armed ? " is-on" : " is-off");
-      soundEl.innerHTML = armed
-        ? '<span class="qg-annun-sound-text">\uD83D\uDD14 Alarm sound is ON.</span>' +
+      // #302 (Paul, 2026-08-25): "sound doesn't play despite #285's fix."
+      // The panel now REPORTS what it did rather than asking anybody to
+      // take it on trust: when the board last actually played the alarm.
+      // If that time keeps moving and the room hears nothing, the fault is
+      // the volume or the output device, not the board — and if it never
+      // moves, it is the board. That is a question we can now answer
+      // instead of guessing.
+      var soundedWords = lastAlarmSound
+        ? "Last sounded at " + window.qgTime(new Date(lastAlarmSound).toISOString()) + "."
+        : "It has not had to sound yet.";
+      var soundCls = "qg-annun-sound" + (armed ? " is-on" : " is-off");
+      if (soundEl.className !== soundCls) soundEl.className = soundCls;
+      setHtmlIfChanged(soundEl, armed
+        ? '<span class="qg-annun-sound-text">\uD83D\uDD14 Alarm sound is ON. ' +
+            window.qgEsc(soundedWords) + "</span>" +
           '<button type="button" id="qg-annun-sound-test">Test the sound</button>'
         : '<span class="qg-annun-sound-text">\uD83D\uDD07 ALARM SOUND IS OFF. ' +
           'Your browser will not let this page make a noise until you switch it on. ' +
           'The flashing still works, but nobody will hear anything.</span>' +
-          '<button type="button" id="qg-annun-sound-on">Switch the sound on</button>';
+          '<button type="button" id="qg-annun-sound-on">Switch the sound on</button>');
     }
 
     // #306 — the day-old silences. Always in view, never a sound, and it
@@ -8466,21 +8579,21 @@ window.QuakeAngelRescue = (function () {
     if (quietEl) {
       if (lq.count > 0) {
         quietEl.hidden = false;
-        quietEl.innerHTML = "<span>\u25A0 " + window.qgEsc(lq.words || "") + "</span>" +
+        setHtmlIfChanged(quietEl, "<span>\u25A0 " + window.qgEsc(lq.words || "") + "</span>" +
           '<details class="qg-alarm-names"><summary>Show me who (' + lq.count + ')</summary>' +
           (lq.people || []).map(function (p) {
             return "<div>" + window.qgEsc(p.who || "") +
               (p.hours != null ? " — quiet for " + Math.floor(p.hours / 24) + " day" +
                 (Math.floor(p.hours / 24) === 1 ? "" : "s") : "") + "</div>";
-          }).join("") + "</details>";
+          }).join("") + "</details>");
       } else {
         quietEl.hidden = true;
-        quietEl.innerHTML = "";
+        setHtmlIfChanged(quietEl, "");
       }
     }
-    muteEl.textContent = muteLeft > 0
+    setTextIfChanged(muteEl, muteLeft > 0
       ? "Turn the sound back on now"
-      : "Silence the sound for 5 minutes";
+      : "Silence the sound for 5 minutes");
 
     // #285 — the whole-window frame and the word at the bottom of the
     // screen. Driven by the unacknowledged count alone: muting the sound
@@ -8488,11 +8601,11 @@ window.QuakeAngelRescue = (function () {
     document.body.classList.toggle("qg-alarm-unacked", unacked > 0);
     var tagEl = document.getElementById("qg-alarm-visual-tag");
     if (tagEl) {
-      tagEl.textContent = unacked > 0
+      setTextIfChanged(tagEl, unacked > 0
         ? (unacked === 1
             ? "1 alarm — nobody has acknowledged it"
             : unacked + " alarms — nobody has acknowledged them")
-        : "";
+        : "");
     }
 
     // #286 — one action for a flood. The breakdown names the kinds so the
@@ -8511,19 +8624,19 @@ window.QuakeAngelRescue = (function () {
           return byWord[w] + " " + w;
         });
         bulkEl.hidden = false;
-        bulkEl.innerHTML =
+        setHtmlIfChanged(bulkEl,
           '<span class="qg-annun-bulk-text">' +
             window.qgEsc(parts.join(" · ")) +
             '<span class="qg-annun-bulk-sub">Acknowledging stops the sound and the flashing. Every one of them stays on the board until the person is rescued or taken off it.</span>' +
           "</span>" +
-          '<button type="button" id="qg-annun-ack-all">Acknowledge all ' + unacked + "</button>";
+          '<button type="button" id="qg-annun-ack-all">Acknowledge all ' + unacked + "</button>");
       } else {
         bulkEl.hidden = true;
-        bulkEl.innerHTML = "";
+        setHtmlIfChanged(bulkEl, "");
       }
     }
 
-    rowsEl.innerHTML = groups.map(function (g) {
+    setHtmlIfChanged(rowsEl, groups.map(function (g) {
       var glyph = SHAPE_GLYPH[g.shape] || "■";
       var acked = !!g.acknowledged;
       var testTag = g.is_test ? '<span class="qg-alarm-test">TEST</span>' : "";
@@ -8573,7 +8686,7 @@ window.QuakeAngelRescue = (function () {
         (acked ? "" : '<button type="button" class="qg-alarm-ack" data-group="' +
           window.qgEsc(g.group_key) + '">Acknowledge</button>') +
         "</div>";
-    }).join("");
+    }).join(""));
 
     // The sound: one short chime, repeated every 10 seconds while anything
     // is unacknowledged. Never two on top of each other (qgSound enforces
@@ -8581,26 +8694,53 @@ window.QuakeAngelRescue = (function () {
     if (unacked > 0 && Date.now() - lastAlarmSound > ALARM_SOUND_EVERY_MS) {
       if (window.qgSound.play("alarm")) lastAlarmSound = Date.now();
     }
+
+    wireAlarmButtons();
+    checkNothingIsCoveringTheButtons();
   }
 
-  document.addEventListener("click", function (ev) {
-    // #286: one action for the whole board. Deliberately NOT behind a
-    // confirmation dialog — the operator is looking at a flood and a
-    // second click is friction at exactly the wrong moment. It is safe
-    // because acknowledging removes nothing: every alarm stays on the
-    // board, and every row records who acknowledged it and when.
-    if (ev.target && ev.target.id === "qg-annun-ack-all") {
-      ev.target.disabled = true;
-      ev.target.textContent = "Acknowledging…";
+  // #302 (Paul, 2026-08-25): "none of the alarm-panel buttons respond to
+  // clicks — not Acknowledge, Test the sound, What happened, or Silence
+  // the sound. No console error."
+  //
+  // Every one of those buttons was handled by ONE listener on `document`,
+  // so anything that stops a click reaching the document — an overlay, a
+  // capture-phase listener elsewhere, an extension — silently kills all of
+  // them at once, with no error to find. They now also carry their own
+  // direct listeners: a click that lands on the button works even if the
+  // document never hears about it. The delegated handler stays as the
+  // fallback for rows rendered between renders.
+  function wireAlarmButtons() {
+    var wrap = document.getElementById("qg-annun");
+    if (!wrap) return;
+    wrap.querySelectorAll("button").forEach(function (b) {
+      if (b.__qgWired) return;
+      b.__qgWired = true;
+      b.addEventListener("click", function (ev) {
+        ev.stopPropagation();          // the delegated handler must not double-fire
+        handleAlarmClick(b);
+      });
+    });
+  }
+
+  // The one place that decides what an alarm-panel button does, used by
+  // both the direct listeners and the delegated fallback.
+  function handleAlarmClick(target) {
+    if (!target) return false;
+    if (target.id === "qg-annun-ack-all") {
+      forgetHtml(document.getElementById("qg-annun-bulk"));
+      target.disabled = true;
+      target.textContent = "Acknowledging…";
       // #301: acknowledge exactly what is on show. Hidden test alarms are
       // not silenced behind the operator's back.
       ackAlarm({ all: true, include_test: showTestEntries });
-      return;
+      return true;
     }
     // #285 — switch the sound on, and prove it works.
-    if (ev.target && ev.target.id === "qg-annun-sound-on") {
-      ev.target.disabled = true;
-      ev.target.textContent = "Switching on…";
+    if (target.id === "qg-annun-sound-on") {
+      forgetHtml(document.getElementById("qg-annun-sound"));
+      target.disabled = true;
+      target.textContent = "Switching on…";
       window.qgSound.arm().then(function (ok) {
         renderAlarms();
         if (ok) banner("ok", "Alarm sound is on. Use \u201cTest the sound\u201d to hear it.");
@@ -8608,26 +8748,67 @@ window.QuakeAngelRescue = (function () {
           "Check the sound settings for this site, and that the tab is not muted. " +
           "The flashing alarm still works.");
       });
-      return;
+      return true;
     }
-    if (ev.target && ev.target.id === "qg-annun-sound-test") {
-      ev.target.disabled = true;
-      ev.target.textContent = "Playing…";
+    if (target.id === "qg-annun-sound-test") {
+      forgetHtml(document.getElementById("qg-annun-sound"));
+      target.disabled = true;
+      target.textContent = "Playing…";
       window.qgSound.test().then(function (played) {
         renderAlarms();
         if (played) banner("ok", "That is the alarm. If you heard nothing, turn the volume up — " +
           "the board played it.");
         else banner("err", "We could not play the sound. Check the volume and that this tab is not muted.");
       });
-      return;
+      return true;
     }
-    var btn = ev.target.closest && ev.target.closest(".qg-alarm-ack");
-    if (btn) { ackAlarm({ group_key: btn.dataset.group }); return; }
-    if (ev.target && ev.target.id === "qg-annun-mute") {
+    if (target.id === "qg-annun-mute") {
       if (window.qgSound.muteRemainingMs() > 0) window.qgSound.unmute();
       else window.qgSound.mute(5 * 60 * 1000);
       renderAlarms();
+      return true;
     }
+    var ack = target.closest && target.closest(".qg-alarm-ack");
+    if (ack) { ackAlarm({ group_key: ack.dataset.group }); return true; }
+    return false;
+  }
+
+  // #302 — the board checks its own buttons. If anything is sitting on top
+  // of the Acknowledge button, the panel SAYS so instead of leaving an
+  // operator clicking a dead control during an incident. This is exactly
+  // the fault Paul had to diagnose by hand; the board should have told him.
+  var lastCoverWarning = "";
+  function checkNothingIsCoveringTheButtons() {
+    var btn = document.querySelector("#qg-annun button");
+    var warnEl = document.getElementById("qg-annun-blocked");
+    if (!btn || !warnEl) return;
+    var r = btn.getBoundingClientRect();
+    if (!r.width || !r.height) return;
+    // Off-screen (scrolled away) is not a fault.
+    if (r.bottom < 0 || r.top > window.innerHeight) { warnEl.hidden = true; return; }
+    var top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+    var covered = top && top !== btn && !btn.contains(top) && !top.contains(btn);
+    if (covered) {
+      var what = top.id || top.className || top.tagName;
+      warnEl.hidden = false;
+      warnEl.textContent = "These buttons are being covered by something else on the page (" +
+        what + "), so clicking them may do nothing. Reload the page. If it happens again, " +
+        "tell the developer exactly this: covered by " + what + ".";
+      if (what !== lastCoverWarning) {
+        lastCoverWarning = what;
+        console.error("[qg] alarm panel buttons covered by:", top);
+      }
+    } else {
+      warnEl.hidden = true;
+      lastCoverWarning = "";
+    }
+  }
+
+  document.addEventListener("click", function (ev) {
+    if (!ev.target) return;
+    // Delegated fallback. The direct listeners above stop propagation, so
+    // this only runs for a click the buttons themselves did not handle.
+    handleAlarmClick(ev.target);
   });
 
   // The mute countdown has to tick even when nothing else changes —

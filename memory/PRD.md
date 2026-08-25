@@ -2914,3 +2914,92 @@ less than everything: rescued people are off the map" with a "Show me
 everything" button). Paul to confirm with that filter on.
 
 Full suite after this batch: **1021 passed, 7 skipped, 0 failed.**
+
+---
+
+## 2026-08-25 (production) — #302: dead alarm-panel buttons, and a flashing leak
+
+Paul, testing production:
+> None of the alarm-panel buttons respond to clicks — not Acknowledge, Test
+> the sound, What happened, or Silence the sound. Pointer cursor on hover,
+> clicking does nothing, no console error. "Call alert off" does work.
+> New finding: the flashing red border is still visible even after signing
+> out completely, to an unauthorised visitor.
+
+Both faults were mine, both from the batch he was testing. Both reproduced
+in a real browser before anything was changed.
+
+### Fault 1 — the swallowed click (root cause, reproduced)
+
+The audio-arming listeners added for #285 run on `pointerdown`, and their
+callback re-drew the alarm panel. The button under the operator's finger
+was therefore destroyed and rebuilt BETWEEN pointerdown and pointerup —
+and a browser only fires `click` when both landed on the same element. So
+no click was ever generated. Proof, from a real browser at the button's own
+coordinates: `pointerdown: qg-annun-ack-all` … and no `click` after it.
+
+Everything Paul saw follows from that one line:
+- pointer cursor, no action, no console error (nothing threw — nothing ran);
+- every panel control affected, including `<details>` "What happened",
+  which needs no JavaScript at all;
+- "Call alert off" unaffected — it lives in the fixed top bar, which is
+  never re-rendered.
+
+Fixed twice over, because either alone suffices and this must not return:
+1. Arming notifies ONCE, and always on a later tick (`setTimeout`), never
+   inside the pointer sequence.
+2. The panel writes to the DOM only when the content has actually changed —
+   the same rule the activity feed has followed since 2026-08-12, where the
+   symptom was a lost scroll position. Here the cost was a dead Acknowledge
+   button during an incident.
+Plus two belts: every panel button now carries its own direct listener as
+well as the delegated one, and `forgetHtml()` clears the cache before a
+label is changed by hand so "Acknowledging…" can never stick.
+
+### Fault 2 — the flashing leak (root cause, proven)
+
+`refresh()` returns early when signed out, before it ever reaches the
+alarms. The panel and the whole-window flashing were left exactly as they
+were at the moment the session ended: a stale casualty list and a red alarm
+flashing at somebody with no right to see it.
+
+Paul's question — should a signed-out visitor see a flashing alarm at all?
+**No.** An alarm is an instruction to act; somebody who cannot act on it
+should only ever see the calm aggregate numbers. Alarms are cleared on the
+auth change itself, and again on a one-second tick regardless of what the
+polling does.
+
+### The overlay, rebuilt so it cannot ever block a click (#302)
+
+Paul asked for this to be checked first, and he was right to. The overlay
+WAS `pointer-events: none` and measured innocent here — but "should be
+fine" is not good enough for a control room. It is now four 12 px strips
+pinned to the edges of the window plus one tag at the bottom: there is no
+element of any kind over the middle of the screen, so this class of bug is
+impossible whatever a browser does with `pointer-events` (still set, with
+`!important`, on the container and every child). Its z-index also dropped
+below the fixed top bars, so a flashing alarm can never sit over the
+trigger, stand-down or sign-in controls.
+
+### The board now checks its own buttons
+
+On every render it hit-tests its own Acknowledge button. If anything is
+covering it, the panel says so — in plain words, with the name of the
+offending element. Paul had to diagnose a dead control by hand; the board
+should have told him.
+
+### And it reports what it did
+
+The sound panel now reads "🔔 Alarm sound is ON. Last sounded at 12:04." If
+that time keeps moving and the room hears nothing, the fault is the volume
+or the output device; if it never moves, it is the board. A question we can
+now answer instead of argue about.
+
+Verified live, in a real browser, at real coordinates: "What happened"
+opens and STAYS open, Silence the sound toggles twice in a row, Test the
+sound plays and the label returns to normal, an individual Acknowledge and
+Acknowledge-all both reach the API, the count falls to 0 and the flashing
+stops. Signing out clears the panel and the flashing within a second.
+
+Regression tests: `tests/test_alarm_panel_clicks_302.py` (8). Full suite:
+**1029 passed, 7 skipped, 0 failed.**
