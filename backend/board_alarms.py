@@ -264,6 +264,10 @@ async def on_status_change(
 ) -> List[dict]:
     """Called from POST /api/status, with the row as it was and as it now
     is. The only place that decides whether a report is an alarm."""
+    # #304 (Paul, 2026-08-26): every write inside one status change
+    # shares one wall-clock instant, so sibling rows re-raised together
+    # get the same `re_raised_at` and the merged story dedupes them.
+    now = _now(now)
     raised: List[dict] = []
     device_id = doc.get("device_id") or ""
     if not device_id:
@@ -376,6 +380,11 @@ async def _clear_ack_on_new_report(
     if not rows:
         return 0
     cleared = 0
+    # #304: use one timestamp for every row cleared in this batch so
+    # sibling rows all get the same `re_raised_at`. That way the merged
+    # story dedupes on (at, words) and shows one "sounded again" line
+    # for the one event, not one per row.
+    stamp = _iso(n)
     for r in rows:
         try:
             await db.board_alarms.update_one(
@@ -383,7 +392,7 @@ async def _clear_ack_on_new_report(
                 {"$set": {
                     "ack_by": None,
                     "ack_at": None,
-                    "re_raised_at": _iso(n),
+                    "re_raised_at": stamp,
                     "previous_ack_by": r.get("ack_by"),
                     "previous_ack_at": r.get("ack_at"),
                     # Keep the newest fact on the row itself so a
@@ -642,52 +651,81 @@ async def list_open(db, now: Optional[datetime] = None,
 
     # #303 — collapse to one card per person. The card's headline, action,
     # severity, kind, shape, group_key, and ack fields come from the
-    # NEWEST row (so a person who has since gone worse is displayed at
-    # their newest state), but the ID list contains every open row for
-    # that person so a single "Acknowledge" press silences them all at
-    # once and an inquiry can still read every underlying row.
-    def _sort_key(r):
-        # Newest fact first by when the row was BORN. A re-raised older
-        # row is still an older row conceptually — the fresh row that
-        # arrived alongside it is the newer fact and should lead the
-        # card. Re-raise time is only a tiebreak, so a row that only
-        # ever existed as a re-raise still sorts sensibly.
-        return (str(r.get("created_at") or ""),
-                str(r.get("re_raised_at") or ""))
+    # PRIMARY row (see `_pick_primary` — report-driven rows outrank
+    # inferred ones so a live "IMMEDIATE" report never hides behind a
+    # freshly-raised "gone quiet"), but the ID list contains every open
+    # row for that person so a single "Acknowledge" press silences them
+    # all at once and an inquiry can still read every underlying row.
+    def _pick_primary(rlist: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """#304 (Paul, 2026-08-26 — live re-test): the card face has to
+        represent the person's condition RIGHT NOW, and a `gone quiet`
+        row raised seconds ago by the silence sweep is not more
+        important than an `IMMEDIATE, cannot move` report that came
+        directly from the person a minute earlier.
 
-    per_device: Dict[str, Dict[str, Any]] = {}
+        Rule: prefer report-driven rows (NEEDS_HELP / WORSE) over
+        inferred ones (GONE_QUIET) when picking the card face. Within
+        each class, newest-by-created_at wins.
+        """
+        report_driven = [r for r in rlist if r.get("kind") in (NEEDS_HELP, WORSE)]
+        pool = report_driven or rlist
+        return max(
+            pool,
+            key=lambda r: (str(r.get("created_at") or ""),
+                           str(r.get("re_raised_at") or "")),
+        )
+
+    per_device: Dict[str, List[Dict[str, Any]]] = {}
     for r in rows:
         did = r.get("device_id") or ""
         if not did:
             continue
-        bundle = per_device.get(did)
-        if bundle is None:
-            per_device[did] = {"primary": r, "all": [r]}
-        else:
-            bundle["all"].append(r)
-            if _sort_key(r) > _sort_key(bundle["primary"]):
-                bundle["primary"] = r
+        per_device.setdefault(did, []).append(r)
 
     # Rebuild `rows` as one synthetic row per device. Each synthetic row
     # carries the underlying row IDs (in `_all_ids`) and every underlying
     # row (in `_all_rows`) so the story below can walk the whole timeline.
     merged_rows: List[Dict[str, Any]] = []
-    for bundle in per_device.values():
-        primary = bundle["primary"]
-        all_rows = sorted(bundle["all"], key=_sort_key)
+    for all_rows in per_device.values():
+        primary = _pick_primary(all_rows)
+        ordered = sorted(all_rows, key=lambda r: str(r.get("created_at") or ""))
         card = dict(primary)
-        card["_all_ids"] = [r.get("id") for r in all_rows if r.get("id")]
+        card["_all_ids"] = [r.get("id") for r in ordered if r.get("id")]
         # If ANY of the underlying rows is unacknowledged, the whole card
         # is unacknowledged — otherwise a person whose newest row happens
         # to be an acked GONE_QUIET could hide an unacked NEEDS_HELP
         # underneath it.
-        any_unacked = any(not r.get("ack_at") for r in all_rows)
+        any_unacked = any(not r.get("ack_at") for r in ordered)
         if any_unacked:
             card["ack_at"] = None
             card["ack_by"] = None
-        card["_all_rows"] = all_rows
+        card["_all_rows"] = ordered
+        # #304 — if a report-driven row is the card face but the person
+        # ALSO has an open GONE_QUIET row, name that in the card's
+        # "since" line so the operator sees both facts at once.
+        if primary.get("kind") in (NEEDS_HELP, WORSE):
+            quiet = next(
+                (r for r in ordered if r.get("kind") == GONE_QUIET),
+                None,
+            )
+            if quiet:
+                q_at = quiet.get("created_at")
+                existing_since = card.get("since_report") or {}
+                extra = ("Their phone has also gone quiet since "
+                         + str(q_at or "")).strip()
+                if existing_since.get("words"):
+                    card["since_report"] = {
+                        "words": existing_since["words"] + ". " + extra,
+                        "at": existing_since.get("at") or q_at,
+                    }
+                else:
+                    card["since_report"] = {"words": extra, "at": q_at}
         merged_rows.append(card)
-    merged_rows.sort(key=_sort_key, reverse=True)
+    merged_rows.sort(
+        key=lambda r: (str(r.get("created_at") or ""),
+                       str(r.get("re_raised_at") or "")),
+        reverse=True,
+    )
     rows = merged_rows
 
     unacked = [r for r in rows if not r.get("ack_at")]
@@ -855,23 +893,58 @@ def _merged_story(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """#303 — the full history of one person's incidents, in order, built
     from every open row we have for them.
 
-    Each underlying row contributes its own `_story` steps, prefixed with
-    "Earlier alarm — " for anything that came before the newest raise, so
-    the operator can see at a glance that this person's card is the
-    combined story of more than one alarm event."""
+    #304 (Paul, 2026-08-26 — live re-test): the story used to walk each
+    row's fixed logical order (raise → since → ack → re-raise → current)
+    and print them in blocks, so the timeline read 09:53, 12:29, 09:55,
+    11:35 — nowhere near time-ordered — and any `since_report` stamped
+    on more than one row would print twice.
+
+    Now: flatten every step from every row into one list, sort strictly
+    by the timestamp on the step, and drop duplicates (same instant +
+    same words). Steps with no timestamp — the trailing "Not
+    acknowledged by anybody yet." — go at the end, once, only if the
+    card is currently unacknowledged.
+    """
     if not rows:
         return []
-    # Sort earliest first.
-    ordered = sorted(rows, key=lambda r: str(r.get("created_at") or ""))
     steps: List[Dict[str, Any]] = []
-    for idx, r in enumerate(ordered):
-        prefix = "" if idx == len(ordered) - 1 else "Earlier alarm — "
+    for r in rows:
         for s in _story(r):
             steps.append({
                 "at": s.get("at"),
-                "words": prefix + str(s.get("words") or ""),
+                "words": str(s.get("words") or ""),
             })
-    return steps
+    # #304: dedupe on (at, words) so the same event, stamped on more
+    # than one row (e.g., a `since_report` shared across sibling rows),
+    # only appears once.
+    seen = set()
+    dedup: List[Dict[str, Any]] = []
+    for s in steps:
+        key = (str(s.get("at") or ""), s.get("words") or "")
+        if key in seen:
+            continue
+        seen.add(key)
+        dedup.append(s)
+    # #304: strict time order. Steps without a timestamp — the "not
+    # acknowledged" placeholder — go last, and only once, and only if
+    # the card is truly unacknowledged (i.e. every open row is unacked).
+    timed = [s for s in dedup if s.get("at")]
+    untimed = [s for s in dedup if not s.get("at")]
+    timed.sort(key=lambda s: str(s.get("at") or ""))
+    # Only keep the trailing "not acknowledged" step if EVERY underlying
+    # row is currently unacknowledged — otherwise a person whose newest
+    # row is acked would still see "not acknowledged by anybody yet."
+    if any(r.get("ack_at") for r in rows):
+        untimed = [s for s in untimed if "Not acknowledged" not in s["words"]]
+    # And dedupe the untimed tail too — one placeholder is enough.
+    seen_untimed = set()
+    untimed_out: List[Dict[str, Any]] = []
+    for s in untimed:
+        if s["words"] in seen_untimed:
+            continue
+        seen_untimed.add(s["words"])
+        untimed_out.append(s)
+    return timed + untimed_out
 
 
 async def dedupe_open_alarms(db, now: Optional[datetime] = None) -> Dict[str, Any]:
