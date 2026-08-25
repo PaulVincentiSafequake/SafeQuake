@@ -1184,6 +1184,19 @@
       cursor: pointer; border: 0; background: #1F8A3A; color: #fff;
     }
     .qa-idle-modal .qa-idle-btn:hover { opacity: 0.9; }
+    /* #135 — a sign-out you cannot miss. Flashes, but never covers the
+       Google sign-in button sitting inside it. */
+    .qa-signed-out.qa-so-loud {
+      animation: qaSoLoud 0.9s steps(1, end) 6;
+      box-shadow: 0 0 0 4px rgba(255,42,42,0.55);
+    }
+    @keyframes qaSoLoud {
+      0%, 49%   { background: #B31212; }
+      50%, 100% { background: #5A0000; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .qa-signed-out.qa-so-loud { animation: none; background: #B31212; }
+    }
   `;
   const styleEl = document.createElement("style");
   styleEl.textContent = CSS;
@@ -1267,6 +1280,17 @@
     wrap.setAttribute("role", "status");
     wrap.setAttribute("aria-live", "polite");
     const sessionExpired = !!window.__qgSessionJustExpired;
+    if (sessionExpired) {
+      // #135: a silent sign-out is how an operator ends up staring at
+      // numbers that stopped moving twenty minutes ago. This banner is
+      // in the normal document flow (it must never cover the Google
+      // button — see #265 above), but it flashes, it announces itself to
+      // a screen reader, it scrolls itself into view and it makes a
+      // noise. Loud, without hiding the control that fixes it.
+      wrap.classList.add("qa-so-loud");
+      wrap.setAttribute("role", "alert");
+      wrap.setAttribute("aria-live", "assertive");
+    }
     const heading = sessionExpired
       ? "Your session ended — sign in again to keep working"
       : "You are signed out — sign in to use the dashboard";
@@ -1281,7 +1305,12 @@
       '</div>' +
       '<div id="qa-google-button"></div>';
     container.appendChild(wrap);
-
+    if (sessionExpired && !window.__qgSignOutAnnounced) {
+      // Announce ONCE per sign-out, not on every re-render of this banner.
+      window.__qgSignOutAnnounced = true;
+      try { wrap.scrollIntoView({block: "center", behavior: "smooth"}); } catch (_) {}
+      try { if (window.qgSound) window.qgSound.play("fault"); } catch (_) {}
+    }
     const tryInit = () => {
       if (!window.google || !window.google.accounts || !window.google.accounts.id) {
         return setTimeout(tryInit, 100);
@@ -1325,6 +1354,7 @@
     // signing back in — next render (if any) will read the neutral
     // heading, not the alarm one.
     try { window.__qgSessionJustExpired = false; } catch (_) {}
+    try { window.__qgSignOutAnnounced = false; } catch (_) {}
     try {
       await onGoogleCredential(response);
     } catch (e) {
@@ -1501,14 +1531,44 @@
       var c = ensure();
       if (c && c.state === "running") everBlocked = false;
     }, true);
-    function tone(c, freq, at, dur, peak) {
+    // #285 (Paul, 2026-08-24): "the alarm is too quiet." A single sine
+    // wave at 0.14 gain is a polite notification chime, not a control-room
+    // alarm. Everything below is now routed through a limiter and pushed
+    // as close to full output as a browser allows: a square wave (far more
+    // energy in the band where laptop and tablet speakers are loudest),
+    // a harmonic on top of it, and a two-tone pattern repeated three
+    // times so it reads as an ALARM and not as an email arriving.
+    var bus = null;
+    function master(c) {
+      if (bus && bus.__ctx === c) return bus;
+      var g = c.createGain();
+      g.gain.value = 0.95;
+      // A limiter, not a compressor for taste: it stops the stacked
+      // oscillators clipping into distortion at high output, which on
+      // small speakers sounds quieter, not louder.
+      try {
+        var comp = c.createDynamicsCompressor();
+        comp.threshold.value = -6;
+        comp.knee.value = 0;
+        comp.ratio.value = 20;
+        comp.attack.value = 0.002;
+        comp.release.value = 0.1;
+        g.connect(comp); comp.connect(c.destination);
+      } catch (_) {
+        g.connect(c.destination);
+      }
+      g.__ctx = c;
+      bus = g;
+      return g;
+    }
+    function tone(c, out, freq, at, dur, peak, type) {
       var osc = c.createOscillator(), g = c.createGain();
-      osc.type = "sine";
+      osc.type = type || "sine";
       osc.frequency.value = freq;
       g.gain.setValueAtTime(0.0001, c.currentTime + at);
-      g.gain.exponentialRampToValueAtTime(peak, c.currentTime + at + 0.02);
+      g.gain.exponentialRampToValueAtTime(peak, c.currentTime + at + 0.015);
       g.gain.exponentialRampToValueAtTime(0.0001, c.currentTime + at + dur);
-      osc.connect(g); g.connect(c.destination);
+      osc.connect(g); g.connect(out);
       osc.start(c.currentTime + at);
       osc.stop(c.currentTime + at + dur + 0.05);
     }
@@ -1518,16 +1578,26 @@
       // they need two different actions.
       play: function (kind) {
         if (Date.now() < muteUntil) return false;
-        if (Date.now() - lastPlay < 2000) return false;
+        // #285: the pattern itself is ~1.1s long. The old 2s guard was
+        // long enough to swallow a repeat that was deliberately asked for.
+        if (Date.now() - lastPlay < 1200) return false;
         var c = ensure();
         if (!c || c.state !== "running") return false;
         lastPlay = Date.now();
+        var out = master(c);
         if (kind === "fault") {
-          tone(c, 392, 0, 0.22, 0.16);
-          tone(c, 294, 0.26, 0.30, 0.16);
+          // Falling interval — "the board itself has a problem".
+          tone(c, out, 392, 0, 0.24, 0.55, "square");
+          tone(c, out, 294, 0.28, 0.34, 0.55, "square");
         } else {
-          tone(c, 880, 0, 0.16, 0.14);
-          tone(c, 1175, 0.19, 0.20, 0.14);
+          // Rising two-tone, three times. Loud, unmistakably an alarm.
+          for (var i = 0; i < 3; i++) {
+            var t = i * 0.36;
+            tone(c, out, 880,  t,        0.17, 0.60, "square");
+            tone(c, out, 1760, t,        0.17, 0.22, "sine");
+            tone(c, out, 1175, t + 0.18, 0.17, 0.60, "square");
+            tone(c, out, 2350, t + 0.18, 0.17, 0.22, "sine");
+          }
         }
         return true;
       },
@@ -1787,7 +1857,21 @@
       });
     }
     headers["Authorization"] = "Bearer " + jwt;
-    const r = await fetch(CONFIG.API_BASE + path, Object.assign({}, options, {headers}));
+    var r = await fetch(CONFIG.API_BASE + path, Object.assign({}, options, {headers}));
+    if (r.status === 401) {
+      // #135 (Paul, 2026-08-24): "it signed me out in the middle of a
+      // task." Before dropping the session, try ONCE to renew it. A
+      // renewal succeeds only if the account is still allowed, still
+      // enabled, still the same session_version, and still inside the
+      // shift's absolute limit — so this is not a way around revocation,
+      // it is only a way to stop the CLOCK signing somebody out while
+      // they are working. One attempt, never a loop.
+      var fresh = await renewSession();
+      if (fresh) {
+        headers["Authorization"] = "Bearer " + fresh;
+        r = await fetch(CONFIG.API_BASE + path, Object.assign({}, options, {headers}));
+      }
+    }
     if (r.status === 401 || r.status === 403) {
       // Batch 7 A1 (minimum carve-out): treat 403 the same as 401 for
       // session-loss purposes. setStored(null,null) fires notify() which
@@ -1798,6 +1882,98 @@
     }
     return r;
   };
+
+  // ── Keeping an ACTIVE session alive (#135) ────────────────────────────
+  // Paul, 2026-08-24: "It signed me out in the middle of a task."
+  //
+  // The token the server issues is deliberately short-lived — that is what
+  // makes disabling an account take effect in seconds rather than at the
+  // end of a shift. What was missing was renewal. The first admin call
+  // made after the token's life ran out returned "not authenticated", the
+  // dashboard dropped the session, and an operator mid-task was signed
+  // out by nothing more than a clock.
+  //
+  // Now: while the tab is open we renew the token a few minutes before it
+  // runs out, and any call that still comes back unauthenticated gets one
+  // renewal attempt before the session is dropped. The idle timeout is
+  // still the thing that signs an ABSENT operator out, and the server's
+  // absolute per-shift limit is still the thing that eventually forces a
+  // fresh Google sign-in. Neither is weakened here.
+  var RENEW_BEFORE_MS = 5 * 60 * 1000;
+  var renewTimer = null;
+  var renewInFlight = null;
+
+  function jwtExpiryMs(token) {
+    try {
+      var part = String(token || "").split(".")[1];
+      if (!part) return 0;
+      var json = atob(part.replace(/-/g, "+").replace(/_/g, "/"));
+      var exp = JSON.parse(json).exp;
+      return exp ? exp * 1000 : 0;
+    } catch (_) { return 0; }
+  }
+
+  // Single-flight: a dozen panels poll this dashboard, and a dozen
+  // simultaneous renewals would be a self-inflicted burst of traffic
+  // against the one endpoint we need to be reliable.
+  function renewSession() {
+    if (renewInFlight) return renewInFlight;
+    var jwt = getStoredJwt();
+    if (!jwt) return Promise.resolve(null);
+    renewInFlight = (async function () {
+      try {
+        var r = await fetch(CONFIG.API_BASE + "/api/auth/refresh", {
+          method: "POST",
+          headers: {"Authorization": "Bearer " + jwt},
+          cache: "no-store",
+        });
+        if (!r.ok) return null;
+        var data = await r.json();
+        if (!data || !data.token) return null;
+        setStored(data.token, data.user || getStoredUser());
+        return data.token;
+      } catch (_) {
+        // Offline or a server blip. Not a sign-out: the existing token is
+        // still valid for a few more minutes and the next attempt is a
+        // few seconds away.
+        return null;
+      } finally {
+        renewInFlight = null;
+      }
+    })();
+    return renewInFlight;
+  }
+  window.qaRenewSession = renewSession;
+
+  function scheduleRenew() {
+    if (renewTimer) { clearTimeout(renewTimer); renewTimer = null; }
+    var jwt = getStoredJwt();
+    if (!jwt) return;
+    var exp = jwtExpiryMs(jwt);
+    // No readable expiry (shouldn't happen) — fall back to a fixed cadence
+    // rather than never renewing at all.
+    var delay = exp ? (exp - Date.now() - RENEW_BEFORE_MS) : (5 * 60 * 1000);
+    if (delay < 5000) delay = 5000;
+    renewTimer = setTimeout(function () {
+      renewSession().then(scheduleRenew);
+    }, delay);
+  }
+
+  // A tab that was asleep wakes up with a token that may be seconds from
+  // expiring — renew before the operator's first click turns into a
+  // "signed out" surprise.
+  function renewIfExpiringSoon() {
+    var jwt = getStoredJwt();
+    if (!jwt) return;
+    var exp = jwtExpiryMs(jwt);
+    if (!exp || exp - Date.now() < RENEW_BEFORE_MS) renewSession().then(scheduleRenew);
+  }
+  document.addEventListener("visibilitychange", function () {
+    if (!document.hidden) renewIfExpiringSoon();
+  });
+  window.addEventListener("focus", renewIfExpiringSoon);
+  listeners.add(scheduleRenew);
+  scheduleRenew();
 
   // ── Idle timeout ──────────────────────────────────────────────────────
   // Signs the operator out after CONFIG.IDLE_TIMEOUT_MS of no activity.
@@ -3030,6 +3206,62 @@
     50%, 100% { background: #7E1414; border-color: #FF6B6B; }
   }
   .qg-alarm.is-acked { background: #2B1616; border-color: #6A4A4A; }
+  /* #285 (Paul, 2026-08-24): "if the sound is muted or the room is loud,
+     nothing on the screen is unmistakable." A flashing frame around the
+     WHOLE window plus a word at the bottom of the screen. It is drawn over
+     everything, it cannot be clicked through by accident (pointer-events:
+     none — clicks pass straight through to the board underneath), and it
+     is driven only by the unacknowledged count, so silencing the sound
+     cannot hide it. */
+  .qg-alarm-visual {
+    position: fixed; inset: 0; z-index: 2147483000;
+    pointer-events: none; display: none;
+  }
+  body.qg-alarm-unacked .qg-alarm-visual { display: block; }
+  .qg-av-frame {
+    position: absolute; inset: 0;
+    border: 12px solid #FF2A2A;
+    animation: qgAvFrame 0.85s steps(1, end) infinite;
+  }
+  @keyframes qgAvFrame {
+    0%, 49%   { border-color: #FF2A2A; }
+    50%, 100% { border-color: #4A0000; }
+  }
+  .qg-av-tag {
+    position: absolute; left: 50%; bottom: 0; transform: translateX(-50%);
+    background: #C10000; color: #fff; font-weight: 900; font-size: 14px;
+    letter-spacing: .06em; text-transform: uppercase;
+    padding: 7px 16px; border-radius: 10px 10px 0 0;
+    box-shadow: 0 -2px 10px rgba(0,0,0,.45);
+    animation: qgAvTag 0.85s steps(1, end) infinite;
+    max-width: 96vw; text-align: center;
+  }
+  @keyframes qgAvTag {
+    0%, 49%   { background: #C10000; color: #fff; }
+    50%, 100% { background: #fff;    color: #C10000; }
+  }
+  /* Flashing is a deliberate alarm signal, but it is also a barrier for
+     some people. With reduced motion asked for, the frame and the word
+     stay — solid, permanent, still impossible to miss. */
+  @media (prefers-reduced-motion: reduce) {
+    .qg-av-frame, .qg-av-tag { animation: none; }
+    .qg-av-frame { border-color: #FF2A2A; }
+  }
+  /* #286 — one action for a flood of alarms. */
+  .qg-annun-bulk {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    background: #490D0D; border: 1px solid #FF8A8A; border-radius: 8px;
+    padding: 8px 10px;
+  }
+  .qg-annun-bulk[hidden] { display: none; }
+  .qg-annun-bulk-text { flex: 1 1 240px; font-size: 14px; font-weight: 700; }
+  .qg-annun-bulk-sub { display: block; font-weight: 400; font-size: 12.5px; color: #FFD9D9; margin-top: 2px; }
+  .qg-annun-bulk button {
+    background: #fff; color: #7A0B0B; border: 0; border-radius: 8px;
+    padding: 9px 14px; font-size: 14px; font-weight: 800; cursor: pointer;
+    min-height: 40px;
+  }
+  .qg-annun-bulk button[disabled] { opacity: .6; cursor: default; }
   .qg-alarm-shape { font-size: 20px; line-height: 1; width: 22px; text-align: center; }
   .qg-alarm-body { flex: 1; }
   .qg-alarm-word {
@@ -3136,6 +3368,10 @@
              invisible — this line stays in view whether anything is
              sounding or not. -->
         <div class="qg-annun-note" id="qg-annun-quiet" hidden></div>
+        <!-- #286: at mass-casualty scale nobody can click forty-seven
+             buttons. One action silences the board so the operator can
+             start working the list; every individual row stays below. -->
+        <div class="qg-annun-bulk" id="qg-annun-bulk" hidden></div>
         <div id="qg-annun-rows"></div>
       </div>
       <!-- #297: any filter that is on must be obvious. An operator must
@@ -7886,8 +8122,27 @@ window.QuakeAngelRescue = (function () {
   var alarmData = null;
   var alarmFault = "";
   var lastAlarmSound = 0;
-  var ALARM_SOUND_EVERY_MS = 10000;
+  // #285: the sound repeats until somebody acknowledges. Ten seconds of
+  // silence between chimes was long enough for the room to decide it had
+  // stopped. Three seconds is a sound that will not be ignored.
+  var ALARM_SOUND_EVERY_MS = 3000;
   var SHAPE_GLYPH = { triangle: "▲", diamond: "◆", square: "■" };
+
+  // #285 — the full-window visual. Built once, drawn over everything,
+  // clicks pass through it, and it is shown purely on the unacknowledged
+  // count so silencing the sound cannot hide it.
+  function ensureAlarmVisual() {
+    var el = document.getElementById("qg-alarm-visual");
+    if (el) return el;
+    el = document.createElement("div");
+    el.id = "qg-alarm-visual";
+    el.className = "qg-alarm-visual";
+    el.setAttribute("aria-hidden", "true");
+    el.innerHTML = '<div class="qg-av-frame"></div>' +
+      '<div class="qg-av-tag" id="qg-alarm-visual-tag"></div>';
+    document.body.appendChild(el);
+    return el;
+  }
 
   async function refreshAlarms() {
     try {
@@ -7910,6 +8165,16 @@ window.QuakeAngelRescue = (function () {
         method: "POST", body: JSON.stringify(payload),
       });
       if (!res.ok) { banner("err", window.qgHumanHttpMessage(res.status)); return; }
+      // #286: after a bulk acknowledgement, say what has and has not
+      // happened. Acknowledging is not resolving, and at this scale that
+      // distinction has to be spelled out every time.
+      if (payload && payload.all) {
+        var data = await res.json().catch(function () { return {}; });
+        var n = (data && data.acknowledged) || 0;
+        banner("ok", n === 1
+          ? "1 alarm acknowledged. It is still on the board — acknowledging stops the sound, it does not mean anyone has been helped."
+          : n + " alarms acknowledged in your name. They are all still on the board — acknowledging stops the sound, it does not mean anyone has been helped.");
+      }
       await refreshAlarms();
     } catch (e) {
       banner("err", "We could not record that. Nothing has been acknowledged.");
@@ -7923,8 +8188,16 @@ window.QuakeAngelRescue = (function () {
     var headEl = document.getElementById("qg-annun-headline");
     var noteEl = document.getElementById("qg-annun-note");
     var muteEl = document.getElementById("qg-annun-mute");
+    var bulkEl = document.getElementById("qg-annun-bulk");
+    ensureAlarmVisual();
     if (!wrap || !rowsEl) return;
-    if (!isSignedIn()) { wrap.hidden = true; return; }
+    if (!isSignedIn()) {
+      wrap.hidden = true;
+      // Never leave the whole-window alarm frame flashing over a signed-out
+      // board — there is nothing the person looking at it can do.
+      document.body.classList.remove("qg-alarm-unacked");
+      return;
+    }
     wrap.hidden = false;
 
     var groups = (alarmData && alarmData.groups) || [];
@@ -7977,6 +8250,47 @@ window.QuakeAngelRescue = (function () {
       ? "Turn the sound back on now"
       : "Silence the sound for 5 minutes";
 
+    // #285 — the whole-window frame and the word at the bottom of the
+    // screen. Driven by the unacknowledged count alone: muting the sound
+    // cannot turn it off, and it says how many, not just "something".
+    document.body.classList.toggle("qg-alarm-unacked", unacked > 0);
+    var tagEl = document.getElementById("qg-alarm-visual-tag");
+    if (tagEl) {
+      tagEl.textContent = unacked > 0
+        ? (unacked === 1
+            ? "1 alarm — nobody has acknowledged it"
+            : unacked + " alarms — nobody has acknowledged them")
+        : "";
+    }
+
+    // #286 — one action for a flood. The breakdown names the kinds so the
+    // operator knows what they are acknowledging, and every individual
+    // alarm is still listed underneath with its own button.
+    if (bulkEl) {
+      if (unacked > 1) {
+        var byWord = {};
+        groups.forEach(function (g) {
+          var n = (g.unacked_ids || []).length;
+          if (!n) return;
+          var w = g.word || "ALARM";
+          byWord[w] = (byWord[w] || 0) + n;
+        });
+        var parts = Object.keys(byWord).map(function (w) {
+          return byWord[w] + " " + w;
+        });
+        bulkEl.hidden = false;
+        bulkEl.innerHTML =
+          '<span class="qg-annun-bulk-text">' +
+            window.qgEsc(parts.join(" · ")) +
+            '<span class="qg-annun-bulk-sub">Acknowledging stops the sound and the flashing. Every one of them stays on the board until the person is rescued or taken off it.</span>' +
+          "</span>" +
+          '<button type="button" id="qg-annun-ack-all">Acknowledge all ' + unacked + "</button>";
+      } else {
+        bulkEl.hidden = true;
+        bulkEl.innerHTML = "";
+      }
+    }
+
     rowsEl.innerHTML = groups.map(function (g) {
       var glyph = SHAPE_GLYPH[g.shape] || "■";
       var acked = !!g.acknowledged;
@@ -8028,6 +8342,17 @@ window.QuakeAngelRescue = (function () {
   }
 
   document.addEventListener("click", function (ev) {
+    // #286: one action for the whole board. Deliberately NOT behind a
+    // confirmation dialog — the operator is looking at a flood and a
+    // second click is friction at exactly the wrong moment. It is safe
+    // because acknowledging removes nothing: every alarm stays on the
+    // board, and every row records who acknowledged it and when.
+    if (ev.target && ev.target.id === "qg-annun-ack-all") {
+      ev.target.disabled = true;
+      ev.target.textContent = "Acknowledging…";
+      ackAlarm({ all: true });
+      return;
+    }
     var btn = ev.target.closest && ev.target.closest(".qg-alarm-ack");
     if (btn) { ackAlarm({ group_key: btn.dataset.group }); return; }
     if (ev.target && ev.target.id === "qg-annun-mute") {
@@ -8041,6 +8366,18 @@ window.QuakeAngelRescue = (function () {
   // nobody must be able to forget they silenced it.
   setInterval(function () {
     if (window.qgSound.muteRemainingMs() > 0) renderAlarms();
+  }, 1000);
+
+  // #285 — the sound repeats until somebody acknowledges, on its own
+  // timer rather than on the network poll. Tying it to the 4-second
+  // refresh meant a slow or failed poll silently stopped the alarm; the
+  // alarm must be the last thing to stop working, not the first.
+  setInterval(function () {
+    if (!isSignedIn()) return;
+    var un = (alarmData && alarmData.unacknowledged) || 0;
+    if (un <= 0) return;
+    if (Date.now() - lastAlarmSound <= ALARM_SOUND_EVERY_MS) return;
+    if (window.qgSound.play("alarm")) lastAlarmSound = Date.now();
   }, 1000);
 
   refresh();
