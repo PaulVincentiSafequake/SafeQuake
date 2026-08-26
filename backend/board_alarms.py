@@ -711,11 +711,18 @@ async def list_open(db, now: Optional[datetime] = None,
             if quiet:
                 q_at = quiet.get("created_at")
                 existing_since = card.get("since_report") or {}
-                extra = ("Their phone has also gone quiet since "
-                         + str(q_at or "")).strip()
+                # #306 (Paul, 2026-08-26 — live re-test): the sentence
+                # used to concatenate `str(q_at)` directly, which leaked
+                # a raw ISO timestamp like "2026-08-26T08:16:16.166124
+                # +00:00" onto the card. The at-timestamp is carried on
+                # the `since_report.at` field the client formats itself,
+                # so the sentence just names the fact.
+                extra = "Their phone has also gone quiet"
                 if existing_since.get("words"):
                     card["since_report"] = {
                         "words": existing_since["words"] + ". " + extra,
+                        # Keep the newest at-timestamp so the client's
+                        # own formatter picks the right instant.
                         "at": existing_since.get("at") or q_at,
                     }
                 else:

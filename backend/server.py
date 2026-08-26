@@ -1135,7 +1135,28 @@ async def get_audit_log(
         if since:
             aq["ack_at"]["$gte"] = since
         rows = await db.board_alarms.find(aq, {"_id": 0}).sort("ack_at", -1).to_list(limit)
+        # #290 (Paul, 2026-08-26 — live re-test): the "Recent activity →
+        # People" list showed a person as STATUS UNKNOWN while the alarm
+        # panel showed them as GETTING WORSE / IMMEDIATE for the same
+        # instant. The feed's per-person grouper reads status/severity
+        # off the newest event for the device, and an `alarm_acknowledged`
+        # event had none — so a fresh acknowledgement literally erased
+        # the person's condition from the People list. Enrich each
+        # acknowledged event with the CURRENT device_status snapshot so
+        # both surfaces read from a single fact per person.
+        ack_device_ids = list({r.get("device_id") for r in rows if r.get("device_id")})
+        ack_status_by_id: dict = {}
+        if ack_device_ids:
+            snap_rows = await db.device_status.find(
+                {"device_id": {"$in": ack_device_ids}},
+                {"_id": 0, "device_id": 1, "status": 1, "severity": 1,
+                 "mobility": 1, "egress": 1, "needs_extraction": 1,
+                 "latitude": 1, "longitude": 1, "battery_pct": 1,
+                 "battery_state": 1, "platform": 1},
+            ).to_list(len(ack_device_ids))
+            ack_status_by_id = {s["device_id"]: s for s in snap_rows}
         for r in rows:
+            snap = ack_status_by_id.get(r.get("device_id")) or {}
             events.append({
                 "kind": "alarm_acknowledged",
                 "at": r.get("ack_at"),
@@ -1149,6 +1170,19 @@ async def get_audit_log(
                 "acknowledged_by": r.get("ack_by"),
                 "resolved_at": r.get("resolved_at"),
                 "resolved_reason": r.get("resolved_reason"),
+                # #290: the person's current state, so the People list
+                # never disagrees with the alarm panel about the same
+                # person at the same instant.
+                "status": snap.get("status"),
+                "severity": snap.get("severity"),
+                "mobility": snap.get("mobility"),
+                "egress": snap.get("egress"),
+                "needs_extraction": bool(snap.get("needs_extraction")),
+                "latitude": snap.get("latitude"),
+                "longitude": snap.get("longitude"),
+                "battery_pct": snap.get("battery_pct"),
+                "battery_state": snap.get("battery_state"),
+                "platform": snap.get("platform"),
             })
 
     # Merge and clip.
@@ -3816,7 +3850,9 @@ async def admin_incident_status(
             days = int(round(ACTIVE_WINDOW_H / 24))
             reason = (
                 "An alert is running. You will stay signed in while it is. "
-                "This lasts until you call the alert off, or "
+                "Acknowledging an alarm silences it but does NOT call the "
+                "alert off — the incident keeps running until you press "
+                "'Call alert off (false alarm)', a rescue closes it, or "
                 f"{days} days pass.\n"
                 f"Running for {dur}."
             )
