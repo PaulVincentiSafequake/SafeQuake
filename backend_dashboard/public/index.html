@@ -2701,6 +2701,12 @@
     #${CONTAINER_ID} .qa-pv-radius-row input[type="number"] {
       width: 90px; padding: 7px; border: 1px solid #cbb060;
       border-radius: 6px; font-size: 13px; background: #fffdf5;
+      /* #300 (Paul, 2026-08-26 — live re-test): the input inherited the
+         dark theme's near-white text colour, which on a cream background
+         was effectively invisible. Force a dark colour so what the
+         operator types renders regardless of theme. */
+      color: #1B1005;
+      color-scheme: light;
     }
     #${CONTAINER_ID} .qa-pv-radius-row .qa-pv-btn-save {
       background: #EA9500; color: #1B1005; padding: 8px 14px;
@@ -3318,7 +3324,20 @@
     background: var(--bg, #0F1115);
     padding-bottom: 8px;
     display: flex; flex-direction: column; gap: 8px;
+    /* #295 (Paul, 2026-08-26 — live re-test): pattern #4 (content
+       clipped behind fixed elements). While an incident is running,
+       the sticky top strip could grow to more than half the viewport
+       — many alarm cards, plus the "alert running" banner — and hide
+       the stat boxes and casualty list beneath it. Cap the whole
+       sticky strip at 50vh and scroll its own overflow inside itself
+       so the working board below is always reachable. */
+    max-height: 50vh;
+    overflow-y: auto;
   }
+  /* Same rule at the alarm-panel level so the internal rows list
+     inside the annunciator scrolls when the operator is looking at
+     it in isolation, without truncating individual card content. */
+  #qg-annun-rows { max-height: 42vh; overflow-y: auto; }
   /* #296 — the annunciator strip. Word + shape + colour, never colour
      alone, so it reads with the sound off and in black and white. */
   .qg-annun {
@@ -6124,14 +6143,33 @@ window.QuakeAngelRescue = (function () {
         "These are clearly fake.\n" +
         "Their names all start with TEST.\n" +
         "Their rescue codes all start with Z.\n\n" +
+        "\u201cShow test entries\u201d will be switched on so they appear in the counts, the map and the alarm panel — untick it any time to hide them again.\n\n" +
         "You can remove them all again with one button.",
         "Yes — add them"))) return;
-    addBtn.disabled = true; tpSay("Adding…");
+    addBtn.disabled = true; tpSay("Adding\u2026");
     try {
       var r = await window.qaApi("/api/admin/test-people/seed", { method: "POST", body: "{}" });
       var d = await r.json();
       if (!r.ok) throw new Error(d && d.detail || ("HTTP " + r.status));
-      tpSay("Added " + (d.seeded || 0) + " test people. Their rows will look clearly fake on the map.");
+      // #301 (Paul, 2026-08-26 — live re-test v2): the seed had been
+      // going in fine, but neither the map markers nor the six stat
+      // boxes moved because "Show test entries" was left off. The
+      // operator pressed a button labelled "Add 33 test people" and
+      // saw nothing add — the exact failure this button is supposed
+      // to demonstrate. It now switches the toggle on for them and
+      // forces one refresh, so the count boxes tick up, the map
+      // fills, and the alarm panel starts sounding in the same
+      // action.
+      try {
+        var box = document.getElementById("qg-show-tests");
+        if (box && !box.checked) {
+          box.checked = true;
+          box.dispatchEvent(new Event("change"));   // triggers refresh + alarm reload
+        } else if (typeof refresh === "function") {
+          refresh();
+        }
+      } catch (_) { /* refresh is best-effort; the poll will catch up */ }
+      tpSay("Added " + (d.seeded || 0) + " test people. \u201cShow test entries\u201d has been switched on so the counts, map and alarm panel include them. Untick it to hide them again.");
     } catch (e) {
       tpSay((e && e.message) || "Could not add test people.", true);
     } finally { addBtn.disabled = false; }
