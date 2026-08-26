@@ -3320,17 +3320,18 @@
     font-size: 13.5px; line-height: 1.4;
   }
   .qg-topstrip {
-    position: sticky; top: 0; z-index: 40;
+    /* #307: alarm panel paints above every top overlay. z-index 100000
+       beats banner (99998) and stale bar (12000); `isolation: isolate`
+       locks its stacking context. `top` uses a CSS variable so a
+       visible fixed banner also pushes the strip down. */
+    position: sticky; top: var(--qg-fixed-top-offset, 0px);
+    z-index: 100000;
+    isolation: isolate;
     background: var(--bg, #0F1115);
     padding-bottom: 8px;
     display: flex; flex-direction: column; gap: 8px;
-    /* #295 (Paul, 2026-08-26 — live re-test): pattern #4 (content
-       clipped behind fixed elements). While an incident is running,
-       the sticky top strip could grow to more than half the viewport
-       — many alarm cards, plus the "alert running" banner — and hide
-       the stat boxes and casualty list beneath it. Cap the whole
-       sticky strip at 50vh and scroll its own overflow inside itself
-       so the working board below is always reachable. */
+    /* #295: cap the sticky strip at 50vh so the working board below
+       is always reachable during a busy incident. */
     max-height: 50vh;
     overflow-y: auto;
   }
@@ -8288,6 +8289,7 @@ window.QuakeAngelRescue = (function () {
       bar.hidden = true;
       bar.classList.remove("qg-stale-flash");
       try { document.body.style.paddingTop = ""; } catch (_) {}
+      try { if (window.qgUpdateFixedTopOffset) window.qgUpdateFixedTopOffset(); } catch (_) {}
       staleAnnounced = false;
       return;
     }
@@ -8303,6 +8305,7 @@ window.QuakeAngelRescue = (function () {
       bar.hidden = true;
       bar.classList.remove("qg-stale-flash");
       try { document.body.style.paddingTop = ""; } catch (_) {}
+      try { if (window.qgUpdateFixedTopOffset) window.qgUpdateFixedTopOffset(); } catch (_) {}
       staleAnnounced = false;
       return;
     }
@@ -8317,6 +8320,9 @@ window.QuakeAngelRescue = (function () {
     // The bar is fixed to the top of the window, so the page has to make
     // room for it — otherwise it covers the alert controls underneath.
     try { document.body.style.paddingTop = bar.offsetHeight + "px"; } catch (_) {}
+    // #307: also push the sticky alarm panel down by the same amount so
+    // the annunciator buttons can't sit behind this red bar.
+    try { if (window.qgUpdateFixedTopOffset) window.qgUpdateFixedTopOffset(); } catch (_) {}
     if (head) head.textContent = "The board is not updating";
     if (detail) {
       detail.textContent = (lastGoodWall
@@ -8821,10 +8827,88 @@ window.QuakeAngelRescue = (function () {
     return false;
   }
 
-  // #302 — the board checks its own buttons. If anything is sitting on top
-  // of the Acknowledge button, the panel SAYS so instead of leaving an
-  // operator clicking a dead control during an incident. This is exactly
-  // the fault Paul had to diagnose by hand; the board should have told him.
+  // #302 / #307 — the board checks its own buttons. If anything is
+  // sitting on top of the Acknowledge / Show-me-who / Silence buttons,
+  // the panel SAYS so instead of leaving an operator clicking a dead
+  // control during an incident. This is exactly the fault Paul had to
+  // diagnose by hand; the board should have told him.
+  //
+  // #307 (Paul, 2026-08-27): the warning MUST read in plain English —
+  // no code names. An operator should never have to know that an
+  // element is called "qg-banner-text" or "qg-tremor-strip"; those
+  // are internal names. Map every element the check has ever seen to
+  // a human phrase, and never let a raw ID or class leak into the
+  // message an operator sees. The CSS side of the fix bumps the
+  // panel's z-index and reserves a top gap when fixed banners show,
+  // so this warning should almost never fire — but if it does, it
+  // reads like a sentence, not like a bug report.
+  //
+  // Any element that lands here in future without a mapping shows up
+  // as the generic "something else on the page"; the console still
+  // logs the exact element for the developer, so nothing is lost.
+  var FRIENDLY_COVER_NAMES = {
+    // The transient status banner at the very top of the page (Ready /
+    // success / error toast) and its inner parts.
+    "qg-banner":       "the status message bar at the top of the page",
+    "qg-banner-text":  "the status message bar at the top of the page",
+    "qg-banner-icon":  "the status message bar at the top of the page",
+    "qg-banner-close": "the status message bar at the top of the page",
+    // The trigger / stop-reminders / call-off buttons.
+    "qg-trigger-wrap": "the emergency-alert buttons at the top of the page",
+    "qg-trigger-btn":  "the emergency-alert buttons at the top of the page",
+    "qg-stop-reminders-btn": "the emergency-alert buttons at the top of the page",
+    "qg-stand-down-btn":     "the emergency-alert buttons at the top of the page",
+    // The tremor-notifications status strip.
+    "qg-tremor-strip":      "the tremor-notifications status strip",
+    "qg-tremor-strip-text": "the tremor-notifications status strip",
+    "qg-tremor-strip-cta":  "the tremor-notifications status strip",
+    // The "board is not updating" red bar.
+    "qg-stale-bar":    "the ‘board not updating’ warning bar",
+    "qg-stale-main":   "the ‘board not updating’ warning bar",
+    "qg-stale-detail": "the ‘board not updating’ warning bar",
+    "qg-stale-btn":    "the ‘board not updating’ warning bar",
+    "qg-stale-shape":  "the ‘board not updating’ warning bar",
+    // The dashboard header (logo + title).
+    "header":          "the page header",
+    // Modal / dialog backdrops.
+    "qg-modal-backdrop": "an open dialog on the page",
+    "qg-modal":          "an open dialog on the page",
+    "qg-rescue-modal":   "an open dialog on the page",
+    // Filter chips or map controls near the top.
+    "map-filters":     "the map filter buttons",
+    "map-filter-btn":  "the map filter buttons"
+  };
+  function friendlyDescribeCover(el) {
+    if (!el) return "something else on the page";
+    var tokens = [];
+    if (el.id) tokens.push(el.id);
+    var cls = el.className;
+    // SVG elements return SVGAnimatedString; coerce to string safely.
+    if (cls && typeof cls === "object" && typeof cls.baseVal === "string") cls = cls.baseVal;
+    if (typeof cls === "string" && cls) {
+      cls.split(/\s+/).forEach(function (t) { if (t) tokens.push(t); });
+    }
+    // Walk up 3 ancestors too, so a click on a child <span> inside a
+    // banner still resolves to "the status message bar".
+    var node = el, depth = 0;
+    while (node && depth < 3) {
+      if (node.id && FRIENDLY_COVER_NAMES[node.id]) return FRIENDLY_COVER_NAMES[node.id];
+      var ncls = node.className;
+      if (ncls && typeof ncls === "object" && typeof ncls.baseVal === "string") ncls = ncls.baseVal;
+      if (typeof ncls === "string" && ncls) {
+        var parts = ncls.split(/\s+/);
+        for (var i = 0; i < parts.length; i++) {
+          if (FRIENDLY_COVER_NAMES[parts[i]]) return FRIENDLY_COVER_NAMES[parts[i]];
+        }
+      }
+      node = node.parentElement; depth += 1;
+    }
+    for (var j = 0; j < tokens.length; j++) {
+      if (FRIENDLY_COVER_NAMES[tokens[j]]) return FRIENDLY_COVER_NAMES[tokens[j]];
+    }
+    return "something else on the page";
+  }
+
   var lastCoverWarning = "";
   function checkNothingIsCoveringTheButtons() {
     var btn = document.querySelector("#qg-annun button");
@@ -8837,14 +8921,19 @@ window.QuakeAngelRescue = (function () {
     var top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
     var covered = top && top !== btn && !btn.contains(top) && !top.contains(btn);
     if (covered) {
-      var what = top.id || top.className || top.tagName;
+      var friendly = friendlyDescribeCover(top);
       warnEl.hidden = false;
-      warnEl.textContent = "These buttons are being covered by something else on the page (" +
-        what + "), so clicking them may do nothing. Reload the page. If it happens again, " +
-        "tell the developer exactly this: covered by " + what + ".";
-      if (what !== lastCoverWarning) {
-        lastCoverWarning = what;
-        console.error("[qg] alarm panel buttons covered by:", top);
+      // Plain English only — no IDs, no class names, no code words.
+      warnEl.textContent =
+        "The alarm-panel buttons are sitting behind " + friendly + ", " +
+        "so tapping them may do nothing. Reload the page. If it happens " +
+        "again, tell the developer that " + friendly + " is covering the " +
+        "alarm buttons.";
+      // Developer detail stays in the console (never on screen).
+      var rawKey = (top.id || (top.className && (top.className.baseVal || top.className)) || top.tagName || "").toString();
+      if (rawKey !== lastCoverWarning) {
+        lastCoverWarning = rawKey;
+        try { console.error("[qg] alarm panel buttons covered by:", top); } catch (_) {}
       }
     } else {
       warnEl.hidden = true;
@@ -8947,6 +9036,23 @@ window.QuakeAngelRescue = (function () {
   }, 400);
 
   var bannerTimer = null;
+  // #307: whenever a fixed top overlay is visible, we push the sticky
+  // alarm panel down by the overlay's height (via a CSS variable). This
+  // guarantees the panel can never sit behind the banner even in an
+  // edge case where paint order fails us. Recomputed on every show/hide
+  // and on window resize.
+  function updateFixedTopOffset() {
+    try {
+      var b = document.getElementById("qg-banner");
+      var sb = document.getElementById("qg-stale-bar");
+      var offset = 0;
+      if (b && b.classList.contains("show")) offset += b.offsetHeight || 68;
+      if (sb && !sb.hidden) offset += sb.offsetHeight || 60;
+      document.documentElement.style.setProperty("--qg-fixed-top-offset", offset + "px");
+    } catch (_) {}
+  }
+  window.qgUpdateFixedTopOffset = updateFixedTopOffset;
+  window.addEventListener("resize", updateFixedTopOffset);
   function showBanner(kind, text, autoDismissMs) {
     if (bannerTimer) { clearTimeout(bannerTimer); bannerTimer = null; }
     banner.classList.remove("ok", "err");
@@ -8955,6 +9061,7 @@ window.QuakeAngelRescue = (function () {
     bannerText.textContent = text;
     void banner.offsetWidth;
     banner.classList.add("show");
+    updateFixedTopOffset();
     if (autoDismissMs && autoDismissMs > 0) {
       bannerTimer = setTimeout(hideBanner, autoDismissMs);
     }
@@ -8965,6 +9072,7 @@ window.QuakeAngelRescue = (function () {
   function hideBanner() {
     banner.classList.remove("show");
     if (bannerTimer) { clearTimeout(bannerTimer); bannerTimer = null; }
+    updateFixedTopOffset();
   }
   bannerX.addEventListener("click", hideBanner);
 

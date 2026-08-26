@@ -22,7 +22,7 @@ load_dotenv("/app/frontend/.env")
 BASE_URL = (
     os.environ.get("EXPO_PUBLIC_BACKEND_URL")
     or os.environ.get("EXPO_BACKEND_URL")
-    or "https://quake-alert-18.preview.emergentagent.com"
+    or "https://alarm-fix-batch.preview.emergentagent.com"
 ).rstrip("/")
 ADMIN_TOKEN = os.environ["ADMIN_TRIGGER_PASSWORD"]
 MONGO_URL = os.environ.get("MONGO_URL") or "mongodb://localhost:27017"

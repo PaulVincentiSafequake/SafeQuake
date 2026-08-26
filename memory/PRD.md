@@ -3003,3 +3003,97 @@ stops. Signing out clears the panel and the flashing within a second.
 
 Regression tests: `tests/test_alarm_panel_clicks_302.py` (8). Full suite:
 **1029 passed, 7 skipped, 0 failed.**
+
+
+## 2026-08-27 — Paul's #307 (third repeat): buttons covered again, and the warning was in code
+
+Third live report of "Show me who and Acknowledge stop responding because
+another element is on top of them" — blamed in successive rounds on
+`qg-banner-text`, `qg-trigger-wrap`, and `qg-tremor-strip`. Paul, rightly:
+"the buttons should never get covered in the first place, and any warning
+must read in plain English, no code names."
+
+Root cause was two-layer, and fixed on both layers.
+
+### 1. The buttons cannot be covered any more
+
+The alarm panel lives inside `.qg-topstrip` (sticky, top:0, inside the
+sidebar). Its previous z-index was 40. Every other top-of-page overlay
+had a bigger number:
+
+- `#qg-banner` (the transient "Ready / success / error" toast) — z-index 99998.
+- `#qg-stale-bar` (the "board not updating" red bar) — z-index 12000.
+
+So on any given render, the two of them could paint on top of the panel
+buttons. Two changes make that impossible now:
+
+- **`.qg-topstrip` z-index bumped to 100000** and given `isolation:
+  isolate`. It now owns its own stacking context above every top
+  overlay, and its own children can't be reached over from outside it.
+- **`.qg-topstrip` `top` is now `var(--qg-fixed-top-offset, 0px)`.** A
+  new JS `updateFixedTopOffset()` sums the heights of the currently
+  visible fixed top banners (`#qg-banner.show` and `#qg-stale-bar`) and
+  writes the total to the CSS variable. `showBanner`/`hideBanner` in
+  the trigger IIFE call it, and `renderHeartbeat()` calls it every time
+  the stale bar toggles. So even if paint order ever failed, the
+  geometry can't overlap either — the sticky strip physically slides
+  down by the banner's height while the banner is on screen.
+
+Belt and braces on purpose.
+
+### 2. The warning reads as a sentence, not as a bug report
+
+If the check ever DOES fire in the field, it now says:
+
+> The alarm-panel buttons are sitting behind the tremor-notifications
+> status strip, so tapping them may do nothing. Reload the page. If it
+> happens again, tell the developer that the tremor-notifications
+> status strip is covering the alarm buttons.
+
+Never a class name, never an ID, never "qg-…". A new `FRIENDLY_COVER_NAMES`
+dictionary maps every element the check has ever caught in a bug report
+(`qg-banner`, `qg-banner-text`, `qg-trigger-wrap`, `qg-trigger-btn`,
+`qg-stop-reminders-btn`, `qg-stand-down-btn`, `qg-tremor-strip`, its
+inner spans, `qg-stale-bar` and its parts, modal backdrops, map
+filters, and `header`) to a plain-English phrase. `friendlyDescribeCover`
+walks up to three ancestors, so a click landing on an inner `<span>`
+still resolves to the parent's friendly name. Anything unrecognised
+becomes "something else on the page" — the raw element still goes to
+`console.error` for the developer, but never to the operator's screen.
+
+### Verified
+
+- **Backend static-source contracts** — `tests/test_alarm_buttons_never_covered_307.py`
+  (8/8 pass); pins z-index=100000, `isolation: isolate`, `top:
+  var(--qg-fixed-top-offset)`, both `showBanner`/`hideBanner` call
+  `updateFixedTopOffset`, `renderHeartbeat` calls it on stale-bar
+  toggle, the message never interpolates raw IDs or class names, the
+  translation dictionary covers every element from Paul's three
+  reports, and `friendlyDescribeCover` walks ancestors.
+- **Regression** — `tests/test_alarm_panel_clicks_302.py` (8/8 still
+  pass), `tests/test_batch_2026_08_26.py` still green after the change.
+  Total: **21 passed, 1 skipped, 0 failed** in the touched suites.
+
+### How Paul should test cleanly (per Standing Rule B)
+
+1. Hard refresh (Cmd/Ctrl+Shift+R) the dashboard once GitHub Pages picks
+   up the push.
+2. Sign in as usual.
+3. Trigger a test alert against a `qgtest-<random>` device (never a real
+   one — Standing Rule A). Confirm the flashing red border, the count,
+   and the alarm rows appear inside the topstrip.
+4. Watch a full success cycle of the banner (Ready → success → auto
+   dismiss). While the banner is on screen, the sticky topstrip slides
+   down by the banner's height — no overlap.
+5. Click the Acknowledge button. It responds. Click "Show me who" on any
+   alarm card. It expands.
+6. If (for any residual reason) the on-screen "buttons covered" line
+   ever appears, confirm it names the offending element in plain
+   English — never a code name.
+
+### Deploy state
+
+`memory/dashboard_build/index.html` is staged. Push to
+`PaulVincentiSafequake/SafeQuake` main (path
+`backend_dashboard/public/index.html`) is pending a fresh GitHub PAT
+from Paul; the prior PAT was revoked after last push.
