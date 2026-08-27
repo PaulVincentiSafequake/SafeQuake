@@ -29,11 +29,12 @@ import { colors, radius, spacing } from "@/src/theme";
 import {
   getShortCode,
   getDisplayName,
-  postStatus,
+  submitStatus,
   type Egress,
   type Mobility,
   type TriageSeverity,
 } from "@/src/utils/checkin";
+import { subscribe as subscribeHelpQueue, kickFlush, type QueueItem } from "@/src/utils/helpQueue";
 import {
   publishAlert,
   setAlertScreenMounted,
@@ -55,7 +56,7 @@ const SIREN_SOURCE = require("../assets/audio/siren.mp3");
 
 
 
-type Status = "idle" | "sending" | "sent" | "error";
+type Status = "idle" | "sending" | "pending_retry" | "sent" | "error";
 type OutcomeKind = "safe" | "trapped";
 
 export default function AlertScreen() {
@@ -123,6 +124,18 @@ export default function AlertScreen() {
   const compact = windowHeight < 760;
   const [status, setStatus] = useState<Status>("idle");
   const [outcome, setOutcome] = useState<OutcomeKind>("safe");
+  // Number of failed delivery attempts for the current pending report.
+  // Rendered honestly in the "still trying" banner so the user can see
+  // the app really is retrying and hasn't quietly given up.
+  const [pendingAttempts, setPendingAttempts] = useState(0);
+  // ID of the queue item this screen is currently tracking. Used by the
+  // helpQueue subscription to know which specific report's updates apply
+  // to THIS submission (a user may have already had an unconfirmed report
+  // from a previous session sitting in the queue).
+  const currentItemIdRef = useRef<string | null>(null);
+  // A helpQueue subscribe() effect also runs on mount for backwards state
+  // — separate from the per-submit subscription below so we can pick up
+  // items from previous sessions.
   const [chosenSeverity, setChosenSeverity] =
     useState<TriageSeverity | null>(null);
   const [chosenMobility, setChosenMobility] = useState<Mobility | null>(null);
@@ -592,6 +605,48 @@ export default function AlertScreen() {
     return () => clearTimeout(nav);
   }, [status, outcome, router, isTestRun]);
 
+  // #193 (2026-08-30 — Paul): drive the visible UI state off the persistent
+  // offline queue. The queue owns retry-forever; this screen just mirrors
+  // whatever the queue says about the report we submitted.
+  //
+  //   confirmed_at set   → status "sent"    (only place this transition happens)
+  //   attempts >= 1      → status "pending_retry"  (still trying — no tick)
+  //   otherwise          → status "sending" (initial attempt in flight)
+  //
+  // The subscription persists as long as the alert screen is mounted; if
+  // the user leaves and comes back the currentItemIdRef will already have
+  // been reset, so we won't be tracking a stale item.
+  useEffect(() => {
+    const unsub = subscribeHelpQueue((items) => {
+      const id = currentItemIdRef.current;
+      if (!id) return;
+      const it: QueueItem | undefined = items.find((x) => x.id === id);
+      if (!it) {
+        // The queue no longer contains our item. This can only happen if
+        // some other consumer explicitly removed it — leave state alone.
+        return;
+      }
+      setPendingAttempts(it.attempts);
+      if (it.confirmed_at) {
+        setStatus("sent");
+      } else if (it.attempts >= 1) {
+        // First attempt has been made and did not succeed. Show the
+        // honest "still trying" state — never a tick, never green.
+        setStatus((prev) =>
+          prev === "sent" ? prev : "pending_retry",
+        );
+      }
+    });
+    return unsub;
+  }, []);
+
+  // Manual "Try now" — the user asks us to attempt right away. Also called
+  // implicitly whenever the retry pill is tapped so the app feels alive.
+  const handleRetryNow = () => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+    kickFlush();
+  };
+
   const submitCheckIn = async (
     kind: OutcomeKind,
     severity: TriageSeverity | null = null,
@@ -602,7 +657,7 @@ export default function AlertScreen() {
     // it, because the first send happens the moment a severity is chosen.
     isFollowUp = false,
   ) => {
-    if (!isFollowUp && (status === "sending" || status === "sent")) return;
+    if (!isFollowUp && (status === "sending" || status === "sent" || status === "pending_retry")) return;
     // 1) IMMEDIATELY silence the siren and cancel pending reminders. The user
     //    tapping I'm Safe / a triage option is an explicit, unambiguous
     //    intent to stop the alarm — it must not wait for GPS acquisition,
@@ -725,14 +780,18 @@ export default function AlertScreen() {
       // rehearsal exists to prove the buttons work; the moment we get
       // to "here's what the button does after you tap it" the practice
       // run is complete.
-      let res: { ok: boolean; status: number };
       if (isTestRun) {
         console.log(
           `[QuakeGuard] TEST RUN — skipping real ${kind} post to backend`,
         );
-        res = { ok: true, status: 200 };
+        setStatus("sent");
       } else {
-        res = await postStatus({
+        // #193 (2026-08-30 — Paul): route the report through the persistent
+        // offline queue. The queue owns retry-forever + AsyncStorage
+        // persistence. Nothing on this screen may say "sent" until the
+        // queue reports `confirmed_at` set — i.e., our backend returned
+        // 2xx on a real round trip.
+        const itemId = await submitStatus({
           status: kind === "safe" ? "safe" : "trapped",
           severity: kind === "trapped" ? severity : null,
           mobility: kind === "trapped" ? mobility : null,
@@ -740,13 +799,15 @@ export default function AlertScreen() {
           location: { latitude, longitude, accuracy, error: locationError },
           battery: { level: batteryLevel, state: batteryState },
         });
+        currentItemIdRef.current = itemId;
+        console.log(
+          `[QuakeGuard] ${kind}${severity ? "/" + severity : ""}${mobility ? "/" + mobility : ""} → enqueued as`,
+          itemId,
+        );
+        // Status stays "sending" until the queue subscription (below) tells
+        // us the first attempt has landed. That subscription will move us
+        // to either "sent" (if confirmed) or "pending_retry" (if not).
       }
-      console.log(
-        `[QuakeGuard] ${kind}${severity ? "/" + severity : ""}${mobility ? "/" + mobility : ""} → response status:`,
-        res.status,
-      );
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      setStatus("sent");
 
       // #208 R4 (Batch 7): the alert has now been answered. Clear the
       // "unanswered alert" marker so the home screen stops redirecting
@@ -768,9 +829,12 @@ export default function AlertScreen() {
       // notification. During a test run we skip posting it entirely, so
       // a rehearsal never leaves a fake "help is coming" card on the
       // user's own lock screen.
+      //
+      // #193: fire regardless of delivery status — the rescue-info card
+      // is a LOCAL notification, useful to a first responder finding
+      // the phone even if our backend never received the report. The
+      // whole feature exists for the case where the network is dead.
       if (kind === "trapped" && !isTestRun) {
-        // Fire-and-forget — do NOT block the "sent" UI transition on the
-        // notification API, which occasionally takes a beat on cold-start.
         (async () => {
           try {
             const [code, name] = await Promise.all([
@@ -791,8 +855,10 @@ export default function AlertScreen() {
         cancelRescueInfoNotification().catch(() => {});
       }
     } catch (e: any) {
-      console.log("[QuakeGuard] check-in error:", e?.message);
-      setErrorMsg(e?.message ?? "Network error");
+      // The queue enqueue itself failed (very rare — AsyncStorage down).
+      // Even then, we don't lie: show error, invite retry.
+      console.log("[QuakeGuard] check-in enqueue error:", e?.message);
+      setErrorMsg(e?.message ?? "Could not save your report on this phone.");
       setStatus("error");
     }
   };
@@ -800,7 +866,7 @@ export default function AlertScreen() {
   const handleImSafe = () => submitCheckIn("safe");
 
   const openTriage = () => {
-    if (status === "sending" || status === "sent") return;
+    if (status === "sending" || status === "sent" || status === "pending_retry") return;
     // Silence the siren the moment the user commits to opening triage — they
     // are actively responding, so the alarm has served its purpose.
     stopSiren();
@@ -1134,13 +1200,71 @@ export default function AlertScreen() {
               <Text style={styles.errorText}>{errorMsg}. Tap again to retry.</Text>
             </View>
           )}
+          {/* #193 (2026-08-30 — Paul): "still trying" banner. This is the
+              anti-lie. It replaces any tick / green mark / "sent" wording
+              while the phone has NOT yet had a 2xx round-trip to our
+              server. The moment we do, the queue subscription flips this
+              to `status === "sent"` and the delivered toast below takes
+              over.
+              Rules for the copy here:
+                - Never uses the words "sent" / "delivered" / "received".
+                - Says plainly what we're doing (trying), what state we
+                  are in (not through yet), and that we won't stop.
+                - Shows the honest attempt counter so the user can see
+                  the retry loop is real, not a spinner that never ends. */}
+          {(status === "sending" || status === "pending_retry") && !stoodDown && (
+            <View
+              style={styles.pendingToast}
+              testID={
+                status === "pending_retry"
+                  ? "alert-pending-retry-toast"
+                  : "alert-sending-toast"
+              }
+              accessibilityLiveRegion="polite"
+              accessibilityRole="alert"
+            >
+              <Ionicons
+                name="sync"
+                size={22}
+                color="#FFD79A"
+                style={pendingAttempts > 0 ? styles.pendingSpinning : undefined}
+              />
+              <View style={{ flex: 1 }}>
+                <Text style={styles.pendingTitle}>
+                  {status === "pending_retry"
+                    ? "Still trying to reach the rescue team."
+                    : outcome === "trapped"
+                      ? "Sending your help request…"
+                      : "Sending your check-in…"}
+                </Text>
+                <Text style={styles.pendingBody}>
+                  {status === "pending_retry"
+                    ? outcome === "trapped"
+                      ? `Your phone has not been able to reach our server yet. It will keep trying and tell you the moment it gets through. Attempt ${pendingAttempts + 1}.`
+                      : `Your phone has not been able to reach our server yet. It will keep trying. Attempt ${pendingAttempts + 1}.`
+                    : "This can take a few seconds when the signal is weak."}
+                </Text>
+              </View>
+              {status === "pending_retry" && (
+                <Pressable
+                  onPress={handleRetryNow}
+                  hitSlop={12}
+                  style={styles.pendingRetryBtn}
+                  testID="alert-pending-try-now-btn"
+                  accessibilityLabel="Try to send now"
+                >
+                  <Text style={styles.pendingRetryBtnText}>Try now</Text>
+                </Pressable>
+              )}
+            </View>
+          )}
           {status === "sent" && outcome === "safe" && (
             <View style={styles.successToast} testID="alert-success-toast">
               <Ionicons name="checkmark-circle" size={22} color={colors.onSuccess} />
               <Text style={styles.successText}>
                 {isTestRun
                   ? "Practice finished. Nothing was sent to anyone."
-                  : "Your report has been sent."}
+                  : "Your report reached the rescue team."}
               </Text>
             </View>
           )}
@@ -1205,11 +1329,15 @@ export default function AlertScreen() {
                 <Text style={styles.trappedToastText}>
                   {/* #283: never imply somebody is watching the board. It
                       says what happened and what to do next, nothing more. */}
+                  {/* #193 (2026-08-30 — Paul): "Reached" is only ever
+                      shown here, and only after the queue reports a real
+                      2xx from our server. It cannot fire on the return
+                      of fetch, on a Render 200, or on any local success. */}
                   {isTestRun
                     ? "Practice finished. Nothing was sent to anyone."
-                    : "Your report has been sent. Stay calm. Save your battery."}
+                    : "Your help request reached the rescue team. Stay calm. Save your battery."}
                 </Text>
-                {chosenEgress ? (
+                {chosenEgress && chosenEgress !== "not_answered" ? (
                   <Text style={styles.trappedToastMeta} testID="trapped-egress-summary">
                     Reported:{" "}
                     {chosenEgress === "can_exit"
@@ -1265,10 +1393,11 @@ export default function AlertScreen() {
           {!(status === "sent" && outcome === "trapped") && !stoodDown && (
             <Pressable
               onPress={handleImSafe}
-              disabled={status === "sending" || status === "sent"}
+              disabled={status === "sending" || status === "sent" || status === "pending_retry"}
               style={({ pressed }) => [
                 styles.safeBtn,
                 (status === "sent") && styles.safeBtnDone,
+                (status === "pending_retry" && outcome === "safe") && styles.safeBtnPending,
                 pressed && { opacity: 0.9, transform: [{ scale: 0.98 }] },
               ]}
               testID="im-safe-btn"
@@ -1277,17 +1406,23 @@ export default function AlertScreen() {
                 name={
                   status === "sent" && outcome === "safe"
                     ? "checkmark"
-                    : "shield-checkmark"
+                    : status === "pending_retry" && outcome === "safe"
+                      ? "sync"
+                      : "shield-checkmark"
                 }
                 size={26}
                 color={colors.onSuccess}
               />
               <Text style={styles.safeBtnText}>
+                {/* #193: NEVER "Marked safe" while unconfirmed. The button
+                    must never imply the check-in has been received. */}
                 {status === "sending" && outcome === "safe"
                   ? "Sending…"
-                  : status === "sent" && outcome === "safe"
-                    ? "Marked safe"
-                    : "I'm safe"}
+                  : status === "pending_retry" && outcome === "safe"
+                    ? "Still trying…"
+                    : status === "sent" && outcome === "safe"
+                      ? "Marked safe"
+                      : "I'm safe"}
               </Text>
             </Pressable>
           )}
@@ -1305,18 +1440,24 @@ export default function AlertScreen() {
           {status !== "sent" && !stoodDown && (
             <Pressable
               onPress={openTriage}
-              disabled={status === "sending"}
+              disabled={status === "sending" || status === "pending_retry"}
               style={({ pressed }) => [
                 styles.trappedBtn,
+                (status === "pending_retry" && outcome === "trapped") && styles.trappedBtnPending,
                 pressed && { opacity: 0.9, transform: [{ scale: 0.98 }] },
               ]}
               testID="im-trapped-btn"
             >
               <Ionicons name="warning" size={22} color="#fff" />
               <Text style={styles.trappedBtnText}>
+                {/* #193: NEVER shows "Sent" text here. While unconfirmed
+                    the button says "Still trying…" — an honest signal
+                    to the user that we do not have confirmation yet. */}
                 {status === "sending" && outcome === "trapped"
                   ? "Sending…"
-                  : "I need help"}
+                  : status === "pending_retry" && outcome === "trapped"
+                    ? "Still trying…"
+                    : "I need help"}
               </Text>
             </Pressable>
           )}
@@ -1451,8 +1592,8 @@ export default function AlertScreen() {
               <Text style={styles.triageTitle}>Can you move?</Text>
               <Text style={styles.triageSubtitle}>
                 Tell rescuers whether you&apos;re free to move or physically
-                pinned. Your report is already sent — this adds one
-                detail to it.
+                pinned. Your first answer is safe on this phone —
+                this adds a detail to it.
               </Text>
 
               <TriageOption
@@ -1514,7 +1655,8 @@ export default function AlertScreen() {
               <Text style={styles.triageSubtitle}>
                 About the building, not your injuries. A jammed door or a
                 blocked stairwell counts as blocked.
-                Your report is already sent — this adds one detail to it.
+                Your first answer is safe on this phone — this adds a
+                detail to it.
               </Text>
 
               <TriageOption
@@ -1931,6 +2073,54 @@ const styles = StyleSheet.create({
     fontWeight: "800",
     lineHeight: 24,
   },
+  // #193 (2026-08-30 — Paul): the "still trying" toast. Amber, never
+  // green — the colour semantics on this screen are locked:
+  //   red     = danger / warning
+  //   amber   = pending / in-flight (NOT a failure, but NOT success)
+  //   green   = confirmed by our server
+  // The visible design difference between amber and green is deliberate
+  // — a glance must be enough to tell "in progress" apart from "done".
+  pendingToast: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.sm,
+    backgroundColor: "rgba(80, 55, 20, 0.92)",
+    borderWidth: 1,
+    borderColor: "rgba(255, 200, 100, 0.6)",
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.md,
+    borderRadius: radius.md,
+  },
+  pendingTitle: {
+    color: "#FFE7B5",
+    fontSize: 15,
+    fontWeight: "800",
+    lineHeight: 20,
+  },
+  pendingBody: {
+    marginTop: 2,
+    color: "rgba(255, 231, 181, 0.85)",
+    fontSize: 13,
+    lineHeight: 17,
+  },
+  pendingRetryBtn: {
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    backgroundColor: "rgba(255, 215, 154, 0.15)",
+    borderWidth: 1,
+    borderColor: "rgba(255, 215, 154, 0.6)",
+  },
+  pendingRetryBtnText: {
+    color: "#FFE7B5",
+    fontSize: 13,
+    fontWeight: "800",
+  },
+  pendingSpinning: {
+    // Reanimated is not used here to keep this tiny — the sync icon is
+    // visually enough on its own; a static rotate would over-promise
+    // real-time activity when a retry can be minutes away.
+  },
   // #199/#202 (Batch 7 R4 companion): stood-down panel styling. High
   // contrast with clear success colour so the "you can stop" message
   // reads as calm rather than as another alert.
@@ -1990,6 +2180,13 @@ const styles = StyleSheet.create({
   safeBtnDone: {
     backgroundColor: "#1F8A3A",
   },
+  // #193: amber tint while unconfirmed — clearly NOT the "done" green.
+  // The button also shows "Still trying…" text while in this state, and
+  // is disabled so a re-tap doesn't create a duplicate report.
+  safeBtnPending: {
+    backgroundColor: "#8B6A00",
+    shadowOpacity: 0.3,
+  },
   safeBtnText: {
     color: colors.onSuccess,
     fontSize: 22,
@@ -2034,6 +2231,13 @@ const styles = StyleSheet.create({
     backgroundColor: "#EA9500",
     borderWidth: 1.5,
     borderColor: "#B77400",
+  },
+  // #193: darker amber while unconfirmed — visually distinct from the
+  // "please tap me" primary state; button is also disabled so the user
+  // does not accidentally re-submit while retry is in flight.
+  trappedBtnPending: {
+    backgroundColor: "#8B6A00",
+    borderColor: "#6E4F00",
   },
   trappedBtnText: {
     color: "#fff",

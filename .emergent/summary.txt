@@ -1,32 +1,32 @@
-<analysis>**original_problem_statement**: Bug #307 wasn't fully fixed — a fourth sticky element () was covering the alarm panel buttons. User requested a generic fix for all top-bar elements that could ever sit above the alarm panel. Additionally, Bug #308 was reopened: repeatedly adding and removing test people left orphan alarms stuck open from previous batches. PRODUCT REQUIREMENTS: Fix #307 generically so no elements overlap the alarm panel, push the fix live via GitHub PAT, and fix #308 so clearing test people clears *all* associated fake alarms unconditionally. Verify with .
+<analysis>**original_problem_statement**: User confirmed Bugs #307 and #308 are completely fixed. During their manual testing, they found a new issue (**Bug #320**): Remove all test people leaves older test entries behind (e.g., device  tagged TEST). User asked to identify every way a test entry can be created and make the Remove all function clear all of them unconditionally. PRODUCT REQUIREMENTS: Fix Bug #320 by ensuring all 5 methods of test creation are caught by the removal sweep. Ensure  verifies. **CRITICAL USER INSTRUCTION**: User explicitly stated: After that, dont pick from the queue — Ill open a fresh chat for the next task. 
 
 **User's preferred language**: English (INSTRUCT NEXT AGENT: You MUST respond in English)
 
-**what currently exists?**: A stable Expo frontend, FastAPI/MongoDB backend, and a Vanilla HTML/JS Dashboard (). A generic fix for Bug #307 has been pushed to the live GitHub repository. Bug #308 has been resolved in the backend so test alarms are aggressively cleared. Both fixes are fully covered by the Pytest suite and verified by the .
+**what currently exists?**: A stable Expo frontend, FastAPI/MongoDB backend, and a Vanilla HTML/JS Dashboard. Bugs #307, #308, and #320 are now fixed and verified. The backend  endpoint for test people has been upgraded from a narrow seed-tag match to a generic, multi-flag sweep that catches test entries created via , , load scripts, and diagnostics harnesses.
 
 **Last working item**: 
-    - Last item agent was working: Fixing Bug #308 (orphan alarms). The agent modified the backend seed/clear logic to resolve all open alarms for test devices (matching ), wrote new tests (), ran the  for verification, and completed the task.
+    - Last item agent was working: Fixing Bug #320. The agent identified all 5 surfaces that create test entries, updated the backend  function in  to sweep for all associated flags (, , , etc.), created new pytests (), and verified the fix with  (16/16 test-people suite passed).
     - Status: USER VERIFICATION PENDING
     - Agent Testing Done: Y (via pytest and )
-    - Which testing method agent to use? NA (Testing already done; awaiting user manual verification)
-    - User Testing Done: N
+    - Which testing method agent to use? NA (Testing already done; awaiting user manual verification/next task)
+    - User Testing Done: N (For #320) / Y (For #307, #308)
 
 **All Pending/In progress Issue list**:  
-  Issue 1: Awaiting User Verification of Bugs #307 and #308
-     - Attempted fixes: Pushed a generic CSS/JS offset fix for #307 to live GitHub repo. Modified backend   endpoint for #308 to unconditionally clear all test-related alarms.
-     - Next debug checklist: Await user feedback. If the UI still overlaps, check  z-indexes. If alarms still stick, inspect MongoDB  collection during repeated seeds.
-     - Why fix this issue and what will be achieved with the fix? Ensures the dashboard UI is usable and the backend doesn't trigger false alarms from deleted fake users.
+  Issue 1: Awaiting User Verification of Bug #320 and Next Task Input
+     - Attempted fixes: Updated  so the  sweep generically checks for , , and other test markers, ensuring no survivor test records remain.
+     - Next debug checklist: Read the user's next message. If they report survivor records still exist, check MongoDB  to see if there is an undocumented marker we missed.
+     - Why fix this issue and what will be achieved with the fix? Ensures fake test people don't persist and trigger false alarms during live operations.
      - Status: USER VERIFICATION PENDING
-     - Is recurring issue? Y (Both were reopened/repeating bugs)
+     - Is recurring issue? N
      - Should Test frontend/backend/both after fix? NA
      - Blocked on other issue: None
 
 **In progress Task List**: 
-*(None currently active. Waiting for user to select the next queued task).*
+*(None currently active. Waiting for user to provide the next task).*
 
 **Upcoming and Future Tasks**
     Upcoming Tasks:
-    - *Pending User Input*: Await user's choice for the next task from the queued backlog. - P0
+    - *Pending User Input*: Await user's explicit instruction for the next task. User stated they will open a fresh chat. - P0
     - Home screen redesign (#258) - P2
     - Post-stand-down alerts re-opening incidents (#190) - P3
     - Ask lowest battery devices least (#189) - P3
@@ -38,18 +38,24 @@
     - Group triage list by location (#188) - P4
 
 **Completed work in this session**
-- Applied generic fix for Bug #307 to  to prevent any fixed/sticky top bars from covering alarm buttons (DONE)
-- Pushed Bug #307 fix to live GitHub repo  via user PAT (Commit ) and wiped local clone (DONE)
-- Fixed Bug #308 in backend  so clearing test users deletes all associated orphan alarms (DONE)
-- Added new backend tests  (DONE)
+- Identified all 5 creation methods for test entries (DONE)
+- Updated backend  to use a generic sweep targeting all test flags (, , specific string formats) to resolve Bug #320 (DONE)
+- Created  to ensure test devices created via  are successfully cleared (DONE)
+- Updated  to align with the new generic sweep logic (DONE)
+- Ran Pytest suite and  to verify all test-related functionality (16/16 specific tests passed) (DONE)
+- Updated  with #320 resolution (DONE)
 
 **Earlier issues found/mentioned but not fixed**
-None.
+   - Issue 1: Pre-existing Pytest fixture failure in  ().
+   - Debug checklist: NA (Ignore unless instructed. Related to push relay behavior when 0 recipients).
+   - Why to solve this issue and what will be achieved with this? Maintain 100% test pass rate.
+   - Should Test frontend/backend/both after fix: Backend
+   - Is recurring issue? Y (Known issue)
 
 **Known issue recurrence from previous fork**
-  - Issue recurrence in previous fork: Bug #307 (4th repeat), Bug #308 (Reopened)
-  - Recurrence count: 4 (for #307), 1 (for #308)
-  - Status: USER VERIFICATION PENDING (Both fixed in this session)
+  - Issue recurrence in previous fork: None active. (Bugs #307 and #308 from the previous fork were confirmed fixed by the user).
+  - Recurrence count: 0
+  - Status: RESOLVED
 
 **Code Architecture**
 /app
@@ -58,57 +64,56 @@ None.
 │   ├── src/utils/
 ├── backend
 │   ├── server.py 
-│   ├── test_people_seed.py
+│   ├── test_people_seed.py (Updated with generic sweep logic)
 │   ├── board_alarms.py
-│   ├── tests/ (Extensive pytest suite)
+│   ├── routes_diagnostics.py
+│   ├── deps.py
+│   ├── tests/ (Extensive pytest suite, new #320 tests added)
 ├── memory
-    ├── PRD.md
+    ├── PRD.md (Updated)
     ├── dashboard_build/index.html 
 
 **Key Technical Concepts**
-Expo (React Native), FastAPI, MongoDB, Pytest, Vanilla HTML/JS Dashboard, GitHub CLI deployments.
+Expo (React Native), FastAPI, MongoDB, Pytest, Vanilla HTML/JS Dashboard.
 
 **key DB schema**
-  - : {device_id, status, severity, updated_at, ...}
-  - : {device_id, state, created_at, resolved_at, acknowledged, since_report, is_test}
+  - : {device_id, status, severity, updated_at, synthetic, is_test, ...}
+  - : {device_id, state, created_at, resolved_at, is_test}
 
 **changes in tech stack**
   - None
 
 **All files of reference** 
-  -  (Updated with generic #307 fix)
-  -  (Updated to test generic #307 coverage)
-  -  (Updated  and seed endpoints for #308)
-  -  (New test file for #308)
+  -  (Updated  and  logic for #320)
+  -  (New tests for Bug #320)
+  -  (Updated to match generic sweep)
   -  (Updated)
 
 **Areas that need refactoring**: 
   - : Fully stabilized but eventually due for an overhaul when user re-prioritizes Dashboard Restructure (#116).
 
 **key api endpoints**
-  -  (Handles adding/removing test people)
   - 
+  -  (Now aggressively sweeps all test flags)
 
 **Critical Info for New Agent** 
-- **USER PRIORITIES**: The user is focusing on smaller queued items and skipping the Dashboard full restructure (#116). Wait for their instruction on what to pick up next (e.g., #258, #190, #189).
-- **GITHUB PAT**: A PAT was used to push  and the local clone was deleted for security. A fresh PAT will be required if another GitHub push is requested.
-- **TESTING RULES**: ALWAYS run the  after bug fixes. NEVER run live verification against real devices (use ). Provide clear manual testing steps (hard refresh, sign out/in) when asking the user to verify a fix.
-- **TEST SUITE**: Pytest suite is massive (>1000 passing tests). Run tests with  first. 3 preexisting fixture failures in  are known and unrelated to current work.
+- **CRITICAL DIRECTIVE**: The user explicitly instructed: *After that, dont pick from the queue — Ill open a fresh chat for the next task.* **DO NOT** attempt to start on #258, #190, or any other backlog item. You MUST use the  tool or wait for the user's initial message to define the next scope of work.
+- **TESTING RULES**: ALWAYS run the  after bug fixes. The Pytest suite should be run from . 
+- **KNOWN TEST FAILURE**: There is 1 failing test () that is pre-existing and unrelated to test-people. Ignore it unless the user asks you to fix it.
 
 **documents and test reports created in this job** 
-  -  (Updated)
+  - 
+  - 
   - 
 
 **Last 10 User Messages and any pending HUMAN messages** 
- - User asked to use ask_human. (Completed)
- - User reported Bug #307 wasn't fully fixed, identified a 4th sticky element, and asked for a generic fix for all top-bar elements. (Completed)
- - User provided a fresh GitHub PAT for deployment. (Completed)
- - User reported Bug #308 reopened: repeated add/remove of test people left orphan alarms stuck open. (Completed)
- - System reminded agent to use . (Completed)
- - *Pending Human Message*: Waiting for the user to confirm if #307 and #308 are completely fixed on their end, and for them to provide the details on the next task to tackle.
+ - User confirmed Bugs #307 and #308 were fixed successfully.
+ - User reported Bug #320: Remove all test people missed 5 test entries created via other methods. Asked to identify all creation methods and make  unconditionally remove all of them. Also instructed the agent NOT to pick from the queue. (Completed)
+ - System reminded agent to run . (Completed)
+ - *Pending Human Message*: Waiting for the user to provide details on the new task they mentioned they would open a fresh chat for.
 
 **Project Health Check:**
-Healthy (App), Healthy (Test Suite - 1000+ tests passing).
+Healthy (App), Mostly Healthy (Test Suite - 1 known pre-existing failure in ).
 
 **3rd Party Integrations** 
  - Apple APNs (Critical Alerts) — requires User API Key
@@ -119,18 +124,18 @@ Healthy (App), Healthy (Test Suite - 1000+ tests passing).
   - Testing agent used after significant changes: YES
   - Troubleshoot agent used after agent stuck in loop: NO
   - Test files created: 
-  - Known regressions: None (3 pre-existing fixture failures are known and unrelated).
+  - Known regressions: None (1 pre-existing fixture failure in  is known).
 
 **Credentials to test flow:**
 Available in 
 
 **What agent forgot to execute**
-Nothing. The agent successfully addressed #307 (including pushing live) and #308, ran all necessary tests, and is now awaiting the user's next command.
+Nothing. The agent successfully addressed #320 generically, added tests, verified with , and is appropriately waiting for the user's next command.
 
 **Debugging checklist for current issue**
-    Issue: Awaiting user verification of #307 and #308 fixes, and selection of the next task.
+    Issue: Awaiting user verification of #320 and definition of the next task.
     
     Frontend files to check: NA
     Backend files to check: NA
     Database to check: NA
-    Next Step: Read user's response. If they report everything works, ask them which queued item (#258, #190, #189, etc.) they want to start on.</analysis>
+    Next Step: Read the user's initial message. They will define the next task. Acknowledge and plan accordingly.</analysis>

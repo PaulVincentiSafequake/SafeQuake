@@ -24,9 +24,18 @@ import {
   cancelCheckInReminders,
   ensureNotificationSetup,
   scheduleCheckInReminders,
+  postHelpPendingNotification,
+  postHelpDeliveredNotification,
+  cancelHelpPendingNotification,
 } from "@/src/utils/reminders";
 import { recordTap, buildLogFields, type TapSource } from "@/src/utils/tapProbe";
 import { reportPresentedPushes, reportPushSeen } from "@/src/utils/pushReceipt";
+import {
+  startBackgroundLoop as startHelpQueueLoop,
+  subscribe as subscribeHelpQueue,
+  removeItem as removeHelpQueueItem,
+  type QueueItem,
+} from "@/src/utils/helpQueue";
 import {
   recordTremorNoticeOpened,
   recordTremorNoticeReceived,
@@ -215,6 +224,80 @@ export default function RootLayout() {
       SplashScreen.hideAsync();
     }
   }, [loaded, error]);
+
+  // #193 (2026-08-30 — Paul): boot the persistent help-queue background
+  // loop as early as possible on every launch. This is what guarantees
+  // that a "I need help" report submitted with no signal — and then
+  // written to AsyncStorage — starts retrying the instant the app comes
+  // back to life on a device that has since regained connectivity, even
+  // if the user never navigates back to /alert.
+  //
+  // Also wire the local persistent notifications for a pending trapped
+  // report:
+  //   - While an unconfirmed trapped item is in the queue → show a
+  //     passive lock-screen card that says the request has NOT reached
+  //     us yet and we are still trying.
+  //   - The instant it flips to confirmed → replace that card with a
+  //     delivered-notification and dispose of the queue item so the
+  //     UI cannot mis-render on next launch.
+  //
+  // Web is exempt: no persistent notifications, and the tab may not be
+  // running when the network returns anyway.
+  useEffect(() => {
+    if (Platform.OS === "web") return;
+    startHelpQueueLoop();
+
+    // Track which trapped items we've already shown a pending
+    // notification for, so we don't spam a fresh card on every retry.
+    const pendingNotified = new Set<string>();
+    // And which we've delivered — used only to avoid firing two
+    // "delivered" notifications for the same item across quick emits.
+    const deliveredNotified = new Set<string>();
+
+    const unsub = subscribeHelpQueue((items: QueueItem[]) => {
+      // Handle trapped items specifically — only trapped reports get a
+      // user-facing persistent card. A "safe" report that fails is still
+      // retried, but a persistent lock-screen card about a delayed
+      // safe check-in would just add anxiety.
+      const trappedPending = items.filter(
+        (it) => it.kind === "trapped" && !it.confirmed_at,
+      );
+      const trappedConfirmed = items.filter(
+        (it) => it.kind === "trapped" && it.confirmed_at,
+      );
+
+      // Show a pending card the FIRST time we see each unconfirmed
+      // trapped item. Follow-up updates could refresh it, but repeat
+      // notifications every retry would train users to ignore this
+      // channel — exactly what we're fighting against.
+      for (const it of trappedPending) {
+        if (pendingNotified.has(it.id)) continue;
+        pendingNotified.add(it.id);
+        postHelpPendingNotification().catch(() => {
+          // ignore — best-effort
+        });
+      }
+
+      for (const it of trappedConfirmed) {
+        if (deliveredNotified.has(it.id)) continue;
+        deliveredNotified.add(it.id);
+        cancelHelpPendingNotification().catch(() => {});
+        postHelpDeliveredNotification().catch(() => {});
+        // Remove the confirmed item from the queue now that its
+        // "delivered" side-effects have fired. Keeps the queue tight
+        // and prevents a spurious re-render on next launch.
+        removeHelpQueueItem(it.id).catch(() => {});
+      }
+
+      // If the queue no longer holds ANY unconfirmed trapped item, cancel
+      // the pending card. This covers the "confirmed" edge case above
+      // as well as an admin-side clear.
+      if (trappedPending.length === 0) {
+        cancelHelpPendingNotification().catch(() => {});
+      }
+    });
+    return unsub;
+  }, []);
 
   // ─────────────────────────────────────────────────────────────────
   // #208 (Neo, 2026-08-20 — Paul):

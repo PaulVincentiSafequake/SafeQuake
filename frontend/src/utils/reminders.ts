@@ -264,3 +264,138 @@ export async function cancelRescueInfoNotification(): Promise<void> {
     // ignore — may not be presented
   }
 }
+
+// ─────────────────────────────────────────────────────────────────
+// #193 (2026-08-30 — Paul): local notifications for a queued help
+// report that has NOT yet reached our server.
+//
+//   "…the phone must hold onto that report and keep trying until our
+//    server confirms it has really arrived. Until then, the person must
+//    never see a tick, a green mark, or any wording suggesting it was
+//    sent. It should honestly say it's still trying, and tell them
+//    plainly the moment it gets through."
+//
+// Two identifiers:
+//   HELP_PENDING_ID   — the "not through yet" card. Passive on iOS
+//                       (no wake, no sound), MAX-importance sticky on
+//                       Android. Persists across app close, so if the
+//                       user locks the phone right after tapping and
+//                       forgets, the pending state is still visible.
+//   HELP_DELIVERED_ID — a one-shot "we've reached the rescue team"
+//                       card. Default sound, active interruption on
+//                       iOS — this IS a moment we want the user to
+//                       notice, even if they're on another screen.
+//
+// The pair replaces one another: posting delivered cancels pending
+// (handled by the caller in _layout.tsx).
+const HELP_PENDING_ID = "quakeangel-help-pending";
+const HELP_DELIVERED_ID = "quakeangel-help-delivered";
+const HELP_CHANNEL_ID = "quakeangel-help-status";
+
+async function ensureHelpChannel(): Promise<void> {
+  if (Platform.OS !== "android") return;
+  try {
+    await Notifications.setNotificationChannelAsync(HELP_CHANNEL_ID, {
+      name: "Help request delivery",
+      importance: Notifications.AndroidImportance.HIGH,
+      sound: "default",
+      // No aggressive vibration on the pending card — the whole point is
+      // to be visible without adding pressure to someone already
+      // panicked. The delivered card gets default sound only.
+      vibrationPattern: [0, 200],
+      lockscreenVisibility:
+        Notifications.AndroidNotificationVisibility.PUBLIC,
+    });
+  } catch {
+    // ignore
+  }
+}
+
+/** Post/refresh the persistent "still trying" card. Safe to call
+ *  multiple times — replaces in place. */
+export async function postHelpPendingNotification(): Promise<void> {
+  await ensureHelpChannel();
+  try {
+    await Notifications.dismissNotificationAsync(HELP_PENDING_ID);
+  } catch {
+    // ignore — nothing to dismiss
+  }
+  try {
+    await Notifications.scheduleNotificationAsync({
+      identifier: HELP_PENDING_ID,
+      content: {
+        title: "Still trying to send your help request",
+        body:
+          "Your phone has not been able to reach the rescue team yet. It will keep trying and tell you the moment it gets through.",
+        // Passive on iOS — do NOT wake the screen or play sound. This
+        // must be visible without adding fresh panic. If the user has
+        // no signal, another sound achieves nothing.
+        interruptionLevel: "passive",
+        sound: null as unknown as string,
+        data: { kind: "quakeangel-help-pending", action_url: "/alert" },
+        ...(Platform.OS === "android" && {
+          channelId: HELP_CHANNEL_ID,
+          sticky: true,
+          priority: Notifications.AndroidNotificationPriority.HIGH,
+        }),
+      },
+      trigger: null,
+    });
+  } catch (e) {
+    console.log(
+      "[QuakeAngel] postHelpPendingNotification failed:",
+      (e as Error)?.message,
+    );
+  }
+}
+
+/** Post the one-shot "reached the rescue team" card. */
+export async function postHelpDeliveredNotification(): Promise<void> {
+  await ensureHelpChannel();
+  try {
+    await Notifications.dismissNotificationAsync(HELP_DELIVERED_ID);
+  } catch {
+    // ignore
+  }
+  try {
+    await Notifications.scheduleNotificationAsync({
+      identifier: HELP_DELIVERED_ID,
+      content: {
+        title: "Your help request reached the rescue team",
+        body:
+          "The rescue team now knows you need help. Stay calm and save your battery.",
+        // Active on iOS — this is the moment the user has been waiting
+        // for. We want them to notice even from another app.
+        interruptionLevel: "active",
+        sound: "default",
+        data: { kind: "quakeangel-help-delivered", action_url: "/alert" },
+        ...(Platform.OS === "android" && {
+          channelId: HELP_CHANNEL_ID,
+          priority: Notifications.AndroidNotificationPriority.HIGH,
+        }),
+      },
+      trigger: null,
+    });
+  } catch (e) {
+    console.log(
+      "[QuakeAngel] postHelpDeliveredNotification failed:",
+      (e as Error)?.message,
+    );
+  }
+}
+
+/** Cancel any pending "still trying" card. Fired the moment the queue
+ *  reports the item has been confirmed (i.e., delivered notification is
+ *  about to fire) or the user manually clears state. */
+export async function cancelHelpPendingNotification(): Promise<void> {
+  try {
+    await Notifications.cancelScheduledNotificationAsync(HELP_PENDING_ID);
+  } catch {
+    // ignore
+  }
+  try {
+    await Notifications.dismissNotificationAsync(HELP_PENDING_ID);
+  } catch {
+    // ignore
+  }
+}

@@ -1,20 +1,10 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
-import { markBackendContact } from "@/src/utils/readiness";
-import Constants from "expo-constants";
-
-import { SAFE_ENDPOINT } from "@/src/theme";
+import { enqueue as enqueueHelp, type QueueItemKind } from "@/src/utils/helpQueue";
 
 const DEVICE_ID_KEY = "quakeguard_device_id";
 const DISPLAY_NAME_KEY = "quakeangel_display_name";
 const NAME_PROMPTED_KEY = "quakeangel_name_prompted";
-
-// Our own backend — the rescuer dashboard fetches real device data from here.
-// The app dual-posts to both the external Render endpoint (SAFE_ENDPOINT) and
-// this backend so nothing on the Render side breaks during cutover.
-const BACKEND_URL =
-  process.env.EXPO_PUBLIC_BACKEND_URL ??
-  (Constants.expoConfig?.extra?.EXPO_PUBLIC_BACKEND_URL as string | undefined);
 
 export async function getDeviceId(): Promise<string> {
   let id = await AsyncStorage.getItem(DEVICE_ID_KEY);
@@ -141,15 +131,14 @@ export interface BatteryPayload {
 }
 
 /**
- * POST a status update. Dual-posts to:
- *   1) The external safequake.onrender.com endpoint (SAFE_ENDPOINT) — legacy
- *      receiver, unchanged.
- *   2) Our own backend (${BACKEND_URL}/api/status) — the source of truth for
- *      the rescuer dashboard's GET /api/devices call.
+ * Build a status payload and hand it to the persistent offline queue. Returns
+ * the queue item ID so callers can subscribe to `helpQueue` events for this
+ * specific report.
  *
- * Returns the response from the primary (Render) endpoint so callers that
- * inspect res.ok / res.status keep working identically. The backend post
- * runs in parallel and its outcome is logged but never blocks the caller.
+ * #193 (2026-08-30 — Paul): NEVER treats "the fetch returned" as "the server
+ * received it". The truth signal is a 2xx from our backend, delivered later
+ * via the queue's subscribe API. Every UI surface must key its "sent" state
+ * off `confirmed_at`, not off the return of this function.
  */
 /**
  * Egress is NOT mobility (2026-06-18). Mobility describes the body; egress
@@ -165,14 +154,14 @@ export interface BatteryPayload {
 // filing them as walking wounded, which is the lowest priority there is.
 export type Egress = "can_exit" | "cannot_exit" | "not_answered";
 
-export async function postStatus(opts: {
+export async function submitStatus(opts: {
   status: CheckInStatus;
   severity?: TriageSeverity | null;
   mobility?: Mobility | null;
   egress?: Egress | null;
   location?: LocationPayload;
   battery?: BatteryPayload;
-}): Promise<Response> {
+}): Promise<string> {
   const deviceId = await getDeviceId();
   // Best-effort — if AsyncStorage is unavailable we send null and the
   // dashboard falls back to short_code-only display for this check-in.
@@ -226,36 +215,16 @@ export async function postStatus(opts: {
   }
 
   console.log(
-    `[QuakeGuard] POST (${status}${severity ? "/" + severity : ""}${mobility ? "/" + mobility : ""}) →`,
+    `[QuakeGuard] enqueue (${status}${severity ? "/" + severity : ""}${mobility ? "/" + mobility : ""}) →`,
     JSON.stringify(payload),
   );
 
-  // Fire both in parallel. The primary response (Render) is what we return —
-  // the backend post is fire-and-forget and its outcome is only logged.
-  const renderReq = fetch(SAFE_ENDPOINT, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-
-  if (BACKEND_URL) {
-    fetch(`${BACKEND_URL}/api/status`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    })
-      .then((r) => {
-        console.log("[QuakeGuard] backend /api/status →", r.status);
-        // #281: the home screen tells people when this phone has not
-        // reached us for a long time. This is where "reached us" is
-        // recorded — one place, on a real round trip, not on a hopeful
-        // assumption.
-        if (r.ok) markBackendContact();
-      })
-      .catch((e: Error) => {
-        console.log("[QuakeGuard] backend /api/status failed:", e?.message);
-      });
-  }
-
-  return renderReq;
+  const kind: QueueItemKind =
+    status === "trapped"
+      ? "trapped"
+      : status === "safe"
+        ? "safe"
+        : "not_responding";
+  const itemId = await enqueueHelp(payload, kind);
+  return itemId;
 }

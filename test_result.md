@@ -310,3 +310,89 @@ agent_communication:
       Dashboard pushed to PaulVincentiSafequake/SafeQuake main (f60da31).
       NOT verifiable here: notification behaviour and haptics need a real
       build on a device.
+
+## Iteration 49 — Task #193 Persistent offline queue for help reports (2026-08-30)
+
+  - agent: "main"
+    message: |
+      Task #193 (Paul, 2026-08-30): "Right now, if someone taps 'I need help'
+      with no signal, they may see it as sent when we never actually received
+      it. That's the worst failure this app can have — a person believing
+      help is coming while nobody knows they exist. I want the phone to
+      hold onto that report and keep trying until our server confirms it
+      has really arrived. Until then, the person must never see a tick, a
+      green mark, or any wording suggesting it was sent. It should honestly
+      say it's still trying, and tell them plainly the moment it gets
+      through."
+
+      Implementation:
+        1. NEW `frontend/src/utils/helpQueue.ts` — persistent AsyncStorage
+           queue (key `qa_help_queue_v1`). Every check-in submission is
+           enqueued BEFORE any network call. Retry schedule: 2s, 5s, 10s,
+           30s, 60s, 120s, 300s, then every 5 min forever. Also fires on
+           AppState "active" transitions.
+        2. Truth signal = HTTP 2xx from OUR backend (`/api/status`) —
+           NEVER from the legacy Render endpoint. Render still gets a
+           fire-and-forget parallel post for backwards compatibility, but
+           its return does not count as "reached us".
+        3. `frontend/src/utils/checkin.ts`: `postStatus()` replaced with
+           `submitStatus()` returning a queue item ID. Same payload shape,
+           now durable.
+        4. `frontend/app/alert.tsx`: new `pending_retry` status. Buttons
+           and toasts strictly forbid the words "sent", "delivered", tick
+           icons, or green tint until the queue reports `confirmed_at`
+           set. The pending banner ("Still trying to reach the rescue
+           team… Attempt N") is what the user sees for as long as we have
+           not had a real round-trip. Includes a "Try now" retry button.
+        5. `frontend/app/_layout.tsx`: boots the queue background loop on
+           app launch and wires two local notifications:
+             - `quakeangel-help-pending` (passive, sticky) — "Still trying
+               to send your help request… will keep trying and tell you
+               the moment it gets through."
+             - `quakeangel-help-delivered` (active, default sound) — "Your
+               help request reached the rescue team."
+           Pending is fired only for trapped reports (safe check-ins retry
+           silently), delivered replaces it the moment we win.
+        6. `frontend/src/utils/reminders.ts`: added the two new
+           notification helpers above.
+
+      What has NOT changed:
+        - Server-side /api/status contract is untouched. Existing backend
+          tests should still pass.
+        - Test-run (rehearsal) path continues to short-circuit locally —
+          no queue interaction, so a practice never leaves a pending
+          card on the user's own lock screen.
+        - Follow-up updates (severity → mobility/egress) still work; the
+          queue accepts multiple items per device and treats each as its
+          own retry-until-confirmed job.
+
+      Please test the frontend queue behaviour:
+        A. "I need help" tap with backend reachable → briefly shows
+           "Sending…" → transitions to "Your help request reached the
+           rescue team." after 2xx. No tick or green appears until then.
+        B. "I need help" tap with backend UNREACHABLE (block requests
+           in Playwright) → transitions to pending_retry state:
+           testID="alert-pending-retry-toast" is visible, buttons show
+           "Still trying…", NO green tick, NO "sent"/"delivered" wording
+           anywhere on screen. Attempt counter increments.
+        C. Restore network → within a retry interval, the toast flips to
+           "Your help request reached the rescue team." (testID
+           "alert-trapped-toast" appears).
+        D. "Try now" button (testID `alert-pending-try-now-btn`) triggers
+           an immediate flush attempt.
+        E. AsyncStorage inspection: while pending, key `qa_help_queue_v1`
+           holds the payload with `confirmed_at: null`. After confirmation
+           the item is removed from the queue.
+
+      Reference files:
+        - /app/frontend/src/utils/helpQueue.ts (new)
+        - /app/frontend/src/utils/checkin.ts
+        - /app/frontend/src/utils/reminders.ts
+        - /app/frontend/app/alert.tsx
+        - /app/frontend/app/_layout.tsx
+        - /app/frontend/app/index.tsx
+
+      No backend API changes; backend pytest suite should still show the
+      same 16/16 test-people passing + 1 pre-existing failure in
+      test_admin_gate.py unrelated to #193.
+

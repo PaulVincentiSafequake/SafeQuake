@@ -3236,3 +3236,36 @@ reproduced Paul's exact survivor scenario with device_id
 confirmed it's cleared on the first /clear. 16/16 focused tests pass
 locally and against the public URL.
 
+
+---
+
+## 2026-08-30 — Task #193: Persistent offline queue for help reports (guaranteed delivery)
+
+**Paul, 2026-08-30:** *"Right now, if someone taps 'I need help' with no signal, they may see it as sent when we never actually received it. That's the worst failure this app can have — a person believing help is coming while nobody knows they exist. I want the phone to hold onto that report and keep trying until our server confirms it has really arrived. Until then, the person must never see a tick, a green mark, or any wording suggesting it was sent. It should honestly say it's still trying, and tell them plainly the moment it gets through. Earthquakes knock out phone networks — this is the normal case, not a rare one."*
+
+### Design (locked)
+- **New module `frontend/src/utils/helpQueue.ts`** — persistent AsyncStorage queue (key `qa_help_queue_v1`) owns every check-in submission. Enqueue happens BEFORE any network call, so a phone that dies mid-tap still has the report on next boot.
+- **Truth signal = HTTP 2xx from OUR backend** (`/api/status`). Legacy Render endpoint gets a fire-and-forget parallel post for compatibility, but its return does NOT count as "reached us". The rescuer dashboard reads from our backend — that's the only server whose 200 means a real person will see the report.
+- **Retry schedule:** 2s, 5s, 10s, 30s, 60s, 120s, 300s, then every 5 min forever. Also kicks on AppState "active" transitions (phone regains signal → immediate retry).
+- **UI state machine on `/alert`:**
+  - `sending` → initial attempt in flight (GPS + first fetch)
+  - `pending_retry` → attempts ≥ 1, still no 2xx. Amber toast "Still trying to reach the rescue team… Attempt N" plus a "Try now" button. Buttons show "Still trying…" — never green, never a tick, never "sent"/"delivered".
+  - `sent` → queue reports `confirmed_at` set. Only NOW does the green success toast / "reached the rescue team" copy render.
+- **Persistent local notifications** (identifier `quakeangel-help-pending` / `quakeangel-help-delivered`, channel `quakeangel-help-status`):
+  - Pending: passive (no wake / no sound), sticky on Android — visible on the lock screen while unconfirmed so a user who locks their phone right after tapping still sees the honest state.
+  - Delivered: active + default sound — the moment the user has been waiting for; we want them to notice from any screen.
+- **Anti-lie contract (locked):** no user-facing surface on `/alert` — including the mobility and egress follow-up modals — may render the words "sent", "delivered", "received", or a green/tick/"Marked safe" visual while `helpQueue.confirmed_at` is null for the tracked item. The follow-up modal subtitle was reworded from "Your report is already sent — this adds one detail to it." to "Your first answer is safe on this phone — this adds a detail to it." to comply.
+- **Egress render fix:** the trapped-toast summary was rendering `egress='not_answered'` (a real answer meaning "user did not answer") as "you cannot get out — extraction needed". Now gated on egress ∈ {can_exit, cannot_exit}.
+
+### Files touched
+- `frontend/src/utils/helpQueue.ts` (new, ~330 LOC)
+- `frontend/src/utils/checkin.ts` — `postStatus()` → `submitStatus()` returning a queue item ID
+- `frontend/src/utils/reminders.ts` — two new notification helpers
+- `frontend/app/alert.tsx` — new `pending_retry` status, queue subscription, new toast, safe/trapped button relabels, follow-up-modal subtitle rewording, egress-render fix
+- `frontend/app/_layout.tsx` — boots the queue on app launch, wires trapped-report pending/delivered notifications
+- `frontend/app/index.tsx` — uses `submitStatus` for background `not_responding` pings
+
+### Verification
+- Testing agent iteration 50: 5/5 original scenarios (happy, offline, recovery via "Try now", reload-persistence, wording invariant) + 2 fix scenarios (mobility/egress subtitles, egress render) all PASS end-to-end using Playwright route.abort to simulate "no signal".
+- No backend contract change. Backend pytest suite unchanged.
+

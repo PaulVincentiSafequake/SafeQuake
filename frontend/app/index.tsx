@@ -52,7 +52,7 @@ import {
   getDisplayName,
   getShortCode,
   markNamePrompted,
-  postStatus,
+  submitStatus,
   sanitizeDisplayName,
   setDisplayName,
   wasNamePrompted,
@@ -438,7 +438,7 @@ export default function HomeScreen() {
               : "no_cached_fix",
         };
 
-    postStatus({
+    submitStatus({
       status: "not_responding",
       location: initialLocation,
     }).catch(() => {});
@@ -452,7 +452,7 @@ export default function HomeScreen() {
           const fresh = await Location.getCurrentPositionAsync({
             accuracy: Location.Accuracy.BestForNavigation,
           });
-          await postStatus({
+          await submitStatus({
             status: "not_responding",
             location: {
               latitude: fresh.coords.latitude,
