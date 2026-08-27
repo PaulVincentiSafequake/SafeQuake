@@ -143,15 +143,31 @@ def test_seed_prefix_is_used_as_the_bulletproof_predicate():
 
 
 def test_seed_replace_branch_calls_the_cleanup_helper():
-    """The seed's idempotency branch (`if existing: delete_many`) is
-    exactly where the bug lived. It must now call the same helper as
-    /clear, so the two cleanup paths cannot drift out of sync."""
+    """The seed's idempotency branch is exactly where the bug lived. It
+    must now clean up prior batches' device_status rows AND their open
+    alarms, so the /seed and /clear cleanup paths cannot drift out of
+    sync.
+
+    #320 (2026-08-29): the branch was widened from a single-predicate
+    `delete_many({"_test_seed": SEED_TAG})` to the shared sweeper
+    `_sweep_all_test_device_status`, which catches mark-test rows and
+    load-test rows as well. Either shape (the narrow delete_many OR the
+    broader sweeper call) satisfies the "prior batch is cleaned up
+    before the new one is inserted" contract behind #308."""
     src = open("/app/backend/test_people_seed.py", encoding="utf-8").read()
     # Anchor to the seed function.
     seed_start = src.index("async def seed_test_people(")
     seed_end = src.index("async def clear_test_people(", seed_start)
     seed_body = src[seed_start:seed_end]
-    assert 'delete_many({"_test_seed": SEED_TAG})' in seed_body
+    device_status_cleaned = (
+        'delete_many({"_test_seed": SEED_TAG})' in seed_body
+        or "_sweep_all_test_device_status" in seed_body
+    )
+    assert device_status_cleaned, (
+        "seed's replace branch must clean up prior batch's device_status "
+        "rows before inserting the new batch — either via the narrow "
+        "delete_many or the broader _sweep_all_test_device_status helper"
+    )
     assert "_resolve_every_alarm_from_test_people" in seed_body, (
         "seed's replace branch must clean up prior batch's alarms, "
         "not just delete their device_status rows"

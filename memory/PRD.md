@@ -3169,3 +3169,70 @@ page".
 `PaulVincentiSafequake/SafeQuake` main (path
 `backend_dashboard/public/index.html`) is pending a fresh GitHub PAT
 from Paul.
+
+## 2026-08-29 — Paul's #320: "Remove all" leaves survivors from other surfaces
+
+While verifying #307/#308 live, Paul added test people twice and removed
+them. The "33 test people" count read (5) before and still (5) after.
+One survivor: **`qg-1785757225898-jy34olbg`, tagged TEST, "trapped for
+22 days"**. That id shape — `qg-<13-digit epoch>-<8 lowercase>` — is
+the *real* device-id shape, so it doesn't match the `_test_seed`
+predicate the previous /clear was keyed on.
+
+### Every way a test entry can be created
+
+1. `POST /api/admin/test-people/seed` — writes 33 rows with
+   `_test_seed=SEED_TAG`, `is_test=True`, `synthetic=True`,
+   `device_id=qg-{SEED_TAG}-…`.
+2. `POST /api/admin/devices/{id}/mark-test` — sets `synthetic=True` on
+   a **real-shaped** device_id. **This is Paul's survivor's origin.**
+3. `scripts/load_test_seed.py` — sets `synthetic=True`,
+   `load_test_run_id=<uuid>`, `device_id=qg-loadtest-*`.
+4. Diagnostics/e2e/snippet/demo/playwright device_ids from harness
+   runs (recognised by `deps.is_test_device()` marker substrings).
+5. Any row with `is_test=True` set by any other code path (defensive).
+
+### What the old /clear missed
+
+Only category 1. Everything else survived indefinitely, and its open
+alarms with it — that's Paul's stuck 22-day "trapped" ghost.
+
+### Fix (generic, one-shot)
+
+`POST /api/admin/test-people/clear` now delegates to a new sweeper
+that unions **all five predicates** and returns a breakdown so
+"count=5 → 0" is visible in the response:
+
+```json
+{
+  "removed": 5,
+  "alarms_cleared": 3,
+  "seed_tag": "seeded-33",
+  "matched_by": {
+    "seed_tag": 0, "synthetic_flag": 1, "is_test_flag": 0,
+    "load_test_run": 0, "marker_id": 4
+  }
+}
+```
+
+The alarm sweeper now also accepts the exact list of ids we just
+deleted, so a mark-test-flagged real-shaped device (which matches no
+regex) still gets its open alarm resolved. Response shape is
+backward-compatible: `removed`/`alarms_cleared`/`seed_tag` are
+unchanged, `matched_by` is additive.
+
+### Same fix applies to the /seed idempotency branch
+
+Pressing "Add 33 test people" now sweeps prior test rows from **any**
+surface before writing the new batch, not just the prior `_test_seed`
+batch. Add-without-clear from any prior surface is fully cleaned up.
+
+### Test suite
+
+`tests/test_test_people_320_all_surfaces.py` covers all five surfaces
+individually plus a mixed end-to-end. testing_agent independently
+reproduced Paul's exact survivor scenario with device_id
+`qg-<13-digit epoch>-jy34olbg` against the public backend and
+confirmed it's cleared on the first /clear. 16/16 focused tests pass
+locally and against the public URL.
+

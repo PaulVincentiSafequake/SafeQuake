@@ -31,6 +31,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Request
 
 from auth import resolve_principal, require_role
+from deps import is_test_device as _is_test_device
 
 
 SEED_TAG = "seeded-33"
@@ -229,32 +230,65 @@ def register_test_people_routes(api_router, db) -> None:
     """
     from server import ADMIN_TRIGGER_PASSWORD  # imported here to avoid cycles
 
-    async def _resolve_every_alarm_from_test_people(reason: str) -> int:
-        """#308 (Paul, 2026-08-28): "removing test people must always
-        clear every alarm they caused, no matter how many times I've
-        added and removed batches before."
+    async def _resolve_every_alarm_from_test_people(
+        reason: str,
+        extra_ids: Optional[list[str]] = None,
+    ) -> int:
+        """#308 (Paul, 2026-08-28) / #320 (Paul, 2026-08-29):
+        "Remove all test people must always clear every alarm they caused,
+        no matter which surface created them."
 
-        Two orthogonal predicates, unioned, so no ghost slips through:
+        Four orthogonal predicates, unioned, so no ghost slips through:
           · every open alarm whose `device_id` starts with `qg-<SEED_TAG>-`
-            (which is deterministic — every seeded row uses this prefix,
-            regardless of the random suffix that changes each batch), and
+            (deterministic — every /seed row uses this prefix regardless of
+            the random suffix that changes each batch), and
           · every open alarm flagged `is_test: True` (which is what
-            raise_alarm sets when the row is synthetic).
+            raise_alarm sets when the row is synthetic), and
+          · every open alarm whose `device_id` matches any of the well-known
+            test-marker prefixes (`qg-loadtest-`, `qg-snippet-test-`,
+            `qg-rescue-test-`, `qg-rescue-e2e-`, `qg-mob-*`, `diag-*`,
+            `TEST_*`, `test-*`, `demo-*`, `playwright-*`), and
+          · every open alarm whose device_id is in `extra_ids` — the exact
+            list of device_status rows we just deleted in this call, so a
+            real-shaped device_id that was flagged synthetic via
+            /admin/devices/{id}/mark-test still gets its alarm cleaned up
+            even though it doesn't match any regex or marker.
 
-        Union means a batch of alarms that missed the `is_test` flag
-        for any reason still gets cleaned up by the prefix match, and a
-        batch of alarms that came from a different SEED_TAG one day
-        would still get cleaned up by the `is_test` match. Nothing
-        fake keeps sounding after the fake person is gone.
+        Union means a batch of alarms that missed the `is_test` flag for
+        any reason still gets cleaned up by one of the id predicates.
+        Nothing fake keeps sounding after the fake person is gone.
         """
         prefix_re = f"^qg-{SEED_TAG}-"
+        # Marker-based device_id predicates. Case-insensitive substring
+        # matches to mirror `deps.is_test_device`'s marker set, but scoped
+        # so a real UUID that happens to contain "test" doesn't get caught
+        # (the real-device shape is `qg-<13-digit epoch>-<8 random>`; the
+        # markers below all include a distinctive prefix or hyphen guard).
+        marker_or: list[dict] = [
+            {"device_id": {"$regex": r"^qg-loadtest-", "$options": "i"}},
+            {"device_id": {"$regex": r"^qg-snippet-", "$options": "i"}},
+            {"device_id": {"$regex": r"^qg-rescue-test-", "$options": "i"}},
+            {"device_id": {"$regex": r"^qg-rescue-e2e-", "$options": "i"}},
+            {"device_id": {"$regex": r"^qg-mob-", "$options": "i"}},
+            {"device_id": {"$regex": r"^qg-diag-", "$options": "i"}},
+            {"device_id": {"$regex": r"^TEST_", "$options": "i"}},
+            {"device_id": {"$regex": r"^test-", "$options": "i"}},
+            {"device_id": {"$regex": r"^demo-", "$options": "i"}},
+            {"device_id": {"$regex": r"^playwright-", "$options": "i"}},
+            {"device_id": {"$regex": r"^diag-", "$options": "i"}},
+            {"device_id": "dashboard"},
+        ]
+        or_clauses: list[dict] = [
+            {"is_test": True},
+            {"device_id": {"$regex": prefix_re}},
+            *marker_or,
+        ]
+        if extra_ids:
+            or_clauses.append({"device_id": {"$in": list(extra_ids)}})
         result = await db.board_alarms.update_many(
             {
                 "resolved_at": None,
-                "$or": [
-                    {"is_test": True},
-                    {"device_id": {"$regex": prefix_re}},
-                ],
+                "$or": or_clauses,
             },
             {"$set": {
                 "resolved_at": datetime.now(timezone.utc).isoformat(),
@@ -262,6 +296,84 @@ def register_test_people_routes(api_router, db) -> None:
             }},
         )
         return int(result.modified_count)
+
+    async def _sweep_all_test_device_status(reason: str) -> tuple[int, list[str], dict]:
+        """#320 (Paul, 2026-08-29): find and delete every test device_status
+        row, no matter which surface created it. Returns:
+          (deleted_count, deleted_ids, breakdown_by_predicate)
+
+        Predicates unioned (defense-in-depth):
+          A. `_test_seed` present (any batch of /seed, past or future)
+          B. `synthetic: True` (mark-test on a real-shaped device;
+             load-test seeder; #229 spec rows)
+          C. `is_test: True` (defensive — any code path that ever set it)
+          D. `load_test_run_id` present (B5 load-test seeder)
+          E. device_id matches a known test-shape marker
+             (`qg-seeded-*`, `qg-loadtest-*`, `qg-snippet-*`,
+              `qg-rescue-test-*`, `qg-rescue-e2e-*`, `qg-mob-*`,
+              `qg-diag-*`, `TEST_*`, `test-*`, `demo-*`,
+              `playwright-*`, `diag-*`, exactly `dashboard`)
+
+        A device flagged by ANY one of these is a test row and gets
+        removed. This mirrors — and is a strict superset of — the
+        `deps.is_test_device()` matcher that the dashboard already uses
+        to decide whether the TEST badge should appear beside a row.
+        """
+        # Pull only the fields we need for classification + audit.
+        cursor = db.device_status.find(
+            {},
+            {
+                "_id": 0,
+                "device_id": 1,
+                "synthetic": 1,
+                "is_test": 1,
+                "_test_seed": 1,
+                "load_test_run_id": 1,
+                "display_name": 1,
+            },
+        )
+        breakdown = {
+            "seed_tag": 0,
+            "synthetic_flag": 0,
+            "is_test_flag": 0,
+            "load_test_run": 0,
+            "marker_id": 0,
+        }
+        to_delete: list[str] = []
+        async for r in cursor:
+            did = str(r.get("device_id") or "")
+            matched = False
+            if r.get("_test_seed"):
+                breakdown["seed_tag"] += 1
+                matched = True
+            if r.get("synthetic") is True:
+                breakdown["synthetic_flag"] += 1
+                matched = True
+            if r.get("is_test") is True:
+                breakdown["is_test_flag"] += 1
+                matched = True
+            if r.get("load_test_run_id"):
+                breakdown["load_test_run"] += 1
+                matched = True
+            # Fall through to the marker-id matcher so an old orphan row
+            # that lost its flags (or never had them) is still caught.
+            if not matched and _is_test_device(r):
+                breakdown["marker_id"] += 1
+                matched = True
+            if matched and did:
+                to_delete.append(did)
+
+        deleted_count = 0
+        if to_delete:
+            # Delete in chunks so a large purge doesn't build a giant $in.
+            for i in range(0, len(to_delete), 500):
+                chunk = to_delete[i : i + 500]
+                res = await db.device_status.delete_many(
+                    {"device_id": {"$in": chunk}}
+                )
+                deleted_count += int(res.deleted_count)
+        return deleted_count, to_delete, breakdown
+
 
     @api_router.post("/admin/test-people/seed")
     async def seed_test_people(request: Request):
@@ -272,21 +384,28 @@ def register_test_people_routes(api_router, db) -> None:
         require_role(principal, "admin", "operator")
 
         now = datetime.now(timezone.utc)
-        # Refuse to double-seed: if any of these rows already exist, clear
-        # them first (idempotent). Otherwise the "add all 33" button would
-        # produce 66 people.
+        # Refuse to double-seed: if any test rows already exist (from THIS
+        # /seed or any other surface) sweep them first, so pressing "Add
+        # 33" is always deterministic — you end up with exactly the 33
+        # spec rows and no leftovers from a previous batch or a stray
+        # mark-test row.
         #
-        # #308 (Paul, 2026-08-28): the previous shape of this branch
-        # deleted device_status rows without touching the open alarms
-        # those prior rows had raised. On seed → seed (without a clear
-        # between), the first batch's alarms became orphans whose
-        # device_ids no longer existed in device_status — still sounding.
-        # Adding a batch is now as complete a cleanup as clearing one.
-        existing = await db.device_status.count_documents({"_test_seed": SEED_TAG})
-        if existing:
-            await db.device_status.delete_many({"_test_seed": SEED_TAG})
+        # #308 (Paul, 2026-08-28) / #320 (Paul, 2026-08-29):
+        # the previous shape of this branch only touched rows whose
+        # `_test_seed` matched SEED_TAG. That left mark-test-flagged
+        # devices, load-test rows, and any prior batch that had lost its
+        # flag as orphans in device_status — and their alarms as ghosts.
+        # The sweep below removes every test row by any recognised
+        # predicate, and the alarm sweeper accepts the exact list of
+        # deleted ids so alarms whose device_id no longer matches any
+        # regex still get resolved.
+        pre_deleted, pre_ids, _ = await _sweep_all_test_device_status(
+            "Test people were replaced with a fresh batch."
+        )
+        if pre_deleted:
             await _resolve_every_alarm_from_test_people(
-                "Test people were replaced with a fresh batch."
+                "Test people were replaced with a fresh batch.",
+                extra_ids=pre_ids,
             )
 
         people = _people_spec(now)
@@ -336,18 +455,29 @@ def register_test_people_routes(api_router, db) -> None:
         )
         require_role(principal, "admin", "operator")
 
-        result = await db.device_status.delete_many({"_test_seed": SEED_TAG})
-        # #301: the rehearsal's alarms go with it. Resolved rather than
-        # deleted, so the alarm ledger still reads back honestly.
-        # #308: matches by both `is_test: True` AND `qg-<SEED_TAG>-*`
-        # device_id prefix, so a batch whose alarms lost the `is_test`
-        # flag for any reason still gets cleaned up. Nothing fake ever
-        # keeps sounding after the fake person is gone.
-        modified = await _resolve_every_alarm_from_test_people(
+        # #320 (Paul, 2026-08-29): "Remove all test people" now clears
+        # every test row created by ANY surface, not just the /seed
+        # batch. This covers:
+        #   · /admin/test-people/seed rows          (`_test_seed`)
+        #   · /admin/devices/{id}/mark-test rows    (`synthetic:true`
+        #                                             on a real device_id)
+        #   · scripts/load_test_seed.py rows        (`load_test_run_id`)
+        #   · diagnostics / e2e / snippet / demo /
+        #     playwright / `dashboard` device_ids   (marker match)
+        #   · any row with `is_test:true` set by any code path
+        # The alarm sweeper is called with the exact list of ids we just
+        # deleted so a real-shaped id that only had `synthetic:true`
+        # (mark-test) still gets its open alarm resolved.
+        deleted_count, deleted_ids, breakdown = await _sweep_all_test_device_status(
             "Test people were cleared."
         )
+        modified = await _resolve_every_alarm_from_test_people(
+            "Test people were cleared.",
+            extra_ids=deleted_ids,
+        )
         return {
-            "removed": int(result.deleted_count),
-            "alarms_cleared": modified,
+            "removed": int(deleted_count),
+            "alarms_cleared": int(modified),
             "seed_tag": SEED_TAG,
+            "matched_by": breakdown,
         }
