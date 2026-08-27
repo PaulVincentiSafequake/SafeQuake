@@ -3097,3 +3097,75 @@ becomes "something else on the page" — the raw element still goes to
 `PaulVincentiSafequake/SafeQuake` main (path
 `backend_dashboard/public/index.html`) is pending a fresh GitHub PAT
 from Paul; the prior PAT was revoked after last push.
+
+## 2026-08-28 — Paul's #307 (fourth repeat): the fix goes generic
+
+### What Paul reported
+
+> "You patched three elements (`qg-banner-text`, `qg-trigger-wrap`,
+> `qg-tremor-strip`) but I found a fourth one live: the top
+> status/update message bar also covers the alarm buttons. Please find
+> every fixed or sticky element on the page that could ever sit above
+> the alarm panel and give the whole family the same fix at once, not
+> one at a time."
+
+The fourth bar was `#qg-rescue-toast` (the rescue-flow confirmation
+strip that slides in from the top when a bulk-rescue action fires). It
+is `position: fixed; top: 0; z-index: 99998` — same shape as
+`#qg-banner`, so the same class of coverage bug came back a fourth
+time.
+
+### What changed
+
+Stopped naming top bars one at a time. `updateFixedTopOffset` now
+scans the whole page for every visible `position: fixed` element
+pinned to the top of the viewport and offsets the sticky alarm panel
+below the union of them. Full-viewport modal backdrops and narrow
+corner toasts are excluded so they don't slam the offset. A
+body-wide `MutationObserver` (watching `class`, `hidden`, `style`) plus
+`transitionend` / `animationend` listeners re-run the scan on every
+DOM change that could show or hide a top bar — so any future
+top-of-page bar added to the dashboard is handled automatically the
+moment it renders. `showToast` / `hideToast` also call
+`qgUpdateFixedTopOffset` directly (belt-and-braces, same frame).
+
+`FRIENDLY_COVER_NAMES` gains `qg-rescue-toast` so the fallback warning
+(if it ever fires) reads as "the status message bar at the top of the
+page".
+
+### Verified
+
+- **Backend static-source contracts** — `tests/test_alarm_buttons_never_covered_307.py`
+  (11/11 pass); pins the generic DOM-scan approach
+  (`getComputedStyle`, `position: "fixed"` filter, full-screen backdrop
+  exclusion), the `MutationObserver` with the right attribute filter,
+  the `transitionend` / `animationend` re-scan hooks, `showToast` /
+  `hideToast` calling `qgUpdateFixedTopOffset`, and the `qg-rescue-toast`
+  entry in the translation dictionary. Asserts the OLD hard-coded
+  `getElementById("qg-banner")` / `getElementById("qg-stale-bar")`
+  form is gone.
+- **Regression** — 175 passed, 1 skipped, 0 failed across every test
+  file that touches `dashboard_build/index.html`.
+
+### How Paul should test cleanly (per Standing Rule B)
+
+1. Hard refresh (Cmd/Ctrl+Shift+R) the dashboard once GitHub Pages picks
+   up the push.
+2. Sign in as usual.
+3. Trigger a test alert against a `qgtest-<random>` device (never a real
+   one — Standing Rule A).
+4. Fire a rescue-flow action so the top status/update message bar
+   slides in. Confirm the sticky alarm panel slides down by the toast's
+   height — no overlap with Acknowledge / Show me who / Silence.
+5. Repeat with the regular success banner and the "board not updating"
+   red bar.
+6. If (for any residual reason) the on-screen "buttons covered" line
+   ever appears, confirm it names the offending element in plain
+   English — never a code name.
+
+### Deploy state
+
+`memory/dashboard_build/index.html` is staged. Push to
+`PaulVincentiSafequake/SafeQuake` main (path
+`backend_dashboard/public/index.html`) is pending a fresh GitHub PAT
+from Paul.

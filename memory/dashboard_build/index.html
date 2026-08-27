@@ -5582,11 +5582,17 @@ window.QuakeAngelRescue = (function () {
     toastMsg.textContent = text;
     void toast.offsetWidth;
     toast.classList.add("show");
+    // #307 — this toast is a fixed top bar too, so nudge the sticky
+    // alarm panel down by its height the moment it slides in.
+    try { if (window.qgUpdateFixedTopOffset) window.qgUpdateFixedTopOffset(); } catch (_) {}
     if (autoDismissMs && autoDismissMs > 0) {
       toastTimer = setTimeout(hideToast, autoDismissMs);
     }
   }
-  function hideToast() { toast && toast.classList.remove("show"); }
+  function hideToast() {
+    toast && toast.classList.remove("show");
+    try { if (window.qgUpdateFixedTopOffset) window.qgUpdateFixedTopOffset(); } catch (_) {}
+  }
   toastX && toastX.addEventListener("click", hideToast);
 
   var backdrop = document.getElementById("qg-rescue-modal-backdrop");
@@ -8868,6 +8874,10 @@ window.QuakeAngelRescue = (function () {
     "qg-stale-detail": "the ‘board not updating’ warning bar",
     "qg-stale-btn":    "the ‘board not updating’ warning bar",
     "qg-stale-shape":  "the ‘board not updating’ warning bar",
+    // The rescue / bulk-action confirmation toast at the top of the page.
+    // (`.msg` and `.close` are generic child classes — the ancestor
+    // walk in friendlyDescribeCover resolves them via the parent id.)
+    "qg-rescue-toast": "the status message bar at the top of the page",
     // The dashboard header (logo + title).
     "header":          "the page header",
     // Modal / dialog backdrops.
@@ -9036,23 +9046,100 @@ window.QuakeAngelRescue = (function () {
   }, 400);
 
   var bannerTimer = null;
-  // #307: whenever a fixed top overlay is visible, we push the sticky
-  // alarm panel down by the overlay's height (via a CSS variable). This
-  // guarantees the panel can never sit behind the banner even in an
-  // edge case where paint order fails us. Recomputed on every show/hide
-  // and on window resize.
+  // #307 (four times, Paul). Every time this bug came back it was a
+  // different top-of-page bar that appeared later: qg-banner-text,
+  // qg-trigger-wrap, qg-tremor-strip, then qg-rescue-toast. Fixing
+  // them one at a time is whack-a-mole. Instead of naming any single
+  // element, this scans the whole page for every currently visible
+  // `position: fixed` bar pinned to the top of the viewport and sums
+  // the tallest bottom edge, so the alarm panel is offset below the
+  // whole family of top bars at once. Any future top bar added to
+  // the dashboard is handled automatically the moment it renders —
+  // no code change needed here.
+  //
+  // Full-screen backdrops (modals) are deliberately excluded: they
+  // are supposed to cover everything while open, and the modal itself
+  // steals focus, so the alarm buttons don't need to stay clickable
+  // behind them.
   function updateFixedTopOffset() {
     try {
-      var b = document.getElementById("qg-banner");
-      var sb = document.getElementById("qg-stale-bar");
+      var panel = document.querySelector(".qg-topstrip");
+      var vw = window.innerWidth || document.documentElement.clientWidth || 0;
+      var vh = window.innerHeight || document.documentElement.clientHeight || 0;
       var offset = 0;
-      if (b && b.classList.contains("show")) offset += b.offsetHeight || 68;
-      if (sb && !sb.hidden) offset += sb.offsetHeight || 60;
-      document.documentElement.style.setProperty("--qg-fixed-top-offset", offset + "px");
+      // walk the whole body once; cheap in practice (the dashboard
+      // has ~few thousand nodes at most, and this only runs on
+      // resize / banner show / hide, not on every frame).
+      var all = document.body ? document.body.getElementsByTagName("*") : [];
+      for (var i = 0; i < all.length; i++) {
+        var el = all[i];
+        if (!el || el === panel) continue;
+        if (panel && panel.contains(el)) continue;
+        // Skip anything obviously invisible before the expensive
+        // getComputedStyle call.
+        if (el.hidden) continue;
+        if (!el.offsetWidth || !el.offsetHeight) continue;
+        var cs;
+        try { cs = window.getComputedStyle(el); } catch (_) { continue; }
+        if (!cs) continue;
+        if (cs.position !== "fixed") continue;
+        if (cs.visibility === "hidden" || cs.display === "none") continue;
+        if (parseFloat(cs.opacity || "1") === 0) continue;
+        // pointer-events:none bars (e.g. the alarm-flash edge strips)
+        // cannot swallow a click, so they don't need offsetting.
+        if (cs.pointerEvents === "none") continue;
+        var r;
+        try { r = el.getBoundingClientRect(); } catch (_) { continue; }
+        if (!r || !r.width || !r.height) continue;
+        // Must be anchored at (or very near) the top of the viewport.
+        // 8px leeway covers subpixel rounding and translateY animations
+        // that come to rest just above 0.
+        if (r.top > 8) continue;
+        if (r.bottom <= 0) continue;
+        // Skip full-viewport backdrops (modals, dialog overlays).
+        if (r.height >= vh * 0.9) continue;
+        // Skip narrow floating pills that don't span the width of the
+        // page (e.g. corner toasts) — they can't cover the panel
+        // horizontally.
+        if (vw > 0 && r.width < vw * 0.4) continue;
+        var bottomInView = Math.min(r.bottom, vh);
+        if (bottomInView > offset) offset = bottomInView;
+      }
+      document.documentElement.style.setProperty("--qg-fixed-top-offset", Math.ceil(offset) + "px");
     } catch (_) {}
   }
   window.qgUpdateFixedTopOffset = updateFixedTopOffset;
   window.addEventListener("resize", updateFixedTopOffset);
+
+  // Belt-and-braces: any DOM change that flips a `hidden`, `class` or
+  // inline-style bit on a top-of-page bar re-runs the offset scan.
+  // Debounced with requestAnimationFrame so a burst of DOM changes
+  // (e.g. a page render) causes exactly one recompute.
+  (function watchForNewTopBars() {
+    if (!window.MutationObserver || !document.body) return;
+    var scheduled = false;
+    function schedule() {
+      if (scheduled) return;
+      scheduled = true;
+      (window.requestAnimationFrame || function (f) { setTimeout(f, 16); })(function () {
+        scheduled = false;
+        updateFixedTopOffset();
+      });
+    }
+    try {
+      new MutationObserver(schedule).observe(document.body, {
+        subtree: true,
+        childList: true,
+        attributes: true,
+        attributeFilter: ["class", "hidden", "style"]
+      });
+    } catch (_) {}
+    // Any CSS transition finishing on a top bar (slide-in / slide-out)
+    // is a moment where the visible bar geometry changes without an
+    // attribute mutation, so re-scan then too.
+    document.addEventListener("transitionend", schedule, true);
+    document.addEventListener("animationend", schedule, true);
+  })();
   function showBanner(kind, text, autoDismissMs) {
     if (bannerTimer) { clearTimeout(bannerTimer); bannerTimer = null; }
     banner.classList.remove("ok", "err");
