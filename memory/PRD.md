@@ -3269,3 +3269,22 @@ locally and against the public URL.
 - Testing agent iteration 50: 5/5 original scenarios (happy, offline, recovery via "Try now", reload-persistence, wording invariant) + 2 fix scenarios (mobility/egress subtitles, egress render) all PASS end-to-end using Playwright route.abort to simulate "no signal".
 - No backend contract change. Backend pytest suite unchanged.
 
+
+### 2026-08-30 — Task #193 v2: battery-conscious retry schedule
+
+**Paul, same day:** *"It retries every 5 minutes forever. But the person most likely to be stuck retrying is someone trapped under rubble with no signal, and a phone hunting for a network is one of the biggest battery drains there is. Keep widening the gap: roughly every 5 min for the first half hour, every 15 min up to two hours, every 30 min up to twelve hours, then hourly. Also send immediately whenever the phone regains signal or comes back to the foreground, since that costs nothing. The person should never be told it's slowing down — it should just quietly last longer."*
+
+**Change:** `nextRetryDelayMs(attempts, ageMs)` in `helpQueue.ts` — age-based back-off:
+- 0–30 min: every 5 min
+- 30 min – 2 h: every 15 min
+- 2 h – 12 h: every 30 min
+- 12 h+: hourly
+
+**Never-attempted exception:** `attempts === 0 → 0 ms`. A brand-new item (including a follow-up submission enqueued mid-flush) always gets its first swing at the network immediately — the back-off only applies AFTER a real attempt. This closed a regression where a follow-up item was stuck at "Sending…" for 5 min because its initial `scheduleFlush(0)` was swallowed by the still-running flush loop.
+
+**Zero-cost events still bypass the schedule:** AppState → active fires `kickFlush()` → `scheduleFlush(0)`. The "Try now" button does the same.
+
+**Copy invariant (locked):** the pending toast NEVER mentions timing or slowing down — no "every 5 minutes", no "saving battery", no "less often". The visible copy is always "Still trying to reach the rescue team… Attempt N" regardless of what interval the queue is currently on. The person's phone quietly lasts longer without their being told.
+
+**Verified:** testing agent iteration 52 — 5/5 scenarios PASS including the mid-flush-follow-up regression fix.
+

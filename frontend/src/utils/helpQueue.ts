@@ -36,21 +36,43 @@ import { markBackendContact } from "@/src/utils/readiness";
 import { SAFE_ENDPOINT } from "@/src/theme";
 
 const QUEUE_KEY = "qa_help_queue_v1";
-// Retry schedule in ms. After the last entry we keep retrying at the last
-// interval forever. Chosen so the first four attempts finish inside a
-// minute (the user is watching the screen), and after that we back off to
-// once every 5 minutes (the app is likely in the background but retry
-// still needs to fire).
-const RETRY_SCHEDULE_MS = [
-  2_000,
-  5_000,
-  10_000,
-  30_000,
-  60_000,
-  120_000,
-  300_000,
-];
-const MAX_INTERVAL_MS = RETRY_SCHEDULE_MS[RETRY_SCHEDULE_MS.length - 1];
+// #193 v2 (2026-08-30 — Paul): the retry schedule WIDENS with the age of
+// the report. Rationale from Paul:
+//
+//   "The person most likely to be stuck retrying is someone trapped
+//    under rubble with no signal, and a phone hunting for a network is
+//    one of the biggest battery drains there is. We'd be flattening the
+//    battery of the one person we most need to stay findable."
+//
+// So we back off progressively — never stopping, never telling the user
+// we've slowed down. In parallel we still fire immediately on any event
+// that costs no extra battery: AppState → active, and any user tap on
+// "Try now". Those bypass this schedule entirely.
+//
+//   First 30 min : every ~5 min   (they're likely on-screen or nearby)
+//   30 min – 2h  : every 15 min   (settling in; signal may return)
+//   2h – 12h     : every 30 min   (long-tail; battery must last)
+//   after 12h    : hourly          (worst case; hours-long entrapment)
+//
+// The schedule keys off ENQUEUE TIME, not attempt count — a phone that
+// spent 4 hours asleep and just woke should immediately fall into the
+// 30-min band, not restart at 5 min. Wall-clock age is what matters to
+// battery, not how many times we happened to try.
+//
+// EXCEPTION: an item that has NEVER been attempted (attempts === 0) is
+// always eligible for an immediate flush, regardless of the age band.
+// The battery-conscious backoff applies only AFTER we've had a real
+// swing at the network. This matters when a follow-up submission is
+// enqueued mid-flush (the initial scheduleFlush(0) is swallowed by the
+// running loop's guard, and the post-flush reschedule would otherwise
+// push a brand-new item into a 5-minute wait).
+function nextRetryDelayMs(attempts: number, ageMs: number): number {
+  if (attempts === 0) return 0;
+  if (ageMs < 30 * 60_000) return 5 * 60_000;
+  if (ageMs < 2 * 60 * 60_000) return 15 * 60_000;
+  if (ageMs < 12 * 60 * 60_000) return 30 * 60_000;
+  return 60 * 60_000;
+}
 
 // Per-request network timeout — a socket that hangs forever without either
 // a response or an error would starve the queue.
@@ -359,15 +381,21 @@ async function flushOnce(): Promise<void> {
     }
     await persist();
     emit();
-    // If anything is still unconfirmed, schedule the next flush.
+    // If anything is still unconfirmed, schedule the next flush based on
+    // the OLDEST pending item's next-due-time. A brand-new item that
+    // has not yet had its first swing at the network returns 0 from
+    // nextRetryDelayMs — so a follow-up enqueued mid-flush gets its
+    // first attempt immediately, not on the age-based backoff.
     const remaining = memoryQueue.filter((x) => !x.confirmed_at);
     if (remaining.length > 0) {
-      const maxAttempts = Math.max(...remaining.map((x) => x.attempts));
-      const delay =
-        RETRY_SCHEDULE_MS[
-          Math.min(maxAttempts, RETRY_SCHEDULE_MS.length - 1)
-        ] ?? MAX_INTERVAL_MS;
-      scheduleFlush(delay);
+      const now = Date.now();
+      const nextDelay = Math.min(
+        ...remaining.map((x) => {
+          const ageMs = Math.max(0, now - Date.parse(x.enqueued_at));
+          return nextRetryDelayMs(x.attempts, ageMs);
+        }),
+      );
+      scheduleFlush(nextDelay);
     } else {
       nextFlushAt = null;
     }
