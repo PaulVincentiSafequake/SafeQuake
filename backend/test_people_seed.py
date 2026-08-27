@@ -229,6 +229,40 @@ def register_test_people_routes(api_router, db) -> None:
     """
     from server import ADMIN_TRIGGER_PASSWORD  # imported here to avoid cycles
 
+    async def _resolve_every_alarm_from_test_people(reason: str) -> int:
+        """#308 (Paul, 2026-08-28): "removing test people must always
+        clear every alarm they caused, no matter how many times I've
+        added and removed batches before."
+
+        Two orthogonal predicates, unioned, so no ghost slips through:
+          · every open alarm whose `device_id` starts with `qg-<SEED_TAG>-`
+            (which is deterministic — every seeded row uses this prefix,
+            regardless of the random suffix that changes each batch), and
+          · every open alarm flagged `is_test: True` (which is what
+            raise_alarm sets when the row is synthetic).
+
+        Union means a batch of alarms that missed the `is_test` flag
+        for any reason still gets cleaned up by the prefix match, and a
+        batch of alarms that came from a different SEED_TAG one day
+        would still get cleaned up by the `is_test` match. Nothing
+        fake keeps sounding after the fake person is gone.
+        """
+        prefix_re = f"^qg-{SEED_TAG}-"
+        result = await db.board_alarms.update_many(
+            {
+                "resolved_at": None,
+                "$or": [
+                    {"is_test": True},
+                    {"device_id": {"$regex": prefix_re}},
+                ],
+            },
+            {"$set": {
+                "resolved_at": datetime.now(timezone.utc).isoformat(),
+                "resolved_reason": reason,
+            }},
+        )
+        return int(result.modified_count)
+
     @api_router.post("/admin/test-people/seed")
     async def seed_test_people(request: Request):
         principal = await resolve_principal(
@@ -241,9 +275,19 @@ def register_test_people_routes(api_router, db) -> None:
         # Refuse to double-seed: if any of these rows already exist, clear
         # them first (idempotent). Otherwise the "add all 33" button would
         # produce 66 people.
+        #
+        # #308 (Paul, 2026-08-28): the previous shape of this branch
+        # deleted device_status rows without touching the open alarms
+        # those prior rows had raised. On seed → seed (without a clear
+        # between), the first batch's alarms became orphans whose
+        # device_ids no longer existed in device_status — still sounding.
+        # Adding a batch is now as complete a cleanup as clearing one.
         existing = await db.device_status.count_documents({"_test_seed": SEED_TAG})
         if existing:
             await db.device_status.delete_many({"_test_seed": SEED_TAG})
+            await _resolve_every_alarm_from_test_people(
+                "Test people were replaced with a fresh batch."
+            )
 
         people = _people_spec(now)
         if people:
@@ -295,13 +339,15 @@ def register_test_people_routes(api_router, db) -> None:
         result = await db.device_status.delete_many({"_test_seed": SEED_TAG})
         # #301: the rehearsal's alarms go with it. Resolved rather than
         # deleted, so the alarm ledger still reads back honestly.
-        alarms = await db.board_alarms.update_many(
-            {"is_test": True, "resolved_at": None},
-            {"$set": {"resolved_at": datetime.now(timezone.utc).isoformat(),
-                      "resolved_reason": "Test people were cleared."}},
+        # #308: matches by both `is_test: True` AND `qg-<SEED_TAG>-*`
+        # device_id prefix, so a batch whose alarms lost the `is_test`
+        # flag for any reason still gets cleaned up. Nothing fake ever
+        # keeps sounding after the fake person is gone.
+        modified = await _resolve_every_alarm_from_test_people(
+            "Test people were cleared."
         )
         return {
             "removed": int(result.deleted_count),
-            "alarms_cleared": int(alarms.modified_count),
+            "alarms_cleared": modified,
             "seed_tag": SEED_TAG,
         }
