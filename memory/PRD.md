@@ -3380,3 +3380,111 @@ The map colour is DERIVED SERVER-SIDE. Never recompute in a client. One source, 
 **Post-review sort fix (iteration 55 → 56):** `/api/devices` sort was coalesced to `max(updated_at, last_alerted_at)` so silent-since-alert stubs (broadcast timestamp only, no updated_at yet) sort to the TOP of the paginated response rather than the bottom. Without this, a 1001st recipient could be truncated off — the very defect this task exists to fix.
 
 **Verified:** testing_agent iterations 55 (33/33) + 56 (36/36) = 69/69 across the full Task #326 test suite. #185 group_size and #193 offline queue regressions preserved (46/46 combined pass).
+
+
+## 2026-09-03 — Paul's dashboard trio: group size on dashboard, coverage caveat everywhere, sign-in banner cleanup
+
+Three requests, delivered together because they touch the same file surface
+(`memory/dashboard_build/index.html`) and share a single design principle: one
+source of truth for the words we show, so no two surfaces can drift apart.
+
+**1. Group size on the dashboard (#185 tail):**
+The mobile app already asks "Including you, how many people are here?" after
+`I'm Safe` or `Need Help` (Task #185). The answer arrives on `device_status.group_size`
+and the API surfaces it, but the dashboard was ignoring it. Now:
+  * **Map pin badge** — a small white pill on the top-right of the shape:
+    `3` for `2..4`, `5+` for `5`, nothing at all for solo/unknown. A "1" badge
+    would be visual noise on every marker. Muted (rescued/off-board) pins skip
+    the badge entirely.
+  * **Card / popup line** — one plain sentence: `Just this person`, `3 people
+    at this address`, `5 or more people at this address`, or `Group size not
+    given`. Words, not a bare number, so an operator cannot mistake it for a
+    total.
+  * **Never a total.** `group_size` is not summed anywhere. Overlapping groups
+    (two people in the same building each answering "5+") and unknown groups
+    make aggregation unsafe.
+  * **Wording is centralised** in `window.qgGroupBadge(n)` and
+    `window.qgGroupLine(n)` — one definition, three call sites (`makeIcon`,
+    `popupHtml`, `itemHtml`).
+  * **iconSignature** now includes `groupSize` so the badge appears the instant
+    a phone reports a new number, not on the next zoom.
+
+**2. Coverage caveat, single source (Paul directive, 2026-09-03):**
+"These numbers count only people using Quake Angel. Others may be trapped who
+we cannot see." This must appear permanently on the dashboard AND on every
+report and export, and it must come from ONE place in the code.
+
+Implementation:
+  * **Backend constant** `people_counts.COVERAGE_CAVEAT` — the single source.
+  * **API surface** — added `coverage_caveat` to `/api/public/summary` (signed
+    out visitors) and `/api/devices` (signed-in operators). Both refresh the
+    dashboard on every read.
+  * **Dashboard element** — `<div id="qg-coverage-caveat">` sits below the
+    header, always visible, never dismissible. Populated by
+    `window.qgRenderCoverageCaveat()` which prefers the server's value and
+    falls back to `window.QG_COVERAGE_CAVEAT` (identical string). Painted
+    once at DOMContentLoaded so the sentence is visible before the first API
+    call returns.
+  * **Every export carries it, from the constant:**
+    - Audit CSV: `coverage_caveat` row after the covers row.
+    - Audit PDF: bold brand-red paragraph near the header.
+    - B1 team PDF: same, right below the covers line.
+    - B2 public PDF: same, tightened to fontSize=9 / leading=11 / spaceAfter=3
+      so the report still fits on one page (#126 hardening test).
+  * **Drift removed from B2 footer.** The B2 footer used to open with a second
+    version of the same idea ("These counts reflect app users who have checked
+    in via Quake Angel during the window shown. They do not represent the
+    total affected population."). Removed — that was exactly the drift Paul
+    warned about. The footer now sticks to the privacy / next-of-kin claim
+    and the top-of-page caveat is the single place this document describes
+    coverage.
+
+**3. Remove the permanent "Trouble signing in?" banner:**
+This 45s watchdog banner was a workaround from when a fixed-position red
+`qg-session-expired-banner` was covering the Google button (#265). The real
+cause was fixed in that ticket. A permanent "sign-in might fail" warning
+told every operator the system was unreliable before they even tried, which
+undermines confidence for no reason. Removed:
+  * `_stuckWatchdogTimer`, `_armStuckWatchdog`, `_cancelStuckWatchdog`,
+    `_renderStuckHint` and their invocations.
+  * The 45s `setTimeout` and its DOM append.
+  * Historical comments retained so an inquiry can find why the code left.
+  * Real failures still surface at the moment they happen: the
+    `_wrappedGoogleCredential` `try/catch` calls `showError("Sign-in failed:
+    ...")` in the credential handler.
+  * **Layout swept:** the only fixed-position elements that could sit over
+    the sign-in are the stale-board bar (hidden when `boardSignedOut=true`),
+    the tremor strip (admin+operator only), the toast banner (only shown on
+    demand, hidden by translateY(-100%) at rest) and the modal backdrop
+    (display:none at rest). None can permanently cover the Google button.
+
+**Files touched:**
+  * `backend/people_counts.py` — added `COVERAGE_CAVEAT` constant.
+  * `backend/server.py` — expose caveat in `/api/public/summary` and
+    `/api/devices`.
+  * `backend/reports_export.py` — caveat in audit CSV, audit PDF, B1 PDF, B2
+    PDF (tightened) + B2 footer duplicate removed.
+  * `backend/tests/test_export_hardening.py` — updated the shape-lock set to
+    accept `coverage_caveat` (aggregate-safe, not device-shaped).
+  * `backend/tests/test_coverage_caveat.py` — NEW. 4 tests: constant wording
+    lock, `/api/public/summary` carries it, `/api/devices` carries it, audit
+    CSV export carries it.
+  * `memory/dashboard_build/index.html` — group-size helpers + badge + card
+    line + popup line; permanent coverage caveat strip + JS constant +
+    server refresh hooks in both signed-out and signed-in code paths;
+    watchdog banner and its 45s timer removed.
+
+**Verified:**
+  * Backend: 94/94 across the affected suites (test_group_size_185,
+    test_326_map_derivation, test_326_sort_pagination, test_coverage_caveat,
+    test_audit_log_export) + 23/23 in test_casualty_reports_iteration_31 +
+    34/34 in test_audit_log_export + test_report_chart_caption_and_grammar_iter35
+    + 36/37 in test_export_hardening (the one remaining failure is a
+    pre-existing rescued-count narrative-vs-table drift, confirmed unrelated
+    by `git stash` reproduction).
+  * B2 still fits on one A4 page (`test_b2_fits_on_one_page` passes).
+  * Dashboard: file:// screenshot confirms caveat strip visible, sign-in
+    button not overlapped, no "Trouble signing in?" hint present, and
+    `qgGroupBadge` / `qgGroupLine` return the exact spec values across the
+    full input range (null/1/2/3/5/7/10).
+

@@ -1340,16 +1340,21 @@
       } catch (e) {
         try { console.warn("[qa-auth] GSI renderButton failed:", e); } catch (_) {}
       }
-      _armStuckWatchdog();
     };
     tryInit();
   }
 
-  // #265 v3: small safety wrapper. Cancels the watchdog immediately
-  // on a credential arrival AND catches an unlikely handler exception
+  // #265 v3: small safety wrapper. Catches an unlikely handler exception
   // so it can't take the auth flow with it. Zero cost, small benefit.
+  //
+  // Paul, 2026-09-03: the pre-emptive "Trouble signing in?" watchdog
+  // that used to arm here has been removed. It was a workaround from
+  // when a covering banner was intercepting the Google button; the real
+  // cause was found and fixed (see #265 above), and warning every
+  // operator that sign-in *might* fail before they even try undermines
+  // confidence for no reason. If a sign-in genuinely fails, the catch
+  // below reports it at that moment via showError(...).
   async function _wrappedGoogleCredential(response) {
-    _cancelStuckWatchdog();
     // Clear the "session just expired" flag now that the operator is
     // signing back in — next render (if any) will read the neutral
     // heading, not the alarm one.
@@ -1363,46 +1368,15 @@
     }
   }
 
-  // #265 v3: time-based stuck-button watchdog. Last-resort safety net,
-  // NOT the intended UX. If the covering-banner layout bug ever
-  // regresses (or a new one appears), this eventually surfaces a
-  // plain-English hint after 45s. Once the layout is correct the
-  // operator should never see this hint at all.
-  var _stuckWatchdogTimer = null;
-  function _armStuckWatchdog() {
-    _cancelStuckWatchdog();
-    _stuckWatchdogTimer = setTimeout(function () {
-      if (getStoredJwt()) return; // signed in — irrelevant.
-      _renderStuckHint();
-    }, 45000);
-  }
-  function _cancelStuckWatchdog() {
-    if (_stuckWatchdogTimer) { clearTimeout(_stuckWatchdogTimer); _stuckWatchdogTimer = null; }
-    var existing = document.getElementById("qa-stuck-hint");
-    if (existing) existing.remove();
-  }
-  function _renderStuckHint() {
-    const wrap = container.querySelector(".qa-signed-out");
-    if (!wrap) return;
-    if (document.getElementById("qa-stuck-hint")) return;
-    const hint = document.createElement("div");
-    hint.id = "qa-stuck-hint";
-    hint.setAttribute("role", "status");
-    hint.style.cssText = [
-      "flex-basis:100%", "margin-top:8px", "padding:10px 12px",
-      "background:#fff", "color:#5a0f13", "border-radius:6px",
-      "font-size:13px", "line-height:1.4",
-    ].join(";");
-    hint.innerHTML =
-      '<b>Trouble signing in?</b> If the Google button does not respond, ' +
-      'reload the page to reset the sign-in flow. ' +
-      '<button type="button" id="qa-stuck-reload" style="margin-left:8px; padding:4px 10px;' +
-      ' background:#B0141A; color:#fff; border:0; border-radius:4px; font-weight:700; cursor:pointer">' +
-      'Reload page</button>';
-    wrap.appendChild(hint);
-    const btn = document.getElementById("qa-stuck-reload");
-    if (btn) btn.addEventListener("click", function () { window.location.reload(); });
-  }
+  // Paul, 2026-09-03: the "Trouble signing in?" watchdog and its
+  // renderer used to sit here. Both were removed. The banner they
+  // rendered was a workaround from when a fixed-position red banner was
+  // covering the Google button (#265); that layout bug is fixed. A
+  // permanent "sign-in might fail" warning tells every operator the
+  // system is unreliable before they even try, which undermines
+  // confidence for no reason. If a sign-in genuinely fails, the
+  // credential handler above surfaces the reason via showError(...) at
+  // that moment, which is when it is useful.
 
   // ── Global helpers exposed for use OUTSIDE this IIFE ─────────────────
   // A single HTML escaper accessible from every script tag on the page.
@@ -1416,6 +1390,72 @@
       .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
       .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
   };
+
+  // ── #185 (2026-09-03 — Paul): group size copy on the dashboard ───────
+  // The app asks "including you, how many people are here?" as one tap
+  // after I'm Safe or I need help. Two consumers on the dashboard:
+  //   * qgGroupBadge(n)  → the short badge for a map pin. "3", "5+",
+  //                        or "" for solo/unknown (a badge that says
+  //                        "1" would just be visual noise on every
+  //                        marker).
+  //   * qgGroupLine(n)   → one plain sentence for the popup and the
+  //                        triage card. Words, not numbers alone, so
+  //                        an operator reading a card cannot mistake
+  //                        it for a total.
+  // Both live here so no other file can typo the wording; there is
+  // ONE dashboard string set for this, forever.
+  window.qgGroupBadge = function (n) {
+    if (n == null) return "";
+    if (n <= 1) return "";              // "Just me" — badge would be noise
+    if (n >= 5) return "5+";
+    return String(n);
+  };
+  window.qgGroupLine = function (n) {
+    if (n == null) return "Group size not given";
+    if (n <= 1) return "Just this person";
+    if (n >= 5) return "5 or more people at this address";
+    return n + " people at this address";
+  };
+
+  // ── Coverage caveat: SINGLE source of truth ───────────────────────────
+  // Paul, 2026-09-03: the dashboard and every report/export must carry
+  // the SAME sentence about who these numbers count (and, honestly, who
+  // they can't). Typed once here so a copy on a second surface cannot
+  // silently drift; the backend defines the same string in
+  // people_counts.COVERAGE_CAVEAT and returns it in
+  // /api/public/summary.coverage_caveat and /api/devices.coverage_caveat.
+  // On load we render this fallback; each API refresh replaces the
+  // element's text with whatever the server sent (identical string in
+  // practice, but the server is authoritative if wording is ever
+  // updated). The element itself is placed once in the HTML near the
+  // top of the page — nobody must ever inline this sentence anywhere
+  // else.
+  window.QG_COVERAGE_CAVEAT =
+    "These numbers count only people using Quake Angel. " +
+    "Others may be trapped who we cannot see.";
+  window.qgRenderCoverageCaveat = function (fromServer) {
+    var el = document.getElementById("qg-coverage-caveat");
+    if (!el) return;
+    var text = (typeof fromServer === "string" && fromServer)
+      ? fromServer
+      : window.QG_COVERAGE_CAVEAT;
+    // Keep the server value in the window constant so downstream
+    // consumers (reports, printed views) read one string.
+    if (typeof fromServer === "string" && fromServer) {
+      window.QG_COVERAGE_CAVEAT = fromServer;
+    }
+    el.textContent = text;
+  };
+  // Paint the fallback the moment the DOM is ready so the sentence is
+  // visible before the first API call returns. The API refresh below
+  // is idempotent if the string didn't change.
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", function () {
+      window.qgRenderCoverageCaveat();
+    });
+  } else {
+    window.qgRenderCoverageCaveat();
+  }
 
   // #270 (2026-08-21 — Paul): "There is developer code in the dialogs."
   // The grey browser confirm boxes printed the site address above our
@@ -3256,6 +3296,27 @@
     </button>
   </div>
 </header>
+
+<!-- ═══════════════════════════════════════════════════════════════════
+     Coverage caveat — permanent, never dismissible.
+     Rendered from a SINGLE source: window.QG_COVERAGE_CAVEAT (defined
+     once near the top of the JS below), so the dashboard, the PDFs and
+     the CSV export cannot drift apart and contradict each other.
+
+     Wording is Paul's directive (2026-09-03): the app can only ever
+     count phones that report to us. Anyone without the app is invisible
+     in these numbers, and every screen must say so without waiting for
+     someone to type it into each surface separately.
+
+     The element is empty in the HTML; JS fills it once at load time
+     from the constant, and refreshes it from /api/public/summary or
+     /api/devices when either arrives (both carry `coverage_caveat` from
+     people_counts.COVERAGE_CAVEAT on the server — same string).
+     ═══════════════════════════════════════════════════════════════════ -->
+<div id="qg-coverage-caveat" role="note" aria-live="off"
+     style="padding:8px 16px; font:600 13px system-ui, sans-serif;
+            border-bottom:1px solid #d0d0d0; background:#fff8e6; color:#5a3d00;
+            text-align:center"></div>
 
 <!-- ═══════════════════════════════════════════════════════════════════
      Batch 7 #225: persistent tremor-notifications state strip.
@@ -6964,11 +7025,34 @@ window.QuakeAngelRescue = (function () {
         'border-radius:50%;border:2px dashed ' + v.color + ';' +
         'opacity:0.75;pointer-events:none"></span>';
     }
+    // ── #185: group-size badge ─────────────────────────────────────────
+    // A small pill on the top-right of the shape saying "3" or "5+".
+    // Absent when the person is alone or the question was skipped —
+    // silence on the badge means "no info to show", never zero.
+    // Muted (rescued/off-board) pins skip it entirely so a resolved
+    // case gains no new decoration.
+    var badgeText = muted ? "" : window.qgGroupBadge(u.groupSize);
+    var badge = "";
+    if (badgeText) {
+      var badgeTitle = "Group size on the ground: " + window.qgGroupLine(u.groupSize);
+      // Right-anchored to the shape, small and legible. White fill
+      // with a dark border so it reads on top of any pin colour.
+      var badgeLeft = ((iconW - s) / 2) + s - 12;
+      badge = '<span class="qg-mrk-group" aria-hidden="true"' +
+        ' title="' + window.qgEsc(badgeTitle) + '"' +
+        ' style="position:absolute;left:' + badgeLeft + 'px;top:-6px;' +
+        'min-width:16px;height:16px;padding:0 4px;' +
+        'display:inline-flex;align-items:center;justify-content:center;' +
+        'border-radius:9px;background:#fff;color:#111;' +
+        'border:1.5px solid #111;box-shadow:0 1px 2px rgba(0,0,0,0.35);' +
+        'font:800 10.5px/1 system-ui,sans-serif;pointer-events:none">' +
+        window.qgEsc(badgeText) + "</span>";
+    }
     return L.divIcon({
       className: "qg-mrk-wrap",
       html: '<div class="qg-mrk" style="position:relative">' +
         halo +
-        svgShape(v.shape, muted ? "#8A8A8A" : v.color, s) + tag + "</div>",
+        svgShape(v.shape, muted ? "#8A8A8A" : v.color, s) + badge + tag + "</div>",
       iconSize: [iconW, s + tagH + (u.last_known_position ? 4 : 0)],
       iconAnchor: [iconW / 2, s / 2],
     });
@@ -6980,10 +7064,14 @@ window.QuakeAngelRescue = (function () {
     // last-known-position mark. Any of them changing must re-icon —
     // otherwise a person going from silent-red to trapped-yellow would
     // stay red until the next zoom.
+    // #185: groupSize is part of the signature too, so the badge
+    // appears the instant the phone reports "we are 3", not two zooms
+    // later.
     return v.kind + "|" + iconSizeForZoom(map.getZoom()) + "|" + qgCode(u) +
       "|" + (u.map_color || "-") +
       "|" + (u.silent_since_alert ? "s" : "-") +
-      "|" + (u.last_known_position ? "lk" : "-");
+      "|" + (u.last_known_position ? "lk" : "-") +
+      "|g" + (u.groupSize == null ? "-" : u.groupSize);
   }
 
   map.on("zoomend", function () {
@@ -7046,6 +7134,25 @@ window.QuakeAngelRescue = (function () {
       last_known_position: !!d.last_known_position,
       silent_since_alert: !!d.silent_since_alert,
       last_alerted_at: d.last_alerted_at,
+      // ── #185 (2026-09-03 — Paul): group size on the dashboard ──────
+      // The mobile app asks "including you, how many people are here?"
+      // after a person taps I'm Safe or I need help. That answer is a
+      // small piece of information a rescuer needs at a glance — how
+      // many people should we expect at this address — but it MUST NOT
+      // be added to any headline total (Paul's directive: overlapping
+      // groups, unknown groups, and the meaning of the aggregate all
+      // break the moment you sum it).
+      //
+      //   groupSize: raw number 2..4 for "2/3/4", or 5 for "5 or more",
+      //              or 1 for "Just me", or null when the person
+      //              skipped the question or answered before the
+      //              question existed.
+      //
+      // Consumers: makeIcon (map badge), popupHtml (map popup line),
+      // itemHtml (card line). Never a count aggregation.
+      groupSize: (typeof d.group_size === "number" && d.group_size >= 1)
+        ? d.group_size
+        : null,
       // #146: server-computed. True for recognised test/synthetic device ids
       // and for rows an operator has tagged by hand (our own test check-ins
       // come from a real phone, so no id pattern can catch them).
@@ -7092,6 +7199,9 @@ window.QuakeAngelRescue = (function () {
       // #268: the exclusions travel with the public numbers too.
       renderCountNotes(lastCountNotes, c);
     }
+    if (summary && summary.coverage_caveat) {
+      try { window.qgRenderCoverageCaveat(summary.coverage_caveat); } catch (_) {}
+    }
     renderOffBoard([], {});
     renderBoardNotices([]);
     markers.forEach(function (m) { map.removeLayer(m); });
@@ -7131,6 +7241,13 @@ window.QuakeAngelRescue = (function () {
       }
       if (!res.ok) throw new Error("HTTP " + res.status);
       var data = await res.json();
+      // Single source of truth for the coverage sentence — refresh from
+      // the server on every successful read. The string is identical to
+      // window.QG_COVERAGE_CAVEAT in practice; taking the server value
+      // ensures a future wording change ships without a client rebuild.
+      if (data && data.coverage_caveat) {
+        try { window.qgRenderCoverageCaveat(data.coverage_caveat); } catch (_) {}
+      }
       if (signedOutMode !== false) {
         signedOutMode = false;
         lastSidebarSig = null;   // force one full sidebar rebuild after sign-in
@@ -7553,6 +7670,8 @@ window.QuakeAngelRescue = (function () {
         ? "<br><b>" + window.qgEsc(u.recordState.label) + "</b>"
         : "") +
       (u.needsExtraction ? "<br><b>🚪 Cannot get out — extraction needed</b>" : "") +
+      // #185: one plain line — never a number added to any total.
+      "<br>" + window.qgEsc(window.qgGroupLine(u.groupSize)) +
       (mob ? "<br>" + mob : "") + "<br>Battery: " + (u.batteryPercent != null ? u.batteryPercent : "?") + "%" + rescueSlot;
   }
 
@@ -7687,10 +7806,15 @@ window.QuakeAngelRescue = (function () {
         ? "<br>" + window.qgEsc(ask.blocked_reason)
         : "") +
       "</div>";
+    // #185: one plain group-size line. Words, not a number alone, so it
+    // cannot be misread as a total. Never fed into any aggregate — the
+    // meaning of overlapping/uncounted groups makes summing unsafe.
+    var groupLine = '<div class="meta">👥 ' +
+      window.qgEsc(window.qgGroupLine(u.groupSize)) + "</div>";
     return bulkCheck + head + trappedLine + egressLine + silenceLine +
       '<div class="meta">' + statusLabel(u.status, u.severity) + (mob ? " · " + mob : "") +
       (lowBatt ? "" : " · Battery " + (u.batteryPercent != null ? u.batteryPercent : "?") + "%") + "</div>" +
-      battLine + updLine + rescueSlot + askBtn + histBtn + testBtn + offBtn +
+      battLine + groupLine + updLine + rescueSlot + askBtn + histBtn + testBtn + offBtn +
       '<div class="qg-off-panel" id="qg-off-panel-' + u.deviceId + '" hidden></div>';
   }
 

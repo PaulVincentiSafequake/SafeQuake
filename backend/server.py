@@ -535,7 +535,7 @@ async def get_devices(
     # never been used at all, or a human resolved it with a reason.
     # Nothing is deleted, nothing is hidden, and anybody who has ever
     # reported needing help stays on the board whatever their phone does.
-    from people_counts import load_board
+    from people_counts import load_board, COVERAGE_CAVEAT as _COVERAGE_CAVEAT
     board = await load_board(db, include_test=True)
 
     rows = board.board
@@ -759,6 +759,10 @@ async def get_devices(
         "counts_without_test": (board.counts_without_test.to_dict()
                                 if board.counts_without_test else None),
         "count_notes_without_test": board.notes_without_test,
+        # Single-source coverage caveat — same string on every surface
+        # (dashboard, all reports, all exports). Defined once in
+        # people_counts.COVERAGE_CAVEAT so copies can never drift apart.
+        "coverage_caveat": _COVERAGE_CAVEAT,
     }
 
 
@@ -1011,7 +1015,7 @@ async def public_summary():
     that skipped the test-entry filter, so the public number was higher
     than the operator number for the same moment (Paul, 2026-08-19).
     """
-    from people_counts import compute_counts, counts_notes
+    from people_counts import compute_counts, counts_notes, COVERAGE_CAVEAT
     c = await compute_counts(db, include_test=False)
     alert_dt = await _last_alert_start()
     return {
@@ -1039,6 +1043,11 @@ async def public_summary():
         },
         # "Every number must say what it counts and what it leaves out."
         "count_notes": counts_notes(c),
+        # Single-source coverage caveat — same string on every surface
+        # (dashboard, all reports, all exports). Signed-out visitors need
+        # this too: their pill view is the aggregate one, and it must not
+        # look like a total.
+        "coverage_caveat": COVERAGE_CAVEAT,
         # Timestamp of the most recent alert broadcast (non-personal). The
         # dashboard anchors its "Since the alert" window to this.
         "last_alert_at": alert_dt.isoformat() if alert_dt else None,

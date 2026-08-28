@@ -42,6 +42,23 @@ from deps import is_test_device
 from recheckin import silence_state
 
 
+# ── Coverage caveat (Paul, 2026-09-03) ─────────────────────────────────
+# The dashboard, every report, and every export MUST carry this exact
+# sentence. It comes from here so the copies can never drift apart and
+# contradict each other. Read by:
+#   * server.py    — /api/public/summary and /api/devices responses
+#   * reports_export.py — audit CSV, audit PDF, B1 team PDF, B2 public PDF
+#   * dashboard    — index.html fetches it from the API responses above,
+#                    with a hardcoded fallback matching this exact string
+#                    (dashboard_build/index.html: QG_COVERAGE_CAVEAT).
+# Wording MUST NOT be edited casually — Paul's directive on undercount
+# honesty: "Anyone without the app is invisible to us."
+COVERAGE_CAVEAT = (
+    "These numbers count only people using Quake Angel. "
+    "Others may be trapped who we cannot see."
+)
+
+
 # ── #326 (2026-09-02 — Paul): map-render derivation ───────────────────
 # "The moment an alert is triggered, every phone we alerted should
 #  appear red on the map straight away — before they answer anything.

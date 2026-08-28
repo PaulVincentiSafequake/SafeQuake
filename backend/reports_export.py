@@ -28,6 +28,7 @@ from fastapi.responses import Response
 
 from auth import require_role, resolve_principal
 from deps import ADMIN_TRIGGER_PASSWORD, db, short_code as _short_code
+from people_counts import COVERAGE_CAVEAT
 
 router = APIRouter()
 # Endpoints below were declared on server.py's `api_router` (prefix /api) and
@@ -1191,6 +1192,9 @@ async def export_audit_log_csv(
     # Plain-words coverage line + optional missing-start warning (1c/1d) —
     # someone opening this file next month never saw the screen.
     writer.writerow(_pad(["covers", _covers_line(since_dt, until_dt)]))
+    # Single-source coverage caveat — same string on the dashboard and
+    # every export. Defined once in people_counts.COVERAGE_CAVEAT.
+    writer.writerow(_pad(["coverage_caveat", COVERAGE_CAVEAT]))
     # ── #268: the counts, and what each one leaves out. A CSV is the
     # fallback when the dashboard is down, so it carries the same
     # exclusions the screen does — never a bare figure.
@@ -1338,6 +1342,14 @@ async def export_audit_log_pdf(
             "AuditCovers", parent=styles["Normal"], fontSize=9.5,
             textColor=colors.HexColor("#222222"), spaceAfter=4,
         )),
+        # Single-source coverage caveat — same string on the dashboard
+        # and every export. Kept from people_counts.COVERAGE_CAVEAT so
+        # the copies cannot drift apart.
+        Paragraph(_html.escape(COVERAGE_CAVEAT), ParagraphStyle(
+            "AuditCaveat", parent=styles["Normal"], fontSize=9.5,
+            textColor=colors.HexColor("#5a0f13"), fontName="Helvetica-Bold",
+            spaceAfter=6,
+        )),
         Paragraph(
             f"Events: {len(events)} &nbsp;·&nbsp; "
             f"Generated: {generated_at} &nbsp;·&nbsp; "
@@ -1347,7 +1359,7 @@ async def export_audit_log_pdf(
     ]
     _gap = await _window_gap_warning(since_dt)
     if _gap:
-        story.insert(2, Paragraph(_html.escape(_gap), ParagraphStyle(
+        story.insert(3, Paragraph(_html.escape(_gap), ParagraphStyle(
             "AuditWarn", parent=styles["Normal"], fontSize=9,
             textColor=colors.HexColor("#B0141A"), spaceAfter=8,
             fontName="Helvetica-Bold",
@@ -1688,6 +1700,14 @@ async def casualty_report_operational_pdf(
             "B1Covers", parent=styles["Normal"], fontSize=9.5,
             textColor=colors.HexColor("#222222"), spaceAfter=4,
         )),
+        # Single-source coverage caveat — same string on the dashboard
+        # and every export. Kept from people_counts.COVERAGE_CAVEAT so
+        # the copies cannot drift apart.
+        Paragraph(_html.escape(COVERAGE_CAVEAT), PS(
+            "B1Caveat", parent=styles["Normal"], fontSize=9.5,
+            textColor=colors.HexColor("#5a0f13"), fontName="Helvetica-Bold",
+            spaceAfter=6,
+        )),
         # D1 (Batch 7): this line reports how many devices reported
         # DURING the window (activity in the period). Distinct from the
         # aggregate table below which is CURRENT state. Kept the "during"
@@ -1722,7 +1742,7 @@ async def casualty_report_operational_pdf(
     ]
     _gap = await _window_gap_warning(since_dt)
     if _gap:
-        story.insert(3, Paragraph(_html.escape(_gap), PS(
+        story.insert(4, Paragraph(_html.escape(_gap), PS(
             "B1Warn", parent=styles["Normal"], fontSize=9,
             textColor=colors.HexColor("#B0141A"), spaceAfter=8,
             fontName="Helvetica-Bold",
@@ -2110,7 +2130,17 @@ async def casualty_report_public_pdf(
         # Plain-words absolute coverage (1c) — press and families read this
         # long after "the last 24 hours" has lost its meaning.
         Paragraph(_covers_line(since_dt, until_dt), PS(
-            "B2Covers", parent=body_style, fontSize=10, spaceAfter=4,
+            "B2Covers", parent=body_style, fontSize=10, spaceAfter=2,
+        )),
+        # Single-source coverage caveat — same string on the dashboard
+        # and every export. Kept from people_counts.COVERAGE_CAVEAT so
+        # the copies cannot drift apart. Press and families need this
+        # honestly, so we keep it prominent (bold, brand-red) but tight
+        # enough that B2 still fits on one page (#126 hardening test).
+        Paragraph(_html.escape(COVERAGE_CAVEAT), PS(
+            "B2Caveat", parent=body_style, fontSize=9, leading=11,
+            textColor=colors.HexColor("#5a0f13"), fontName="Helvetica-Bold",
+            spaceAfter=3,
         )),
         Paragraph(
             f"Issued: {_fmt_dt_plain(datetime.now(timezone.utc))}",
@@ -2142,7 +2172,7 @@ async def casualty_report_public_pdf(
     ]
     _gap = await _window_gap_warning(since_dt)
     if _gap:
-        story.insert(3, Paragraph(_html.escape(_gap), PS(
+        story.insert(4, Paragraph(_html.escape(_gap), PS(
             "B2Warn", parent=body_style, fontSize=10,
             textColor=colors.HexColor("#B0141A"), fontName="Helvetica-Bold", spaceAfter=6,
         )))
@@ -2270,19 +2300,25 @@ async def casualty_report_public_pdf(
     # D2 (Batch 7): neutral footer wording by default. The "conducted by
     # [authority]" claim is gated behind the same cooperation setting as
     # the issuer line.
+    #
+    # Paul, 2026-09-03: this footer used to open with its own version of
+    # the coverage-caveat sentence ("These counts reflect app users who
+    # have checked in..."). That was a second source of the same idea
+    # and could silently drift away from the top-of-page caveat that
+    # every surface reads from people_counts.COVERAGE_CAVEAT. Removed;
+    # the top-of-page caveat is now the ONLY place this report describes
+    # coverage, and the footer sticks to privacy / next-of-kin.
     if _cooperation_ok:
         _notes_line = (
-            "Notes: These counts reflect app users who have checked in via Quake Angel during the "
-            "window shown. They do not represent the total affected population. Individual "
-            "identities are not disclosed in this report to protect privacy and to preserve formal "
-            f"next-of-kin notification procedures conducted by {authority}."
+            "Notes: Individual identities are not disclosed in this report to "
+            "protect privacy and to preserve formal next-of-kin notification "
+            f"procedures conducted by {authority}."
         )
     else:
         _notes_line = (
-            "Notes: These counts reflect app users who have checked in via Quake Angel during the "
-            "window shown. They do not represent the total affected population. Individual "
-            "identities are not disclosed in this report to protect privacy and to preserve formal "
-            "next-of-kin notification procedures conducted by the appropriate authorities."
+            "Notes: Individual identities are not disclosed in this report to "
+            "protect privacy and to preserve formal next-of-kin notification "
+            "procedures conducted by the appropriate authorities."
         )
     story.append(Paragraph(_notes_line, footer_style))
 

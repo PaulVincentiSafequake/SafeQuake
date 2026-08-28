@@ -317,8 +317,12 @@ class TestAccessGating:
         r = requests.get(f"{BASE_URL}/api/public/summary", timeout=15)
         assert r.status_code == 200
         body = r.json()
+        # #326 / Paul 2026-09-03: the coverage_caveat field carries the
+        # single-source honesty sentence ("These numbers count only
+        # people using Quake Angel..."). Not device-shaped, aggregate-safe.
         assert set(body.keys()) == {"generated_at", "total", "counts",
-                                    "last_alert_at", "count_notes"}
+                                    "last_alert_at", "count_notes",
+                                    "coverage_caveat"}
         # #268 (2026-08-21): the four kinds of silence were added here so
         # a signed-out reader gets the same honest breakdown, and
         # `count_notes` states what each number leaves out. The GDPR
