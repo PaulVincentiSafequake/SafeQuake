@@ -3288,3 +3288,19 @@ locally and against the public URL.
 
 **Verified:** testing agent iteration 52 — 5/5 scenarios PASS including the mid-flush-follow-up regression fix.
 
+
+### 2026-08-31 — Task #321: pending button copy — "Not sent yet"
+
+**Paul, 2026-08-31:** *"On the alert screen, when a report hasn't got through yet, the big yellow button says 'Still trying…'. That's unclear — it sits exactly where the person tapped 'I need help' a second earlier, so it looks like something to press. Please change that button to read 'Not sent yet'. Not 'waiting for signal' — we can't know whether it's their signal or our server, and we must never state a cause we don't know. 'Not sent yet' is true either way and says the one thing that matters. Leave the amber banner above it exactly as it is."*
+
+**Rule locked:** a pending-state surface must never state a CAUSE we don't know (their signal vs our server). The copy is `Not sent yet` — a status, not a diagnosis, not an action.
+
+**3 surfaces changed (banner intentionally NOT changed):**
+1. `alert.tsx` — I'm-Safe button label (safe outcome, pending_retry state)
+2. `alert.tsx` — I-need-help button label (trapped outcome, pending_retry state)
+3. `reminders.ts` — lock-screen `quakeangel-help-pending` notification title
+
+**Preserved:** the amber banner (`alert-pending-retry-toast`) still reads `Still trying to reach the rescue team.` — that copy is what tells the user the app is doing something on their behalf; the button underneath now just states the status honestly.
+
+**Verified:** testing agent iteration 53 — 5/5 scenarios PASS (trapped-pending label, safe-pending label, banner preservation, happy-path no-flash, recovery, and wording-invariant sweep for absent causal phrases like "waiting for signal", "server down", "no signal", "battery", etc.).
+

@@ -324,7 +324,11 @@ export async function postHelpPendingNotification(): Promise<void> {
     await Notifications.scheduleNotificationAsync({
       identifier: HELP_PENDING_ID,
       content: {
-        title: "Still trying to send your help request",
+        // #321 (2026-08-31 — Paul): use the same wording as the alert
+        // screen's pending button — "Not sent yet". It is true whether
+        // the fault is the user's signal or our server, and states no
+        // cause we don't know.
+        title: "Not sent yet",
         body:
           "Your phone has not been able to reach the rescue team yet. It will keep trying and tell you the moment it gets through.",
         // Passive on iOS — do NOT wake the screen or play sound. This

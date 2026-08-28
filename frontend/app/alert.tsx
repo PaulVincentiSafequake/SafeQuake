@@ -1415,11 +1415,16 @@ export default function AlertScreen() {
               />
               <Text style={styles.safeBtnText}>
                 {/* #193: NEVER "Marked safe" while unconfirmed. The button
-                    must never imply the check-in has been received. */}
+                    must never imply the check-in has been received.
+                    #321 (2026-08-31 — Paul): "Still trying…" reads like
+                    an action button, especially sitting where the user
+                    just tapped. "Not sent yet" is unambiguously a
+                    status and never claims a cause we don't know
+                    (their signal vs our server). */}
                 {status === "sending" && outcome === "safe"
                   ? "Sending…"
                   : status === "pending_retry" && outcome === "safe"
-                    ? "Still trying…"
+                    ? "Not sent yet"
                     : status === "sent" && outcome === "safe"
                       ? "Marked safe"
                       : "I'm safe"}
@@ -1451,12 +1456,17 @@ export default function AlertScreen() {
               <Ionicons name="warning" size={22} color="#fff" />
               <Text style={styles.trappedBtnText}>
                 {/* #193: NEVER shows "Sent" text here. While unconfirmed
-                    the button says "Still trying…" — an honest signal
-                    to the user that we do not have confirmation yet. */}
+                    the button says the honest status. #321 (2026-08-31
+                    — Paul): the previous "Still trying…" sat exactly
+                    where the user tapped "I need help" a second earlier
+                    and read as another button to press. "Not sent yet"
+                    is unambiguously a status, is true regardless of
+                    whether the fault is the user's signal or our
+                    server, and says the one thing that matters. */}
                 {status === "sending" && outcome === "trapped"
                   ? "Sending…"
                   : status === "pending_retry" && outcome === "trapped"
-                    ? "Still trying…"
+                    ? "Not sent yet"
                     : "I need help"}
               </Text>
             </Pressable>
@@ -2181,7 +2191,7 @@ const styles = StyleSheet.create({
     backgroundColor: "#1F8A3A",
   },
   // #193: amber tint while unconfirmed — clearly NOT the "done" green.
-  // The button also shows "Still trying…" text while in this state, and
+  // The button also shows "Not sent yet" text while in this state, and
   // is disabled so a re-tap doesn't create a duplicate report.
   safeBtnPending: {
     backgroundColor: "#8B6A00",
