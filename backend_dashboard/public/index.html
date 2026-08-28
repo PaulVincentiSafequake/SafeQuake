@@ -3547,17 +3547,33 @@
 
 <div class="layout">
   <div id="map-wrap">
-    <div class="map-filters" role="group" aria-label="Filter map by severity">
-      <button class="map-filter-btn active" data-filter="all" onclick="setFilter('all')">All</button>
-      <!-- Batch 7 C6: shape + word + colour, matching the map pins and
-           the severity chips exactly. Colour alone fails accessibility
-           and fails black-and-white print. -->
-      <button class="map-filter-btn" data-filter="red" onclick="setFilter('red')" aria-label="Filter: Immediate">
-        <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true" style="vertical-align:-1px;margin-right:5px"><circle cx="6" cy="6" r="5" fill="#C21818" stroke="#000" stroke-width="1"/></svg>Immediate</button>
-      <button class="map-filter-btn" data-filter="yellow" onclick="setFilter('yellow')" aria-label="Filter: Serious/Stable">
-        <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true" style="vertical-align:-1px;margin-right:5px"><polygon points="6,1 11,10.5 1,10.5" fill="#F2A114" stroke="#000" stroke-width="1" stroke-linejoin="round"/></svg>Serious/Stable</button>
-      <button class="map-filter-btn" data-filter="green" onclick="setFilter('green')" aria-label="Filter: Minor">
-        <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true" style="vertical-align:-1px;margin-right:5px"><rect x="1.5" y="1.5" width="9" height="9" fill="#1F8A3A" stroke="#000" stroke-width="1"/></svg>Minor</button>
+    <!-- #326 (2026-09-02 — Paul): three independent colour toggles. Each
+         switch removes those pins from the map (not fades them). Red and
+         yellow default ON; green defaults OFF ("greens then leave the map
+         entirely — they are done and should not clutter it"). Rescued
+         stays behind its own toggle (unchanged). -->
+    <div class="map-filters" role="group" aria-label="Show or hide people by colour">
+      <button class="map-filter-btn active" data-colour="red" type="button"
+              aria-pressed="true" onclick="toggleColour('red')"
+              data-label-on="Hide red — needs help / never answered"
+              data-label-off="Show red — needs help / never answered"
+              title="Immediate cases and anyone we alerted who never answered">
+        <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true" style="vertical-align:-1px;margin-right:5px"><circle cx="6" cy="6" r="5" fill="#C21818" stroke="#000" stroke-width="1"/></svg><span class="qg-map-filter-label">Hide red — needs help / never answered</span>
+      </button>
+      <button class="map-filter-btn active" data-colour="yellow" type="button"
+              aria-pressed="true" onclick="toggleColour('yellow')"
+              data-label-on="Hide yellow — hurt but stable"
+              data-label-off="Show yellow — hurt but stable"
+              title="Anyone who tapped 'I need help' who is not Immediate — includes walking wounded">
+        <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true" style="vertical-align:-1px;margin-right:5px"><polygon points="6,1 11,10.5 1,10.5" fill="#F2A114" stroke="#000" stroke-width="1" stroke-linejoin="round"/></svg><span class="qg-map-filter-label">Hide yellow — hurt but stable</span>
+      </button>
+      <button class="map-filter-btn" data-colour="green" type="button"
+              aria-pressed="false" onclick="toggleColour('green')"
+              data-label-on="Hide green — self-reported safe"
+              data-label-off="Show green — self-reported safe"
+              title="People who told us 'I'm safe' themselves — off the live map by default so they don't clutter it">
+        <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true" style="vertical-align:-1px;margin-right:5px"><circle cx="6" cy="6" r="4" fill="#2E7D32" stroke="#000" stroke-width="1"/></svg><span class="qg-map-filter-label">Show green — self-reported safe</span>
+      </button>
       <!-- #297: rescued pins are off the map until asked for, and small,
            grey and unlabelled when shown. -->
       <button class="map-filter-btn" id="qg-rescued-toggle" type="button" aria-pressed="false">Show rescued</button>
@@ -6708,8 +6724,48 @@ window.QuakeAngelRescue = (function () {
 
   var markers = new Map();
   var lastUsers = [];
-  var currentFilter = "all"; // "all" | "red" | "yellow" | "green"
+  // ── #326 (2026-09-02 — Paul): three independent colour toggles ────────
+  // Old model: one "all/red/yellow/green" radio, plus a "Show rescued"
+  // button. New model:
+  //   * three toggles for the three answer colours (red, yellow, green)
+  //   * rescued is a separate toggle (unchanged, still OFF by default)
+  //   * silent-since-alert people are RED — the "silence is never
+  //     invisible" case. They live inside the red toggle.
+  // Defaults:
+  //   red    = ON  (immediate + trapped-red + silent-since-alert)
+  //   yellow = ON  (anyone who tapped "I need help" who isn't Immediate,
+  //                including walking wounded — Paul, 2026-09-02: "anyone
+  //                who asks for help must never leave the live map,
+  //                whatever their severity")
+  //   green  = OFF (self-reported Safe — off the map by default so
+  //                greens do not clutter it; toggle brings them back)
+  // The toggles REMOVE pins, they do not fade them (Paul, 2026-09-02:
+  // "Switching one off must actually remove those pins from the map,
+  // not just fade them.").
+  var filterOn = { red: true, yellow: true, green: false };
   var selectedForRescue = new Set(); // device IDs checked for group rescue
+
+  // #326: derived on the server (people_counts.map_color) so the map, the
+  // people list and any future surface always agree. This client shim
+  // just reads it, with a legacy fallback for old backends returning
+  // rows without the field — which will disappear once the backend
+  // rolls out. See /app/backend/people_counts.py for the locked rules.
+  function mapColorFor(u) {
+    if (u == null) return null;
+    if (u.map_color === "red" || u.map_color === "yellow" || u.map_color === "green") {
+      return u.map_color;
+    }
+    if (u.map_color === null || u.map_color === undefined) {
+      // Legacy fallback — mirrors the server-side rule set exactly. If
+      // an old backend is deployed, the client still paints correctly.
+      if (u.status === "rescued") return null;
+      if (u.silent_since_alert) return "red";
+      if (u.status === "safe") return "green";
+      if (u.status === "trapped") return u.severity === "red" ? "red" : "yellow";
+      return null;
+    }
+    return null;
+  }
 
   // Batch 7 R5 (#240 / #222): register a wipe hook so map + list state
   // are cleared the moment the JWT is dropped, not on the next 4s poll.
@@ -6721,7 +6777,9 @@ window.QuakeAngelRescue = (function () {
       } catch (_) {}
       lastUsers = [];
       selectedForRescue.clear();
-      currentFilter = "all";
+      // #326: reset toggles to their defaults, not to a legacy "all"
+      // value that no longer exists.
+      filterOn = { red: true, yellow: true, green: false };
       try { updateBulkBar && updateBulkBar(); } catch (_) {}
       try {
         var container = document.getElementById("userlist");
@@ -6781,14 +6839,41 @@ window.QuakeAngelRescue = (function () {
   // qgSeverityChip mapping: circle=IMMEDIATE, triangle=SERIOUS,
   // square=MINOR. Black stroke keeps shapes legible in B&W / colour-blind.
   function markerVisual(u) {
-    if (u.status === "trapped") {
-      if (u.severity === "red") return { kind: "immediate", color: "#C21818", shape: "circle", tag: "SOS" };
-      if (u.severity === "yellow") return { kind: "serious", color: "#EA9500", shape: "triangle", tag: null };
-      return { kind: "minor", color: "#2E7D32", shape: "square", tag: null };
+    // ── #326 (2026-09-02 — Paul): read the server-derived colour first ──
+    // The backend's people_counts.map_color is the single source of
+    // truth. A phone alerted-but-silent comes back as RED here without
+    // us needing to know that fact locally. Rescued returns null so
+    // the code below can still route rescued to the rescued visual.
+    var mc = mapColorFor(u);
+    // Rescued keeps its own visual (green check inside a muted circle) —
+    // colour of a resolved case is a separate concern from the three
+    // live-answer colours.
+    if (u.status === "rescued") {
+      return { kind: "rescued", color: "#1F8A3A", shape: "check", tag: "\u2713 found" };
     }
-    if (u.status === "rescued") return { kind: "rescued", color: "#1F8A3A", shape: "check", tag: "\u2713 found" };
-    if (u.status === "safe") return { kind: "safe", color: "#2e7d32", shape: "dot", tag: null };
-    if (u.status === "not_responding") return { kind: "nr", color: "#757575", shape: "diamond", tag: null };
+    if (mc === "red") {
+      // #326: silent-since-alert AND immediate live under the same red.
+      // The tag distinguishes them ("silent" vs "SOS") so an operator
+      // scanning the map can tell what kind of red each pin is.
+      var silentRed = !!u.silent_since_alert;
+      return {
+        kind: silentRed ? "silent_red" : "immediate",
+        color: "#C21818",
+        shape: "circle",
+        tag: silentRed ? "never answered" : "SOS",
+      };
+    }
+    if (mc === "yellow") {
+      // "Anyone who asks for help must never leave the live map,
+      //  whatever their severity." So walking wounded lives here.
+      return { kind: "serious", color: "#EA9500", shape: "triangle", tag: null };
+    }
+    if (mc === "green") {
+      return { kind: "safe", color: "#2e7d32", shape: "dot", tag: null };
+    }
+    // mc === null → not on the live map. If somehow drawn (e.g. Show
+    // rescued off but a legacy row without map_color set) fall through
+    // to the muted "unknown" visual so nothing crashes.
     return { kind: "unknown", color: "#455a64", shape: "dashed", tag: null };
   }
 
@@ -6818,7 +6903,7 @@ window.QuakeAngelRescue = (function () {
   function makeIcon(u) {
     var v = markerVisual(u);
     var s = iconSizeForZoom(map.getZoom());
-    if (v.kind === "immediate") s = Math.round(s * 1.3);
+    if (v.kind === "immediate" || v.kind === "silent_red") s = Math.round(s * 1.3);
     // #297 (2026-08-23 — Paul): "when shown they are small and muted with
     // no label. A resolved case is not wrong, so it does not get colour."
     var muted = v.kind === "rescued";
@@ -6836,8 +6921,26 @@ window.QuakeAngelRescue = (function () {
     // string — the tooltip on the pin still carries the full name.
     var nm = u.displayName ? String(u.displayName) : "";
     var ident = nm ? code + " " + nm : code;
-    var tagText = muted ? "" : (v.kind === "immediate" ? ("SOS " + ident) : ident);
-    var tagCls = v.kind === "immediate" ? "" : " plain";
+    // #326: two special-case tags on top of the identifier.
+    //   - silent_red pins say "never answered" first, so a rescuer
+    //     scanning the map instantly reads "we asked, no reply" without
+    //     needing to open the card.
+    //   - last_known_position pins add "(last known)" — that pin is
+    //     where the phone WAS, not where the person is now.
+    var tagText;
+    if (muted) {
+      tagText = "";
+    } else if (v.kind === "silent_red") {
+      tagText = "never answered " + ident;
+    } else if (v.kind === "immediate") {
+      tagText = "SOS " + ident;
+    } else {
+      tagText = ident;
+    }
+    if (!muted && u.last_known_position) {
+      tagText = (tagText ? tagText + " " : "") + "(last known)";
+    }
+    var tagCls = (v.kind === "immediate" || v.kind === "silent_red") ? "" : " plain";
     // Two-line labels need ~24px of vertical space (2 × 12px line-box).
     // Detect "will probably wrap" by length heuristic — cheap and good
     // enough since we can't measure before insertion.
@@ -6846,17 +6949,41 @@ window.QuakeAngelRescue = (function () {
     var tag = tagText ? '<span class="qg-mrk-tag' + tagCls + '" title="' + window.qgEsc(tagText) + '">' + window.qgEsc(tagText) + "</span>" : "";
     // Icon container width up to 152 (matches the 140px CSS + padding).
     var iconW = Math.max(s, tagText ? 152 : 56);
+    // #326: last_known_position adds a dashed ring around the shape so
+    // the operator can see at a glance that this pin is where the phone
+    // WAS heard from, not where the person is now (Paul, 2026-09-02:
+    // "keeps their colour but gains a mark showing that pin is their
+    // last known position, not where they are now.").
+    var haloSize = s + 8;
+    var haloOffset = (iconW - haloSize) / 2;
+    var halo = "";
+    if (!muted && u.last_known_position) {
+      halo = '<span class="qg-mrk-halo" aria-hidden="true"' +
+        ' style="position:absolute;left:' + haloOffset + 'px;top:-4px;' +
+        'width:' + haloSize + 'px;height:' + haloSize + 'px;' +
+        'border-radius:50%;border:2px dashed ' + v.color + ';' +
+        'opacity:0.75;pointer-events:none"></span>';
+    }
     return L.divIcon({
       className: "qg-mrk-wrap",
-      html: '<div class="qg-mrk">' + svgShape(v.shape, muted ? "#8A8A8A" : v.color, s) + tag + "</div>",
-      iconSize: [iconW, s + tagH],
+      html: '<div class="qg-mrk" style="position:relative">' +
+        halo +
+        svgShape(v.shape, muted ? "#8A8A8A" : v.color, s) + tag + "</div>",
+      iconSize: [iconW, s + tagH + (u.last_known_position ? 4 : 0)],
       iconAnchor: [iconW / 2, s / 2],
     });
   }
 
   function iconSignature(u) {
     var v = markerVisual(u);
-    return v.kind + "|" + iconSizeForZoom(map.getZoom()) + "|" + qgCode(u);
+    // #326: include the derived colour, silent-since-alert flag and
+    // last-known-position mark. Any of them changing must re-icon —
+    // otherwise a person going from silent-red to trapped-yellow would
+    // stay red until the next zoom.
+    return v.kind + "|" + iconSizeForZoom(map.getZoom()) + "|" + qgCode(u) +
+      "|" + (u.map_color || "-") +
+      "|" + (u.silent_since_alert ? "s" : "-") +
+      "|" + (u.last_known_position ? "lk" : "-");
   }
 
   map.on("zoomend", function () {
@@ -6902,6 +7029,23 @@ window.QuakeAngelRescue = (function () {
       pre_rescue_status: d.pre_rescue_status,
       pre_rescue_severity: d.pre_rescue_severity,
       pre_rescue_mobility: d.pre_rescue_mobility,
+      // ── #326 (2026-09-02 — Paul): derived map fields ─────────────────
+      // Server-authoritative. Never recompute in the client — read them
+      // off the row so the mobile app, the operator board, PDFs and any
+      // future surface can never disagree with each other. See
+      // /app/backend/people_counts.py for the locked rules.
+      //   map_color:            "red" | "yellow" | "green" | null
+      //   last_known_position:  true when the pin is where the phone
+      //                         WAS heard from, not where the person is
+      //                         now (dashed outline on the marker).
+      //   silent_since_alert:   true when we alerted but never heard
+      //                         back; drives the red-by-default
+      //                         "never answered" case.
+      //   last_alerted_at:      raw source. Kept for audit tooltips.
+      map_color: d.map_color,
+      last_known_position: !!d.last_known_position,
+      silent_since_alert: !!d.silent_since_alert,
+      last_alerted_at: d.last_alerted_at,
       // #146: server-computed. True for recognised test/synthetic device ids
       // and for rows an operator has tagged by hand (our own test check-ins
       // come from a real phone, so no id pattern can catch them).
@@ -7280,14 +7424,20 @@ window.QuakeAngelRescue = (function () {
   }
 
   function matchesFilter(u) {
-    // #297: "hidden by default while an alert is running, one toggle to
-    // show them". A resolved case is not wrong, so it does not get colour —
-    // and it does not get to compete with a live casualty for attention.
-    if (u.status === "rescued" && !showRescuedOnMap) return false;
-    if (currentFilter === "all") return true;
-    if (u.status !== "trapped") return false;
-    var sev = u.severity || "green";
-    return sev === currentFilter;
+    // #297: rescued kept behind its own toggle. "Hidden by default while
+    // an alert is running, one toggle to show them. A resolved case is
+    // not wrong, so it does not get colour."
+    if (u.status === "rescued") return showRescuedOnMap;
+    // #326 (2026-09-02 — Paul): three independent toggles for the three
+    // answer colours. Off means REMOVED from the map, not faded ("must
+    // actually remove those pins from the map, not just fade them.").
+    var mc = mapColorFor(u);
+    if (mc === "red")    return !!filterOn.red;
+    if (mc === "yellow") return !!filterOn.yellow;
+    if (mc === "green")  return !!filterOn.green;
+    // mc === null → not on the live map at all (not-responding without
+    // any alert, or a legacy row with an unknown status). Draw nothing.
+    return false;
   }
 
   function applyFilterVisibility() {
@@ -7300,13 +7450,37 @@ window.QuakeAngelRescue = (function () {
     });
   }
 
-  function setFilter(f) {
-    currentFilter = f;
+  // #326: three independent toggles. Each one flips ONE colour on/off
+  // and re-applies visibility. Off REMOVES the pin — not a fade, not a
+  // greyscale, gone. That is what Paul asked for verbatim.
+  function toggleColour(color) {
+    if (color !== "red" && color !== "yellow" && color !== "green") return;
+    filterOn[color] = !filterOn[color];
+    paintColourToggles();
     applyFilterVisibility();
     renderFiltersOn();
-    document.querySelectorAll(".map-filter-btn").forEach(function (btn) {
-      btn.classList.toggle("active", btn.dataset.filter === currentFilter);
+  }
+  window.toggleColour = toggleColour;
+
+  function paintColourToggles() {
+    document.querySelectorAll(".map-filter-btn[data-colour]").forEach(function (btn) {
+      var c = btn.dataset.colour;
+      var on = !!filterOn[c];
+      btn.setAttribute("aria-pressed", on ? "true" : "false");
+      btn.classList.toggle("active", on);
+      // The visible LABEL says what the button will do next tap — this
+      // is how the on/off state stays readable at a glance even for an
+      // operator who does not remember which side is "active".
+      var label = btn.querySelector(".qg-map-filter-label");
+      if (label) label.textContent = on ? btn.dataset.labelOn : btn.dataset.labelOff;
     });
+  }
+  // Legacy shim — old code paths (rare) that still call setFilter("green")
+  // fall through to a colour toggle if the name matches; anything else
+  // is a no-op. Kept so a stale bookmark doesn't crash.
+  function setFilter(f) {
+    if (f === "red" || f === "yellow" || f === "green") toggleColour(f);
+    // "all" is no longer a meaningful state; ignore silently.
   }
   window.setFilter = setFilter;
 
@@ -7327,6 +7501,16 @@ window.QuakeAngelRescue = (function () {
       renderFiltersOn();
     });
     paint();
+  })();
+  // #326: paint the colour toggles into their initial state on load.
+  (function initColourToggles() {
+    // Run after DOM parse — the buttons may be below this script tag
+    // in the HTML source.
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", paintColourToggles);
+    } else {
+      paintColourToggles();
+    }
   })();
 
   function qgCode(u) {
@@ -8116,10 +8300,15 @@ window.QuakeAngelRescue = (function () {
     // on screen to be hiding.
     if (!isSignedIn()) { el.hidden = true; el.innerHTML = ""; return; }
     var hidden = [];
-    if (currentFilter !== "all") {
-      hidden.push("the map is showing only " + ({
-        red: "IMMEDIATE", yellow: "SERIOUS", green: "MINOR",
-      }[currentFilter] || currentFilter));
+    // #326: three independent colour toggles. Any colour switched off
+    // must be announced in words so nobody thinks the board is showing
+    // everything when it isn't.
+    var offColours = [];
+    if (!filterOn.red)    offColours.push("red (needs help / never answered)");
+    if (!filterOn.yellow) offColours.push("yellow (hurt but stable)");
+    if (!filterOn.green)  offColours.push("green (self-reported safe)");
+    if (offColours.length) {
+      hidden.push("these colours are off the map: " + offColours.join(", "));
     }
     if (!showRescuedOnMap) hidden.push("rescued people are off the map");
     var ww = document.getElementById("qg-ww");
@@ -8142,10 +8331,17 @@ window.QuakeAngelRescue = (function () {
 
   function resetBoardFilters(mode) {
     // mode "new_alert" = a fresh incident, so back to the safe defaults
-    // (resolved cases off the map). Anything else = the operator asked to
-    // see all of it, and "everything" has to mean everything.
+    // (resolved cases off the map, greens off the map — greens are
+    // "done and should not clutter it" per #326). Anything else = the
+    // operator asked to see all of it, and "everything" has to mean
+    // everything.
     var showAll = mode !== "new_alert";
-    setFilter("all");
+    // #326: three independent colour toggles. "Show me everything" turns
+    // ALL three on; a new-alert reset keeps green off (they're done).
+    filterOn = showAll
+      ? { red: true, yellow: true, green: true }
+      : { red: true, yellow: true, green: false };
+    paintColourToggles();
     showRescuedOnMap = showAll;
     var rt = document.getElementById("qg-rescued-toggle");
     if (rt) {
