@@ -96,3 +96,7 @@ test_reports/
 .env
 .env.*
 !.env.example
+*.env
+credentials.json
+*.key
+.credentials
