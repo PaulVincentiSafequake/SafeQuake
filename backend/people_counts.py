@@ -581,6 +581,9 @@ async def _load_rows(db) -> List[Dict[str, Any]]:
             "device_id": 1, "display_name": 1,
             "status": 1, "severity": 1, "mobility": 1, "egress": 1,
             "needs_extraction": 1,
+            # #185: group_size at this address — surfaced on the map pin
+            # and details for a rescuer, NEVER summed into any count.
+            "group_size": 1,
             "latitude": 1, "longitude": 1, "accuracy_m": 1,
             "battery_pct": 1, "battery_state": 1, "platform": 1,
             "updated_at": 1,

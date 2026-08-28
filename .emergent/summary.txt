@@ -1,59 +1,63 @@
-<analysis>**original_problem_statement**: User confirmed Bugs #307 and #308 are completely fixed. During their manual testing, they found a new issue (**Bug #320**): Remove all test people leaves older test entries behind (e.g., device  tagged TEST). User asked to identify every way a test entry can be created and make the Remove all function clear all of them unconditionally. PRODUCT REQUIREMENTS: Fix Bug #320 by ensuring all 5 methods of test creation are caught by the removal sweep. Ensure  verifies. **CRITICAL USER INSTRUCTION**: User explicitly stated: After that, dont pick from the queue — Ill open a fresh chat for the next task. 
+<analysis>**original_problem_statement**: 
+- Task #193: Implement a persistent offline help-queue. If a user taps I need help without network signal, the app must hold the report and retry until the server explicitly confirms receipt (HTTP 2xx from backend ). The UI must honestly reflect a pending state and never lie by showing a green tick or sent before confirmation.
+- Task #193 v2 (User Feedback): Widening the retry schedule to be battery-conscious for trapped users (e.g., every 5 mins for 30 mins, 15 mins up to 2 hrs, 30 mins up to 12 hrs, then hourly), while still attempting immediately upon regaining signal.
+- Task #321: Update the wording on all UI buttons/notifications displaying the pending state from Still trying… to Not sent yet, as the former is unclear to users. Leave the amber banner above it unchanged.
+PRODUCT REQUIREMENTS: Create a persistent queue using AsyncStorage. Update UI labels appropriately. Ensure rigorous automated testing is done via .
 
-**User's preferred language**: English (INSTRUCT NEXT AGENT: You MUST respond in English)
+**User's preferred language**: English (INSTRUCT NEXT AGENT: You MUST respond in English only)
 
-**what currently exists?**: A stable Expo frontend, FastAPI/MongoDB backend, and a Vanilla HTML/JS Dashboard. Bugs #307, #308, and #320 are now fixed and verified. The backend  endpoint for test people has been upgraded from a narrow seed-tag match to a generic, multi-flag sweep that catches test entries created via , , load scripts, and diagnostics harnesses.
+**what currently exists?**: A React Native/Expo mobile app (QuakeGuard) and FastAPI backend. It now includes a persistent offline check-in queue () utilizing , age-based battery-conscious retry scheduling, and accurate UI pending states (Not sent yet) for offline reports.
 
 **Last working item**: 
-    - Last item agent was working: Fixing Bug #320. The agent identified all 5 surfaces that create test entries, updated the backend  function in  to sweep for all associated flags (, , , etc.), created new pytests (), and verified the fix with  (16/16 test-people suite passed).
+    - Last item agent was working: Task #321 - Updating pending state UI labels from Still trying... to Not sent yet on the  buttons and  notifications. The task was fully implemented and passed all 5  scenarios. Agent invoked the finish tool and is now waiting for user input.
     - Status: USER VERIFICATION PENDING
-    - Agent Testing Done: Y (via pytest and )
-    - Which testing method agent to use? NA (Testing already done; awaiting user manual verification/next task)
-    - User Testing Done: N (For #320) / Y (For #307, #308)
+    - Agent Testing Done: Y
+    - Which testing method agent to use? NA (Testing is already done, wait for the user to verify or provide the next task)
+    - User Testing Done: N
 
 **All Pending/In progress Issue list**:  
-  Issue 1: Awaiting User Verification of Bug #320 and Next Task Input
-     - Attempted fixes: Updated  so the  sweep generically checks for , , and other test markers, ensuring no survivor test records remain.
-     - Next debug checklist: Read the user's next message. If they report survivor records still exist, check MongoDB  to see if there is an undocumented marker we missed.
-     - Why fix this issue and what will be achieved with the fix? Ensures fake test people don't persist and trigger false alarms during live operations.
+  Issue 1: Awaiting User Verification of Task #321 and Next Task Input
+     - Attempted fixes: Implemented and tested all wording changes in  and .
+     - Next debug checklist: Read the user's next message to verify if they are satisfied with #193 and #321, or if they have a new task to initiate.
+     - Why fix this issue and what will be achieved with the fix? Ensures smooth transition to the next product requirement.
      - Status: USER VERIFICATION PENDING
      - Is recurring issue? N
      - Should Test frontend/backend/both after fix? NA
      - Blocked on other issue: None
 
 **In progress Task List**: 
-*(None currently active. Waiting for user to provide the next task).*
+*(None currently active. Waiting for user's explicit next command).*
 
 **Upcoming and Future Tasks**
     Upcoming Tasks:
-    - *Pending User Input*: Await user's explicit instruction for the next task. User stated they will open a fresh chat. - P0
+    - *Pending User Input*: Await user's explicit instruction for the next task. - P0
     - Home screen redesign (#258) - P2
     - Post-stand-down alerts re-opening incidents (#190) - P3
     - Ask lowest battery devices least (#189) - P3
     - Add shift handover notes - P3
-    - Dashboard full restructure (#116) - P4 (Intentionally deprioritized by user)
+    - Dashboard full restructure (#116) - P4 (Deprioritized by user)
 
     Future Tasks:
     - Cluster map markers (#25) - P4
     - Group triage list by location (#188) - P4
 
 **Completed work in this session**
-- Identified all 5 creation methods for test entries (DONE)
-- Updated backend  to use a generic sweep targeting all test flags (, , specific string formats) to resolve Bug #320 (DONE)
-- Created  to ensure test devices created via  are successfully cleared (DONE)
-- Updated  to align with the new generic sweep logic (DONE)
-- Ran Pytest suite and  to verify all test-related functionality (16/16 specific tests passed) (DONE)
-- Updated  with #320 resolution (DONE)
+- Created  to persistently manage offline check-ins (DONE)
+- Re-routed  in  through the offline queue (DONE)
+- Updated  to handle pending_retry state and display correct toast/button UI logic (DONE)
+- Implemented age-based, battery-conscious retry scheduling (Task #193 v2) (DONE)
+- Updated Still trying… to Not sent yet across  and lock-screen notifications (Task #321) (DONE)
+- Verified all offline scenarios, wording changes, and regressions end-to-end using  (DONE)
 
 **Earlier issues found/mentioned but not fixed**
-   - Issue 1: Pre-existing Pytest fixture failure in  ().
-   - Debug checklist: NA (Ignore unless instructed. Related to push relay behavior when 0 recipients).
-   - Why to solve this issue and what will be achieved with this? Maintain 100% test pass rate.
+   Issue 1: Pre-existing Pytest fixture failure in  ().
+   - Debug checklist: NA (Ignore unless instructed by user).
+   - Why to solve this issue and what will be achieved with this? Keeps test suite clean, but currently known and intentionally skipped.
    - Should Test frontend/backend/both after fix: Backend
-   - Is recurring issue? Y (Known issue)
+   - Is recurring issue? Y
 
 **Known issue recurrence from previous fork**
-  - Issue recurrence in previous fork: None active. (Bugs #307 and #308 from the previous fork were confirmed fixed by the user).
+  - Issue recurrence in previous fork: None
   - Recurrence count: 0
   - Status: RESOLVED
 
@@ -61,20 +65,17 @@
 /app
 ├── frontend
 │   ├── app/ (_layout.tsx, index.tsx, alert.tsx, map.tsx)
-│   ├── src/utils/
+│   ├── src/utils/ (helpQueue.ts, checkin.ts, reminders.ts)
 ├── backend
 │   ├── server.py 
-│   ├── test_people_seed.py (Updated with generic sweep logic)
-│   ├── board_alarms.py
 │   ├── routes_diagnostics.py
 │   ├── deps.py
-│   ├── tests/ (Extensive pytest suite, new #320 tests added)
+│   ├── tests/
 ├── memory
-    ├── PRD.md (Updated)
-    ├── dashboard_build/index.html 
+    ├── PRD.md 
 
 **Key Technical Concepts**
-Expo (React Native), FastAPI, MongoDB, Pytest, Vanilla HTML/JS Dashboard.
+Expo (React Native), AsyncStorage (for persistent queue), Notifications, FastAPI, MongoDB, Playwright (for automated frontend testing).
 
 **key DB schema**
   - : {device_id, status, severity, updated_at, synthetic, is_test, ...}
@@ -84,36 +85,45 @@ Expo (React Native), FastAPI, MongoDB, Pytest, Vanilla HTML/JS Dashboard.
   - None
 
 **All files of reference** 
-  -  (Updated  and  logic for #320)
-  -  (New tests for Bug #320)
-  -  (Updated to match generic sweep)
-  -  (Updated)
+  -  (Created to handle offline persistence and retry logic)
+  -  (Updated to push reports to the new queue)
+  -  (Updated heavily for UI pending states and wording logic)
+  -  (Updated to subscribe to queue and handle background syncing)
+  -  (Updated lock-screen notification logic and wording)
+  -  (Continuously appended with completion records of #193 and #321)
 
 **Areas that need refactoring**: 
-  - : Fully stabilized but eventually due for an overhaul when user re-prioritizes Dashboard Restructure (#116).
+  - : Fully stabilized but eventually due for an overhaul (#116).
+  - Minor exhaustive-deps React warning in  around  (pre-existing, left as-is).
 
 **key api endpoints**
-  - 
-  -  (Now aggressively sweeps all test flags)
+  -  (Used as the truth signal for confirming queued reports)
 
 **Critical Info for New Agent** 
-- **CRITICAL DIRECTIVE**: The user explicitly instructed: *After that, dont pick from the queue — Ill open a fresh chat for the next task.* **DO NOT** attempt to start on #258, #190, or any other backlog item. You MUST use the  tool or wait for the user's initial message to define the next scope of work.
-- **TESTING RULES**: ALWAYS run the  after bug fixes. The Pytest suite should be run from . 
-- **KNOWN TEST FAILURE**: There is 1 failing test () that is pre-existing and unrelated to test-people. Ignore it unless the user asks you to fix it.
+- The agent just successfully completed Tasks #193 (Offline Queue & Battery Back-off) and #321 (Pending UI Wording). 
+- Wait for the user's initial message in the new session to provide the next task.
+- ALWAYS test frontend behavior logic utilizing  after significant updates, as done effectively in this session to catch regressions.
 
 **documents and test reports created in this job** 
   - 
   - 
   - 
+  - 
+  - 
+  - 
 
 **Last 10 User Messages and any pending HUMAN messages** 
- - User confirmed Bugs #307 and #308 were fixed successfully.
- - User reported Bug #320: Remove all test people missed 5 test entries created via other methods. Asked to identify all creation methods and make  unconditionally remove all of them. Also instructed the agent NOT to pick from the queue. (Completed)
- - System reminded agent to run . (Completed)
- - *Pending Human Message*: Waiting for the user to provide details on the new task they mentioned they would open a fresh chat for.
+ - *User:* Provided Task #193 (persistent offline queue so reports try until server confirms, UI must not lie).
+ - *System:* Reminder to use testing_agent for bugs.
+ - *Agent:* Implemented #193, tested via , fixed invariant leak, finished task.
+ - *User:* Provided feedback for Task #193 v2 — widen the retry back-off heavily to save trapped users' battery.
+ - *Agent:* Updated schedule in , fixed a regression found by , finished task.
+ - *User:* Provided Task #321 — change unclear Still trying... button text to Not sent yet.
+ - *Agent:* Found 3 places, updated them, passed tests, finished task.
+ - *Pending Human Message:* Awaiting user's verification of the final finish payload and definition of their next task.
 
 **Project Health Check:**
-Healthy (App), Mostly Healthy (Test Suite - 1 known pre-existing failure in ).
+Healthy.
 
 **3rd Party Integrations** 
  - Apple APNs (Critical Alerts) — requires User API Key
@@ -123,19 +133,18 @@ Healthy (App), Mostly Healthy (Test Suite - 1 known pre-existing failure in ).
 **Testing status**
   - Testing agent used after significant changes: YES
   - Troubleshoot agent used after agent stuck in loop: NO
-  - Test files created: 
-  - Known regressions: None (1 pre-existing fixture failure in  is known).
+  - Test files created: None (Testing agent used Playwright directly on preview).
+  - Known regressions: 1 pre-existing fixture failure in  (known and accepted).
 
 **Credentials to test flow:**
-Available in 
+Check 
 
 **What agent forgot to execute**
-Nothing. The agent successfully addressed #320 generically, added tests, verified with , and is appropriately waiting for the user's next command.
+Nothing. Tasks #193, #193 v2, and #321 were robustly handled, verified by the testing agent, and successfully signed off.
 
 **Debugging checklist for current issue**
-    Issue: Awaiting user verification of #320 and definition of the next task.
-    
+    Issue: Awaiting user to provide the next task scope.
     Frontend files to check: NA
     Backend files to check: NA
     Database to check: NA
-    Next Step: Read the user's initial message. They will define the next task. Acknowledge and plan accordingly.</analysis>
+    Next action: Acknowledge the user's upcoming message and plan the next sprint accordingly.</analysis>

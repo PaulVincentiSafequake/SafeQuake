@@ -230,6 +230,43 @@ class StatusInPayload(BaseModel):
     egress: Optional[str] = Field(
         default=None, pattern=r"^(can_exit|cannot_exit|not_answered)$")
 
+    # ── #185 (2026-09-01 — Paul): GROUP SIZE at the address ──────────────
+    # "Our board counts phones but shows them as people. A family of five
+    #  with two phones appears as two, so a rescuer arriving expects two
+    #  and finds five."
+    #
+    # This field tells the RESPONDER, on the pin and in the details, how
+    # many people are at the reporting person's location — the reporter
+    # themselves plus anyone else there. It exists SOLELY for that
+    # rescuer-on-the-ground question ("how many should I expect to find
+    # at this address?").
+    #
+    # ⚠️ ANTI-DOUBLE-COUNT CONTRACT — READ BEFORE YOU TOUCH:
+    #   * `group_size` MUST NEVER be added to ANY headline / dashboard /
+    #     public-summary count. The headline counts remain counts of
+    #     PEOPLE WHO HAVE REPORTED (one report = one person on the board).
+    #     Summing group_size into "safe" or "trapped" would double-count
+    #     every reporter and produce phantom casualties nobody can find.
+    #   * The field is stored as an OPAQUE STRING BUCKET, not an int, so
+    #     it is not sum()-able by accident. If you ever need a numeric
+    #     representation for a NON-COUNT display purpose (e.g. a badge on
+    #     one map pin), derive it locally at the display site — do not
+    #     add it to the Counts dataclass.
+    #   * There is no `total_people_estimate` and there will not be one.
+    #     If somebody asks for it, they are asking to break the invariant
+    #     above; push back and explain why (Paul, 2026-09-01).
+    #
+    # Buckets are opaque strings — reporters tap one, rescuers read one.
+    # `just_me` = the reporter alone (bucket size 1).
+    # `2` / `3` / `4` = exactly that many including the reporter.
+    # `5_plus` = the reporter plus four or more others (rescuer treats
+    # as "at least 5"; we deliberately do not pretend to a precise number
+    # we did not ask for).
+    # `null` / missing = the reporter skipped the question; render as
+    # "unknown group size", NEVER as "just 1".
+    group_size: Optional[str] = Field(
+        default=None, pattern=r"^(just_me|2|3|4|5_plus)$")
+
     # Optional first name a responder should see next to the pin. Asked once
     # at first app launch and editable at any time from the main screen.
     # Sanitized in _normalize_status_payload (trimmed, control chars stripped,
@@ -344,6 +381,13 @@ def _normalize_status_payload(p: StatusInPayload) -> dict:
         # one. Kept as a separate flag rather than folded into severity, which
         # would either overstate the injury or hide the extraction need.
         "needs_extraction": egress == "cannot_exit",
+        # ── #185: group_size travels regardless of status ────────────────
+        # A "safe" reporter at an address with four other people is exactly
+        # as useful to a rescuer knocking on that door as a "trapped" one
+        # — arguably more so, because they can open the door. So the field
+        # is preserved on every status. It is NEVER counted. See the
+        # ANTI-DOUBLE-COUNT CONTRACT on the StatusInPayload model above.
+        "group_size": p.group_size,
         "display_name": _sanitize_display_name(p.display_name),
         "latitude": lat,
         "longitude": lng,
@@ -544,6 +588,13 @@ async def get_devices(
             "mobility": r.get("mobility"),
             "egress": r.get("egress"),
             "needs_extraction": bool(r.get("needs_extraction")),
+            # ── #185: group size at THIS person's address, for the pin
+            # and the details panel only. Opaque string bucket; the
+            # renderer decides the phrase ("just you", "you + 3", "5 or
+            # more"). NEVER counted into any total — see the
+            # ANTI-DOUBLE-COUNT CONTRACT on StatusInPayload for the
+            # full rationale (2026-09-01 — Paul, #185).
+            "group_size": r.get("group_size"),
             "latitude": r.get("latitude"),
             "longitude": r.get("longitude"),
             "accuracy_m": r.get("accuracy_m"),
@@ -813,6 +864,12 @@ async def get_device_history(
             "mobility": r.get("mobility"),
             "egress": r.get("egress"),
             "needs_extraction": bool(r.get("needs_extraction")),
+            # #185: group size at the time of this event. Snapshotted with
+            # the report so history reads truthfully — a later group-size
+            # update writes its own event rather than mutating this one.
+            # NEVER summed into any count; see StatusInPayload for the
+            # anti-double-count contract.
+            "group_size": r.get("group_size"),
             "latitude": r.get("latitude"),
             "longitude": r.get("longitude"),
             "accuracy_m": r.get("accuracy_m"),
@@ -858,6 +915,9 @@ async def get_device_history(
             "status": (latest or {}).get("status"),
             "severity": (latest or {}).get("severity"),
             "mobility": (latest or {}).get("mobility"),
+            # #185: current group size at this address, for the details
+            # panel. Never counted; see StatusInPayload's contract.
+            "group_size": (latest or {}).get("group_size"),
             "latitude": (latest or {}).get("latitude"),
             "longitude": (latest or {}).get("longitude"),
             "battery_pct": (latest or {}).get("battery_pct"),

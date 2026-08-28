@@ -3304,3 +3304,34 @@ locally and against the public URL.
 
 **Verified:** testing agent iteration 53 — 5/5 scenarios PASS (trapped-pending label, safe-pending label, banner preservation, happy-path no-flash, recovery, and wording-invariant sweep for absent causal phrases like "waiting for signal", "server down", "no signal", "battery", etc.).
 
+
+
+### 2026-09-01 — Task #185: group size at the address (never a count)
+
+**Paul, 2026-09-01:** *"Our board counts phones but shows them as people. A family of five with two phones appears as two, so a rescuer arriving expects two and finds five. When someone checks in, ask one extra question: 'Including you, how many people are here?' — answered in one tap: just me, 2, 3, 4, 5 or more. That number must never be added into any total. Our headline counts stay counts of people who have reported, so they can never be double-counted. The group size belongs to that one person — it shows on their map pin and in their details, so a rescuer going to that address knows there may be more people there than the one who answered."*
+
+**Anti-double-count contract (locked in code + comments):**
+- `group_size` is an OPAQUE STRING BUCKET, not an int, so it is not `sum()`-able by accident.
+- Buckets: `just_me`, `2`, `3`, `4`, `5_plus`. Missing/null = "unknown group size", never "just 1".
+- There is no `total_people_estimate` and there will not be one.
+- The field is stored on `device_status.group_size` and surfaced on `/api/devices` and `/api/admin/device-history/{id}`. It is **absent from every count** — `Counts` dataclass, `people_counts.compute_counts`, `/api/public/summary`, dashboard totals.
+- The contract is written into two long block-comments (backend `StatusInPayload`, frontend `GroupSize` type) that name the invariant, name the failure mode, and instruct future readers to push back if anyone asks to break it.
+
+**UX invariants:**
+1. **Non-blocking by design.** The report is enqueued on the primary tap. The group-size sheet opens IMMEDIATELY after — it never gates the send.
+2. **One tap.** Five pills (Just me · 2 · 3 · 4 · 5 or more), each ≥ 56pt tall.
+3. **Skippable.** A "Skip" is a real answer — it clears any previously chosen value rather than silently keeping the old one.
+4. **Offline-safe.** The chosen value travels in the same `helpQueue` payload as the primary report; a follow-up made offline waits with the report and lands together on the next 2xx.
+5. **Correctable from the sent toast.** Mis-taps under stress happen; the "Reported: you and 3 others here" line on the success toast is itself a button — tap to reopen the sheet and change the answer.
+6. **Copy is honest.** "Reported: just you here." / "Reported: you and N others here." / "Reported: you and 4 or more others here." Skipped = "How many people are here? Tap to add."
+
+**Trapped-flow ordering:** severity tap → INITIAL SUBMIT → group-size sheet → mobility (yellow) or egress (green) or nothing (red) → follow-up submit. Group-size interposes AFTER severity so the report is already on the board when the sheet opens, matching Paul's rule from #289.
+
+**Dashboard follow-up (separate repo — `dashboard_build/`):** the API now returns `group_size` on `/api/devices[].group_size` and on `/api/admin/device-history/{id}.last_known.group_size` + on each `events[].group_size`. The dashboard rendering itself (map pin badge + details panel) has NOT been shipped in this repo — that is its own task on the dashboard side.
+
+**Files changed (this ship):**
+1. `backend/server.py` — `StatusInPayload.group_size`, `_normalize_status_payload`, `/api/devices` clean(r), `/api/admin/device-history/{id}` (event snapshots + `last_known`).
+2. `frontend/src/utils/checkin.ts` — `GroupSize` type + threading through `submitStatus`.
+3. `frontend/app/alert.tsx` — state, `openGroupSizeSheet`, `chooseGroupSize`, threading through severity/mobility/egress, group-size Modal, "Reported: …" tappable line on both safe and trapped success toasts, `groupSizeSentence` helper, `GroupSizePill` component.
+
+**Verified:** [pending testing_agent — Task #185.]

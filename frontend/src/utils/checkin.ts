@@ -154,11 +154,32 @@ export interface BatteryPayload {
 // filing them as walking wounded, which is the lowest priority there is.
 export type Egress = "can_exit" | "cannot_exit" | "not_answered";
 
+// #185 (2026-09-01 — Paul): "Including you, how many people are here?"
+// Answered in one tap by a frightened reporter, purely so a rescuer at
+// that address knows what to expect on arrival.
+//
+// ⚠️ ANTI-DOUBLE-COUNT CONTRACT — READ BEFORE YOU TOUCH:
+// This is NOT a count of casualties. It NEVER contributes to any
+// headline / total / dashboard number. Headline counts stay counts of
+// PEOPLE WHO HAVE REPORTED. Summing this into anything would double-count
+// every reporter and produce phantom casualties. If you find yourself
+// writing arithmetic on `group_size`, stop.
+//
+// Buckets:
+//   "just_me" → the reporter alone (1)
+//   "2" | "3" | "4" → exactly that many including the reporter
+//   "5_plus" → the reporter plus four or more others (rescuer treats as "at least 5")
+//   null / missing → the reporter skipped; render as "unknown group size",
+//                    never as "just 1".
+export type GroupSize = "just_me" | "2" | "3" | "4" | "5_plus";
+
 export async function submitStatus(opts: {
   status: CheckInStatus;
   severity?: TriageSeverity | null;
   mobility?: Mobility | null;
   egress?: Egress | null;
+  // #185: optional group-size bucket. Skippable and never counted.
+  group_size?: GroupSize | null;
   location?: LocationPayload;
   battery?: BatteryPayload;
 }): Promise<string> {
@@ -166,7 +187,7 @@ export async function submitStatus(opts: {
   // Best-effort — if AsyncStorage is unavailable we send null and the
   // dashboard falls back to short_code-only display for this check-in.
   const displayName = await getDisplayName().catch(() => null);
-  const { status, severity, mobility, egress, location, battery } = opts;
+  const { status, severity, mobility, egress, group_size, location, battery } = opts;
 
   const payload: Record<string, any> = {
     deviceId,
@@ -180,6 +201,11 @@ export async function submitStatus(opts: {
     // reports. A "cannot_exit" must surface the person as needing extraction
     // even though their injuries are minor.
     egress: status === "trapped" ? (egress ?? null) : null,
+    // #185: group_size travels regardless of status. A "safe" reporter at an
+    // address with four others is exactly as useful to a rescuer knocking
+    // on that door as a trapped one — and this is the only field that
+    // tells them. Never used in any count.
+    group_size: group_size ?? null,
     // Optional first name for responder-side identification. Nullable —
     // dashboard falls back to short_code alone when null.
     display_name: displayName,

@@ -31,6 +31,7 @@ import {
   getDisplayName,
   submitStatus,
   type Egress,
+  type GroupSize,
   type Mobility,
   type TriageSeverity,
 } from "@/src/utils/checkin";
@@ -152,6 +153,21 @@ export default function AlertScreen() {
   // Mobility is not egress: the body versus the building.
   const [egressOpen, setEgressOpen] = useState(false);
   const [chosenEgress, setChosenEgress] = useState<Egress | null>(null);
+  // ── #185 (2026-09-01 — Paul): GROUP SIZE at this address ────────────
+  // Asked AFTER the primary answer so it can never block or delay it.
+  // Skippable. Never counted into any total (see the ANTI-DOUBLE-COUNT
+  // CONTRACT in server.py). The chosen value travels with the report
+  // through the offline queue, so a follow-up made offline waits with
+  // the report and lands together when the network returns.
+  const [chosenGroupSize, setChosenGroupSize] = useState<GroupSize | null>(null);
+  const [groupSizeOpen, setGroupSizeOpen] = useState(false);
+  // Which sheet (if any) to open once the group-size sheet closes.
+  //   "mobility" → yellow-severity mobility follow-up
+  //   "egress"   → green-severity way-out follow-up
+  //   null       → end of flow (safe path or red-severity trapped path,
+  //                and every time the sheet is reopened for correction)
+  const [groupSizeNextSheet, setGroupSizeNextSheet] =
+    useState<"mobility" | "egress" | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [elapsed, setElapsed] = useState(0);
 
@@ -656,6 +672,9 @@ export default function AlertScreen() {
     // has already been sent. Without this the guard below would swallow
     // it, because the first send happens the moment a severity is chosen.
     isFollowUp = false,
+    // #185: group size at this address. Optional. Travels regardless of
+    // status. NEVER counted into any total (see backend contract).
+    groupSize: GroupSize | null = null,
   ) => {
     if (!isFollowUp && (status === "sending" || status === "sent" || status === "pending_retry")) return;
     // 1) IMMEDIATELY silence the siren and cancel pending reminders. The user
@@ -796,6 +815,8 @@ export default function AlertScreen() {
           severity: kind === "trapped" ? severity : null,
           mobility: kind === "trapped" ? mobility : null,
           egress: kind === "trapped" ? egress : null,
+          // #185: group_size travels regardless of status. Never counted.
+          group_size: groupSize,
           location: { latitude, longitude, accuracy, error: locationError },
           battery: { level: batteryLevel, state: batteryState },
         });
@@ -863,7 +884,24 @@ export default function AlertScreen() {
     }
   };
 
-  const handleImSafe = () => submitCheckIn("safe");
+  const handleImSafe = () => {
+    // #185: fire the report immediately (unchanged rule — one tap sends).
+    // The group-size sheet opens right after so it can NEVER block or
+    // delay the primary answer. If the user skips or dismisses the
+    // sheet, the report still went through with group_size=null.
+    submitCheckIn("safe");
+    openGroupSizeSheet(null);
+  };
+
+  // #185: open the group-size sheet. `next` is the sheet (if any) to
+  // open once the user picks or skips — the trapped-yellow path
+  // continues to "mobility", the trapped-green path to "egress", and
+  // everything else (safe, red, and every correction from the toast)
+  // ends here.
+  const openGroupSizeSheet = (next: "mobility" | "egress" | null) => {
+    setGroupSizeNextSheet(next);
+    setGroupSizeOpen(true);
+  };
 
   const openTriage = () => {
     if (status === "sending" || status === "sent" || status === "pending_retry") return;
@@ -904,7 +942,11 @@ export default function AlertScreen() {
       // ambiguous for a serious-but-stable injury.
       setPendingSeverity(severity);
       submitCheckIn("trapped", severity, null);
-      setMobilityOpen(true);
+      // #185: group-size sheet interposes BEFORE mobility. Ordering per
+      // Paul, 2026-09-01: "right after severity is chosen — same 'one
+      // report already gone' moment as today". The mobility sheet will
+      // open when the group-size sheet closes.
+      openGroupSizeSheet("mobility");
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
       return;
     }
@@ -917,7 +959,8 @@ export default function AlertScreen() {
       // and gets maximum response anyway. Yellow keeps its mobility question.
       setPendingSeverity(severity);
       submitCheckIn("trapped", severity, "mobile", "not_answered");
-      setEgressOpen(true);
+      // #185: group-size sheet interposes BEFORE egress.
+      openGroupSizeSheet("egress");
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
       return;
     }
@@ -926,6 +969,10 @@ export default function AlertScreen() {
     // Passed as a follow-up so that changing MINOR or SERIOUS to
     // IMMEDIATE after the first send still gets through.
     submitCheckIn("trapped", severity, "trapped", null, true);
+    // #185: still ask group-size on the red path — a rescuer arriving at
+    // a red report needs "how many people" as much as any other severity.
+    // No further follow-up sheet after this one; the flow ends here.
+    openGroupSizeSheet(null);
   };
 
   const chooseMobility = (mobility: Mobility) => {
@@ -936,7 +983,10 @@ export default function AlertScreen() {
     setMobilityOpen(false);
     const sev = pendingSeverity;
     setPendingSeverity(null);
-    submitCheckIn("trapped", sev, mobility, null, true);
+    // #185: carry the current chosen group_size into the follow-up so
+    // an offline-queued report still lands with everything the user
+    // told us on one round-trip.
+    submitCheckIn("trapped", sev, mobility, null, true, chosenGroupSize);
   };
 
   const chooseEgress = (egress: Egress) => {
@@ -944,7 +994,41 @@ export default function AlertScreen() {
     setEgressOpen(false);
     const sev = pendingSeverity;
     setPendingSeverity(null);
-    submitCheckIn("trapped", sev, "mobile", egress, true);
+    // #185: carry group_size in the same follow-up (see chooseMobility).
+    submitCheckIn("trapped", sev, "mobile", egress, true, chosenGroupSize);
+  };
+
+  // #185: user picked a group-size bucket, or tapped Skip (size === null).
+  // Fires a follow-up update only if the value actually changed, then
+  // opens the next sheet in a trapped flow (mobility/egress) if any.
+  //
+  // "Skip" is a real answer: it clears any previously chosen value
+  // rather than silently keeping the old one, so a person correcting
+  // their report can go from "3" back to "not sure" without being stuck
+  // with a wrong number that decides how many rescuers get sent.
+  const chooseGroupSize = (size: GroupSize | null) => {
+    const changed = size !== chosenGroupSize;
+    setChosenGroupSize(size);
+    setGroupSizeOpen(false);
+    if (changed) {
+      // Fire an update through the queue. If the phone is offline the
+      // group-size sits with the queued report and lands with it — the
+      // same anti-lie contract as the primary answer.
+      submitCheckIn(
+        outcome,
+        chosenSeverity,
+        chosenMobility,
+        chosenEgress,
+        true,
+        size,
+      );
+    }
+    // Continue trapped-flow follow-ups if any were queued behind this
+    // sheet (yellow → mobility, green → egress).
+    const next = groupSizeNextSheet;
+    setGroupSizeNextSheet(null);
+    if (next === "mobility") setMobilityOpen(true);
+    else if (next === "egress") setEgressOpen(true);
   };
 
   // Back arrow inside a follow-up sheet: reopen the severity picker so the
@@ -1261,11 +1345,31 @@ export default function AlertScreen() {
           {status === "sent" && outcome === "safe" && (
             <View style={styles.successToast} testID="alert-success-toast">
               <Ionicons name="checkmark-circle" size={22} color={colors.onSuccess} />
-              <Text style={styles.successText}>
-                {isTestRun
-                  ? "Practice finished. Nothing was sent to anyone."
-                  : "Your report reached the rescue team."}
-              </Text>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.successText}>
+                  {isTestRun
+                    ? "Practice finished. Nothing was sent to anyone."
+                    : "Your report reached the rescue team."}
+                </Text>
+                {!isTestRun && (
+                  /* #185: tap to edit — people mis-tap under stress, and
+                     this number decides how many rescuers get sent. */
+                  <Pressable
+                    onPress={() => openGroupSizeSheet(null)}
+                    hitSlop={8}
+                    testID="edit-group-size-safe"
+                    accessibilityLabel="Change how many people are here"
+                    accessibilityRole="button"
+                  >
+                    <Text style={styles.groupSizeLine}>
+                      {groupSizeSentence(chosenGroupSize)}{" "}
+                      <Text style={styles.groupSizeLineAction}>
+                        {chosenGroupSize == null ? "" : "Change"}
+                      </Text>
+                    </Text>
+                  </Pressable>
+                )}
+              </View>
             </View>
           )}
           {/* #286 (2026-08-22 — Paul): "if the practice siren plays on the
@@ -1352,6 +1456,25 @@ export default function AlertScreen() {
                       : "you are trapped/pinned"}
                   </Text>
                 ) : null}
+                {!isTestRun && (
+                  /* #185: group-size line, tappable to correct. Same
+                     contract as the safe path — never counted, only
+                     ever informational for a rescuer at this address. */
+                  <Pressable
+                    onPress={() => openGroupSizeSheet(null)}
+                    hitSlop={8}
+                    testID="edit-group-size-trapped"
+                    accessibilityLabel="Change how many people are here"
+                    accessibilityRole="button"
+                  >
+                    <Text style={styles.trappedGroupSizeLine}>
+                      {groupSizeSentence(chosenGroupSize)}{" "}
+                      <Text style={styles.trappedGroupSizeLineAction}>
+                        {chosenGroupSize == null ? "" : "Change"}
+                      </Text>
+                    </Text>
+                  </Pressable>
+                )}
               </View>
             </View>
           )}
@@ -1697,6 +1820,85 @@ export default function AlertScreen() {
             </View>
           </View>
         </Modal>
+
+        {/* #185 (2026-09-01 — Paul): GROUP-SIZE sheet. Asked AFTER the
+            primary answer so it can never block or delay it. Skippable.
+            NEVER counted into any total — see StatusInPayload's
+            ANTI-DOUBLE-COUNT CONTRACT on the backend. The chosen value
+            travels with the report through the offline queue, so a
+            follow-up made offline waits and lands with the report when
+            the network returns. Every touch target is ≥ 44pt so the
+            frightened one-tap answer works reliably. */}
+        <Modal
+          visible={groupSizeOpen}
+          animationType="slide"
+          transparent
+          onRequestClose={() => chooseGroupSize(chosenGroupSize)}
+        >
+          <View style={styles.triageBackdrop}>
+            <View
+              style={[
+                styles.triageSheet,
+                { paddingBottom: Math.max(insets.bottom + spacing.md, spacing.xl) },
+              ]}
+            >
+              <View style={styles.triageHandle} />
+              <Text style={styles.triageTitle}>
+                Including you, how many people are here?
+              </Text>
+              <Text style={styles.triageSubtitle}>
+                {/* Reassures the frightened reporter that this does not
+                    delay the report — which by design has already gone. */}
+                Your answer is already on its way. This tells the rescuer
+                at the door how many people to expect.
+              </Text>
+
+              <View style={styles.groupSizeRow} testID="group-size-row">
+                <GroupSizePill
+                  label="Just me"
+                  selected={chosenGroupSize === "just_me"}
+                  onPress={() => chooseGroupSize("just_me")}
+                  testID="group-size-just-me"
+                />
+                <GroupSizePill
+                  label="2"
+                  selected={chosenGroupSize === "2"}
+                  onPress={() => chooseGroupSize("2")}
+                  testID="group-size-2"
+                />
+                <GroupSizePill
+                  label="3"
+                  selected={chosenGroupSize === "3"}
+                  onPress={() => chooseGroupSize("3")}
+                  testID="group-size-3"
+                />
+                <GroupSizePill
+                  label="4"
+                  selected={chosenGroupSize === "4"}
+                  onPress={() => chooseGroupSize("4")}
+                  testID="group-size-4"
+                />
+                <GroupSizePill
+                  label="5 or more"
+                  selected={chosenGroupSize === "5_plus"}
+                  onPress={() => chooseGroupSize("5_plus")}
+                  testID="group-size-5-plus"
+                  wide
+                />
+              </View>
+
+              <Pressable
+                onPress={() => chooseGroupSize(null)}
+                style={styles.triageCancel}
+                hitSlop={8}
+                testID="group-size-skip"
+                accessibilityLabel="Skip this question"
+              >
+                <Text style={styles.triageCancelText}>Skip</Text>
+              </Pressable>
+            </View>
+          </View>
+        </Modal>
       </SafeAreaView>
     </View>
   );
@@ -1752,6 +1954,66 @@ function severityToastStyle(sev: TriageSeverity | null) {
     default:
       return { backgroundColor: "#C21818", borderColor: "#8E1010" };
   }
+}
+
+// #185: one pill in the group-size sheet. 44pt tall (Apple HIG minimum)
+// so it can be tapped by someone whose hands are shaking. `wide` is
+// used for "5 or more" which needs more horizontal room than a digit.
+function GroupSizePill({
+  label,
+  selected,
+  onPress,
+  testID,
+  wide = false,
+}: {
+  label: string;
+  selected: boolean;
+  onPress: () => void;
+  testID?: string;
+  wide?: boolean;
+}) {
+  return (
+    <Pressable
+      onPress={onPress}
+      testID={testID}
+      style={({ pressed }) => [
+        styles.groupSizePill,
+        wide && styles.groupSizePillWide,
+        selected && styles.groupSizePillSelected,
+        pressed && { opacity: 0.9, transform: [{ scale: 0.98 }] },
+      ]}
+      accessibilityRole="button"
+      accessibilityState={{ selected }}
+      accessibilityLabel={label}
+      hitSlop={4}
+    >
+      <Text
+        style={[
+          styles.groupSizePillText,
+          selected && styles.groupSizePillTextSelected,
+        ]}
+      >
+        {label}
+      </Text>
+    </Pressable>
+  );
+}
+
+// #185: user-facing sentence for the sent-toast "Reported:" line, so
+// the reporter can see what we captured and correct it if they mis-tapped
+// under stress. Buckets are opaque strings; only phrase them here.
+//
+// null → the field was skipped; render the "unknown" phrasing so the
+// user can add it later. NEVER render as "just 1" — a skip is not an
+// answer of one.
+function groupSizeSentence(size: GroupSize | null): string {
+  if (size === "just_me") return "Reported: just you here.";
+  if (size === "5_plus") return "Reported: you and 4 or more others here.";
+  if (size === "2" || size === "3" || size === "4") {
+    const others = parseInt(size, 10) - 1;
+    return `Reported: you and ${others} ${others === 1 ? "other" : "others"} here.`;
+  }
+  return "How many people are here? Tap to add.";
 }
 
 const styles = StyleSheet.create({
@@ -2353,5 +2615,78 @@ const styles = StyleSheet.create({
     color: "rgba(255,255,255,0.75)",
     fontSize: 16,
     fontWeight: "700",
+  },
+
+  /* #185: group-size sheet + reported-line on the toasts.
+   *
+   * Pills are 56pt tall (well over the 44pt HIG minimum). "5 or more"
+   * uses .wide because a two-word label needs the horizontal room.
+   * The row wraps, so on a small screen the pills flow to a second
+   * line rather than get clipped.
+   *
+   * The reported-line on the success toast is DELIBERATELY visible as
+   * a tap target: an underlined "Change" hint sits next to the value
+   * so a frightened reporter can correct a mis-tap without hunting.
+   */
+  groupSizeRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: spacing.sm,
+    marginBottom: spacing.md,
+  },
+  groupSizePill: {
+    minHeight: 56,
+    minWidth: 88,
+    flexGrow: 1,
+    flexBasis: "28%",
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: radius.lg,
+    borderWidth: 2,
+    borderColor: "rgba(255,255,255,0.25)",
+    backgroundColor: "rgba(255,255,255,0.06)",
+    paddingHorizontal: spacing.md,
+  },
+  groupSizePillWide: {
+    // "5 or more" — full row on its own so the wrap doesn't leave an
+    // awkward orphan next to a digit pill.
+    flexBasis: "100%",
+  },
+  groupSizePillSelected: {
+    borderColor: "#4EE0A5",
+    backgroundColor: "rgba(78,224,165,0.18)",
+  },
+  groupSizePillText: {
+    color: "#fff",
+    fontSize: 20,
+    fontWeight: "700",
+  },
+  groupSizePillTextSelected: {
+    color: "#DFFBEC",
+  },
+
+  // Line inside the safe success toast.
+  groupSizeLine: {
+    color: colors.onSuccess,
+    fontSize: 14,
+    fontWeight: "600",
+    marginTop: 4,
+    opacity: 0.95,
+  },
+  groupSizeLineAction: {
+    textDecorationLine: "underline",
+    fontWeight: "800",
+  },
+  // Line inside the trapped toast (white-on-severity-colour).
+  trappedGroupSizeLine: {
+    color: "rgba(255,255,255,0.92)",
+    fontSize: 15,
+    fontWeight: "600",
+    lineHeight: 20,
+    marginTop: 6,
+  },
+  trappedGroupSizeLineAction: {
+    textDecorationLine: "underline",
+    fontWeight: "800",
   },
 });
