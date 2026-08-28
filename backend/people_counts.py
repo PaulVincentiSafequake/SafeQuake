@@ -39,6 +39,119 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from deps import is_test_device
+from recheckin import silence_state
+
+
+# ── #326 (2026-09-02 — Paul): map-render derivation ───────────────────
+# "The moment an alert is triggered, every phone we alerted should
+#  appear red on the map straight away — before they answer anything.
+#  Silence must never be invisible."
+#
+# The rules below are the LOCKED contract for the dashboard map. They
+# live here beside `effective_status` so every surface (map marker,
+# people list, PDFs, count boxes) reads from ONE authoritative
+# derivation. See dashboard_build/index.html for the consumers.
+def _parse_iso(s) -> Optional[datetime]:
+    """Robust ISO-8601 parser. Returns UTC datetime or None. Mirrors
+    the pattern used in recheckin._parse — kept local so this module
+    is free of cross-module import cycles."""
+    if not s:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return None
+
+
+def silent_since_alert(row: Dict[str, Any]) -> bool:
+    """True iff we alerted this phone and it has not reported since.
+
+    Rule (Paul, 2026-09-02, #326): if `last_alerted_at` is set, and
+    `updated_at` is either missing or older than `last_alerted_at`, the
+    phone has been alerted but stayed silent. That is the RED-by-default
+    case — "silence must never be invisible".
+
+    The flag is INDEFINITE. Stand-down does NOT clear `last_alerted_at`
+    (Paul: "Someone who never answered is exactly who we must not lose,
+    and calling off an alert must never make them invisible. They stay
+    on the board, red, until a human closes their case.").
+    """
+    alerted = _parse_iso(row.get("last_alerted_at"))
+    if alerted is None:
+        return False
+    updated = _parse_iso(row.get("updated_at"))
+    if updated is None:
+        return True
+    return updated < alerted
+
+
+def map_color(row: Dict[str, Any]) -> Optional[str]:
+    """The colour a pin must render as on the rescuer dashboard.
+
+    Locked mapping (Paul, 2026-09-02, #326):
+
+      * rescued_at set                     → None
+          (Off the map by default; the operator's Show-rescued toggle
+          adds them back with a rescued marker style, not a colour.)
+
+      * silent-since-alert                 → "red"
+          Silence must never be invisible. Overrides the raw status —
+          a phone that used to report "safe" a week ago and got alerted
+          overnight comes back as RED because we have not heard from them
+          since we called out.
+
+      * status == "safe" (self-reported)   → "green"
+          Off the map by default. The operator's green toggle adds them.
+
+      * status == "trapped"                → "red" iff severity=="red",
+                                             else "yellow"
+          Anyone who tapped "I need help" is on the live map (Paul,
+          2026-09-02: "that person tapped I need help. Anyone who asks
+          for help must never leave the live map, whatever their
+          severity."). Walking wounded (severity=green, "minor") is
+          rendered YELLOW, not green — green is reserved for
+          self-reported SAFE.
+
+      * status == "not_responding" and NEVER alerted → None
+          A phone we have never spoken to, never alerted. Not on the
+          live map. Board still shows it in the counts.
+
+      * anything else                      → None
+    """
+    if row.get("rescued_at"):
+        return None
+    if silent_since_alert(row):
+        return "red"
+    st = row.get("status")
+    if st == "safe":
+        return "green"
+    if st == "trapped":
+        return "red" if row.get("severity") == "red" else "yellow"
+    return None
+
+
+def last_known_position(row: Dict[str, Any]) -> bool:
+    """True iff the pin represents a LAST-KNOWN position, not where the
+    person is right now.
+
+    Rule (Paul, 2026-09-02, #326): "Anyone who answered and then went
+    quiet keeps their colour but gains a mark showing that pin is their
+    last known position, not where they are now."
+
+    Two exclusions:
+      * silent-since-alert people are NOT last-known — they never
+        answered, so there is no "last known" to distinguish. They are
+        red for a different reason and the dashboard says so.
+      * rescued people are off the live map, so the mark is moot.
+
+    Everyone else with any silence signal (dark, silent_alive) gets it.
+    """
+    if row.get("rescued_at"):
+        return False
+    if silent_since_alert(row):
+        return False
+    return silence_state(row) is not None
 
 
 # ── Effective status derivation ────────────────────────────────────────
@@ -584,6 +697,11 @@ async def _load_rows(db) -> List[Dict[str, Any]]:
             # #185: group_size at this address — surfaced on the map pin
             # and details for a rescuer, NEVER summed into any count.
             "group_size": 1,
+            # #326: last time WE alerted this phone. Combined with
+            # `updated_at` this tells the map derivation whether the
+            # phone has spoken since the alert or is still silent.
+            # See map_color / silent_since_alert above.
+            "last_alerted_at": 1,
             "latitude": 1, "longitude": 1, "accuracy_m": 1,
             "battery_pct": 1, "battery_state": 1, "platform": 1,
             "updated_at": 1,

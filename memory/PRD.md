@@ -3335,3 +3335,48 @@ locally and against the public URL.
 3. `frontend/app/alert.tsx` — state, `openGroupSizeSheet`, `chooseGroupSize`, threading through severity/mobility/egress, group-size Modal, "Reported: …" tappable line on both safe and trapped success toasts, `groupSizeSentence` helper, `GroupSizePill` component.
 
 **Verified:** [pending testing_agent — Task #185.]
+
+
+### 2026-09-02 — Task #326: live map — silence is never invisible
+
+**Paul, 2026-09-02:** *"The moment an alert is triggered, every phone we alerted should appear red on the map straight away — before they answer anything. Right now a person who doesn't answer appears nowhere at all. I tested that myself this morning on my own phone. Silence must never be invisible. As people answer, their colour changes: red for needs help now, yellow for hurt but stable, green for safe. Greens then leave the map entirely — they are done and should not clutter it. Rescued people leave too, whatever colour they were. Anyone who answered and then went quiet keeps their colour but gains a mark showing that pin is their last known position, not where they are now. The operator can switch each colour on or off. Switching one off must actually remove those pins from the map, not just fade them. Nothing is ever deleted — only taken off the live view. The full history stays available."*
+
+**Follow-up (Paul, 2026-09-02):** *"Answer: (a) yellow. The reason matters — that person tapped 'I need help'. Anyone who asks for help must never leave the live map, whatever their severity. One change to your plan. You wrote that stand-down clears the alerted flag so silence stops looking like an emergency. Please don't do that. Someone who never answered is exactly who we must not lose, and calling off an alert must never make them invisible. They stay on the board, red, until a human closes their case. What can change at stand-down is the wording, not their presence — the board should say the alert is over but these people were never heard from."*
+
+**Locked contract (backend `people_counts.py`, docstring on `map_color`):**
+
+The map colour is DERIVED SERVER-SIDE. Never recompute in a client. One source, one truth.
+
+| State                                          | `map_color`  | Notes                                                    |
+|------------------------------------------------|--------------|----------------------------------------------------------|
+| Rescued (any prior colour)                     | `null`       | Off the map. `Show rescued` toggle brings back.          |
+| Silent-since-alert (alerted, never answered)   | `red`        | Silence must never be invisible. **INDEFINITE** — never cleared by stand-down, only by human resolution or a fresh report from the phone. |
+| Trapped + severity=red (Immediate)             | `red`        |                                                          |
+| Trapped + severity=yellow (Serious/Stable)     | `yellow`     |                                                          |
+| Trapped + severity=green (Minor/walking wounded) | `yellow`   | "Anyone who tapped I need help stays on the live map."   |
+| Self-reported Safe                             | `green`      | Off by default; green toggle brings them back.           |
+| `not_responding` with no alert                 | `null`       | Never used the app; still on the board's counts, no pin. |
+
+**`last_known_position` field:** true when the person answered post-alert but has since gone quiet (silence_state ≠ null). Their pin keeps its colour but gains a dashed halo — the map says "this is where we last heard from them, not where they are now." Silent-since-alert people are NOT last-known (they never answered, so nothing to distinguish).
+
+**Filter model:** three independent toggles on the map bar — **Red · Yellow · Green** — each on/off. Green defaults OFF (self-reported safes don't clutter the live view). Rescued kept on its own toggle. Toggle off REMOVES the pin, not fades it. `renderFiltersOn()` announces which colours are hidden so nobody thinks they're seeing everything when they aren't.
+
+**Persistence contract (locked in `server.py` + comment):**
+- On alert broadcast: `device_status.last_alerted_at = now` is upserted for EVERY recipient (stub-row created if the phone has never checked in).
+- Stand-down does **NOT** clear `last_alerted_at`. A silent-since-alert person leaves the working board only when a human resolves them (mark-rescued, resolve-with-reason) or their phone finally reports in.
+- Nothing is ever deleted; history stays available via `/api/admin/device-history/{id}` and `status_events`.
+
+**Files shipped this task:**
+1. `backend/server.py` — POST-broadcast `bulk_write` of `last_alerted_at` on every recipient's device_status row; `/api/devices` `clean(r)` exposes `map_color`, `last_known_position`, `silent_since_alert`, `last_alerted_at`.
+2. `backend/people_counts.py` — new derivation helpers `silent_since_alert`, `map_color`, `last_known_position`; `last_alerted_at` added to `_load_rows` projection.
+3. `dashboard_build/index.html` — three-independent-colour-toggle filter bar; `markerVisual` reads `map_color`; `makeIcon` draws dashed "last-known" halo; `iconSignature` re-icons when the derived state changes; "never answered" tag on silent-red pins; `renderFiltersOn` announces hidden colours.
+
+**Dashboard follow-up (separate deploy, `dashboard_build/index.html`):**
+- Diff is ready in this repo. Push to the dashboard repo when convenient. Nothing else on the dashboard side is required for this task — colour derivation, marker rendering, filter UI, and "which colours are hidden" wording all live in the same file.
+- Optional next iteration: at stand-down, add a single banner **"Alert over — N people were never heard from"** (Paul, 2026-09-02: "What can change at stand-down is the wording, not their presence"). Their red pins stay; the banner just names them collectively. Not blocking for this task.
+
+**Verified:** [pending testing_agent — Task #326.]
+
+**Post-review sort fix (iteration 55 → 56):** `/api/devices` sort was coalesced to `max(updated_at, last_alerted_at)` so silent-since-alert stubs (broadcast timestamp only, no updated_at yet) sort to the TOP of the paginated response rather than the bottom. Without this, a 1001st recipient could be truncated off — the very defect this task exists to fix.
+
+**Verified:** testing_agent iterations 55 (33/33) + 56 (36/36) = 69/69 across the full Task #326 test suite. #185 group_size and #193 offline queue regressions preserved (46/46 combined pass).

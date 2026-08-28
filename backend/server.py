@@ -541,7 +541,26 @@ async def get_devices(
     rows = board.board
     if since:
         rows = [r for r in rows if str(r.get("updated_at") or "") >= since]
-    rows.sort(key=lambda r: str(r.get("updated_at") or ""), reverse=True)
+    # #326 (2026-09-02 — Paul, testing_agent finding on iteration 55):
+    # "Silence must never be invisible" — including via pagination. The
+    # old sort was purely by updated_at, which means a silent-since-alert
+    # stub row (created by the trigger broadcast with no updated_at yet
+    # because the phone has never checked in) sorts LAST and can be
+    # truncated off the response when there are more than `limit`
+    # devices. That would make P0 red-silent-recipient pins invisible on
+    # the map — the very defect this task exists to fix.
+    #
+    # Coalesce the sort key on the max of updated_at and last_alerted_at
+    # so a broadcast timestamp is treated as a first-class recency
+    # signal. The result: silent-since-alert stubs sort right next to
+    # devices that reported near the alert time, and cannot be paginated
+    # out from under a live alert.
+    def _sort_key(r: dict) -> str:
+        return max(
+            str(r.get("updated_at") or ""),
+            str(r.get("last_alerted_at") or ""),
+        )
+    rows.sort(key=_sort_key, reverse=True)
     rows = rows[:limit]
 
     # #296: silence is measured by the clock, so nothing arrives to
@@ -565,7 +584,12 @@ async def get_devices(
         # and can never draw a rescued tick under a trapped triangle
         # (Batch 7 A2). Import lazily to keep the endpoint's cold-start
         # cost identical.
-        from people_counts import effective_status as _eff
+        from people_counts import (
+            effective_status as _eff,
+            map_color as _map_color,
+            last_known_position as _last_known,
+            silent_since_alert as _silent_since_alert,
+        )
         return {
             "device_id": r.get("device_id"),
             # short_code is derived on read, not stored — that way any change
@@ -595,6 +619,41 @@ async def get_devices(
             # ANTI-DOUBLE-COUNT CONTRACT on StatusInPayload for the
             # full rationale (2026-09-01 — Paul, #185).
             "group_size": r.get("group_size"),
+            # ── #326 (2026-09-02 — Paul): map derivation ─────────────────
+            # ONE authoritative source for what colour to paint the pin
+            # and whether it represents a last-known position. The
+            # dashboard MUST NOT recompute these — read them off the
+            # row so the mobile app, the operator board, the PDFs and
+            # any future surface can never disagree with each other.
+            #
+            #   map_color:  "red" | "yellow" | "green" | null
+            #     - null   = off the live map (rescued, or not-responding
+            #                without an alert). Not a filter setting —
+            #                a genuine "no pin".
+            #     - "red"  = trapped/Immediate OR silent-since-alert.
+            #                Silence must never be invisible.
+            #     - "yellow" = anyone who tapped "I need help" who isn't
+            #                Immediate. Includes walking wounded — they
+            #                asked for help, they never leave the map.
+            #     - "green" = self-reported Safe. Off by default; the
+            #                operator's green toggle brings them back.
+            #
+            #   last_known_position: true when the pin is the last known
+            #     spot, not where the person is now (answered but has
+            #     since gone quiet). The map adds a dashed outline.
+            #
+            #   silent_since_alert: raw fact for the operator UI so it
+            #     can say "we alerted you and you never answered" in
+            #     words, distinct from generic silence.
+            #
+            #   last_alerted_at: the raw source for silent_since_alert.
+            #     Exposed for the audit/history views. NEVER cleared by
+            #     stand-down — those people stay red until a human
+            #     closes their case.
+            "map_color": _map_color(r),
+            "last_known_position": _last_known(r),
+            "silent_since_alert": _silent_since_alert(r),
+            "last_alerted_at": r.get("last_alerted_at"),
             "latitude": r.get("latitude"),
             "longitude": r.get("longitude"),
             "accuracy_m": r.get("accuracy_m"),
@@ -4325,6 +4384,63 @@ async def trigger_alert(
         })
     except Exception as e:
         logging.warning(f"Failed to persist push_events: {e}")
+
+    # ── #326 (2026-09-02 — Paul) ─────────────────────────────────────────
+    # "The moment an alert is triggered, every phone we alerted should
+    #  appear red on the map straight away — before they answer anything.
+    #  Silence must never be invisible."
+    #
+    # So every recipient's device_status row gets stamped with
+    # `last_alerted_at`. The board renderer treats "alerted but not yet
+    # reported since then" as RED — the "silent-since-alert" case —
+    # without waiting for the phone to say anything.
+    #
+    # For a phone that has NEVER used the app (no device_status row) we
+    # upsert a stub row with status="not_responding" so the person still
+    # appears on the board and in the counts. They will not carry a map
+    # pin until we have a location, but they cannot be lost.
+    #
+    # Persistence contract (Paul, 2026-09-02, verbatim):
+    #   "Someone who never answered is exactly who we must not lose, and
+    #    calling off an alert must never make them invisible. They stay
+    #    on the board, red, until a human closes their case."
+    # → `last_alerted_at` is NEVER cleared by the stand-down endpoint. A
+    # silent-since-alert person leaves the working board only when a
+    # human resolves them (mark-rescued, resolve-with-reason) or their
+    # phone finally reports in.
+    try:
+        now_iso = datetime.now(timezone.utc).isoformat()
+        recipient_ids = [d["user_id"] for d in devices if d.get("user_id")]
+        # Bulk write: `update_one(upsert=True)` per id. For our peak scale
+        # (single-country alert, hundreds of thousands of phones) this is
+        # a background side effect and the trigger response has already
+        # been prepared. If Mongo is slow the operator does not wait.
+        from pymongo import UpdateOne
+        if recipient_ids:
+            ops = [
+                UpdateOne(
+                    {"device_id": did},
+                    {
+                        "$set": {"last_alerted_at": now_iso},
+                        "$setOnInsert": {
+                            "device_id": did,
+                            # not_responding is the truthful state for a
+                            # phone we alerted but have never heard back
+                            # from. It has NEVER had a status before, so
+                            # this cannot overwrite anything real.
+                            "status": "not_responding",
+                            "created_at": now_iso,
+                        },
+                    },
+                    upsert=True,
+                )
+                for did in recipient_ids
+            ]
+            await db.device_status.bulk_write(ops, ordered=False)
+    except Exception as e:
+        # Non-fatal. The alert itself has already been broadcast and
+        # recorded. Log so the deployment can catch this in Sentry.
+        logging.warning(f"Failed to stamp last_alerted_at on recipients: {e}")
 
     return {
         "status": "broadcast",
