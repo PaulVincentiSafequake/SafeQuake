@@ -3596,3 +3596,64 @@ Verification (testing_agent iteration 58):
   | 1366×768 | 752 | 768 | ✅ |
   | 1280×720 | 704 | 720 | ✅ |
   | 500×900 (mobile 50vh path) | 787 | 900 | ✅ |
+
+
+---
+
+## #322 — Group size reaches the board again (Paul, 2026-08-29)
+
+Paul, verbatim: *"I tapped 'I need help', chose 'seriously injured /
+can't move', then answered the group size question — 5 the first time,
+4 the second. The app itself confirms it. […] But on the dashboard,
+the map pin has no number badge, and its popup says 'Group size not
+given'. […] Tell me which of those four it was."*
+
+Answer: **#4 — the dashboard was not reading the field.**
+
+Chain of evidence:
+1. Follow-up sent? YES — `alert.tsx::chooseGroupSize` re-enters
+   `submitCheckIn(..., isFollowUp=true, size)` which enqueues a fresh
+   POST /api/status carrying `group_size: "<bucket>"`.
+2. Rejected server-side? NO — `StatusInPayload.group_size` validates
+   against `^(just_me|2|3|4|5_plus)$`; the value is stored on
+   `device_status` and appended to `status_events`.
+3. Missing from API? NO — `/api/devices` returns
+   `"group_size": r.get("group_size")` unchanged (opaque bucket).
+4. Dashboard reads it? **NO — this was the bug.** Ingest at
+   `memory/dashboard_build/index.html` had:
+   ```js
+   groupSize: (typeof d.group_size === "number" && d.group_size >= 1)
+     ? d.group_size : null,
+   ```
+   Every real wire bucket (`"2"`, `"4"`, `"5_plus"`…) is a STRING, so
+   the type check discarded them all and the renderer received `null`,
+   which prints "Group size not given".
+
+Fix: one place, one function, converts the bucket to the number the
+renderer wants:
+```js
+groupSize: (function (raw) {
+  if (raw == null) return null;
+  if (typeof raw === "number" && raw >= 1) return raw;  // legacy tolerated
+  if (raw === "just_me") return 1;
+  if (raw === "5_plus") return 5;
+  if (raw === "2" || raw === "3" || raw === "4") return parseInt(raw, 10);
+  return null;
+})(d.group_size),
+```
+
+### Tests
+- New: `tests/test_dashboard_reads_group_size_322.py` — 4 tests, includes
+  a behavioural test that runs the JS normalizer via `node -e` against
+  every bucket (`just_me→1`, `2→2`, `3→3`, `4→4`, `5_plus→5`, unknown→null).
+- Testing agent iteration 59 added `tests/test_e2e_322_group_size_roundtrip.py`
+  — 4 tests, does a real HTTP round-trip: POST /api/status → GET
+  /api/devices → run the dashboard normalizer on the returned bucket.
+  All pass.
+
+### Verification (testing_agent iteration 59)
+- New guard tests: 4/4 pass
+- Existing `test_group_size_185.py`: 30/30 pass (anti-double-count intact)
+- New E2E round-trip: 4/4 pass
+- Regression pack: 70/71 pass, 1 skip; only failure is the pre-existing
+  unrelated `test_b2_rescued_narrative_equals_table` (64 vs 70 rescued).
