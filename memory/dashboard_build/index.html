@@ -338,6 +338,74 @@
     font-size: 12.5px; color: var(--text, #222); margin: 5px 2px;
     line-height: 1.55; font-weight: 500;
   }
+
+  /* ── 2026-08-29 (Paul, task #3 "look identical to plain text") ────────
+     A `<details>` disclosure that is meaningful for the operator (e.g.
+     the tremor panel head, the admin-tools panel head, the "Show me who"
+     list in an export receipt) MUST read as a real button, not as a
+     bold heading with a triangle. `.qg-disclosure-btn` gives every such
+     <summary> a filled pill, a chevron that rotates on open, and a
+     focus ring. Apply by putting the class on the <summary>, or on the
+     parent <details> (both selectors covered). */
+  summary.qg-disclosure-btn,
+  details.qg-disclosure-btn > summary {
+    display: inline-flex; align-items: center; gap: 8px;
+    cursor: pointer;
+    font-size: 13px; font-weight: 700; line-height: 1.2;
+    padding: 8px 12px; min-height: 36px;
+    color: var(--text, #16202a);
+    background: var(--surface-2, #eef2f7);
+    border: 1px solid var(--border, #cbd0d8);
+    border-radius: 8px;
+    list-style: none;
+    user-select: none;
+    transition: background .12s ease, border-color .12s ease, box-shadow .12s ease;
+  }
+  summary.qg-disclosure-btn::-webkit-details-marker,
+  details.qg-disclosure-btn > summary::-webkit-details-marker { display: none; }
+  summary.qg-disclosure-btn::before,
+  details.qg-disclosure-btn > summary::before {
+    content: "▸";
+    font-size: 11px; line-height: 1; color: var(--text-muted, #667);
+    transition: transform .15s ease;
+  }
+  details.qg-disclosure-btn[open] > summary::before,
+  details[open] > summary.qg-disclosure-btn::before { transform: rotate(90deg); }
+  summary.qg-disclosure-btn:hover,
+  details.qg-disclosure-btn > summary:hover {
+    background: var(--surface-3, #e2e7ee);
+    border-color: var(--border-strong, #a9b1bc);
+  }
+  summary.qg-disclosure-btn:focus-visible,
+  details.qg-disclosure-btn > summary:focus-visible {
+    outline: 2px solid #2f6feb; outline-offset: 2px;
+  }
+
+  /* An anchor that acts as a button (e.g. "Refresh now" in the preview
+     panel meta line) must not read as an underlined body-copy hyperlink.
+     .qg-inline-btn upgrades a plain <a href="#" data-action="..."> into
+     a small, obviously-clickable chip. */
+  a.qg-inline-btn, button.qg-inline-btn {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 3px 10px;
+    border: 1px solid var(--border, #cbd0d8);
+    border-radius: 999px;
+    background: var(--surface, #fff);
+    color: var(--text, #17324f) !important;
+    text-decoration: none;
+    font-size: 12px; font-weight: 700; line-height: 1.4;
+    cursor: pointer;
+    min-height: 26px;
+    transition: background .12s ease, border-color .12s ease;
+  }
+  a.qg-inline-btn:hover, button.qg-inline-btn:hover {
+    background: var(--surface-2, #eef2f7);
+    border-color: var(--border-strong, #a9b1bc);
+  }
+  a.qg-inline-btn:focus-visible, button.qg-inline-btn:focus-visible {
+    outline: 2px solid #2f6feb; outline-offset: 2px;
+  }
+
   .qg-off-card {
     border: 1px solid var(--border, #cbd0d8); border-radius: 8px;
     padding: 10px; margin-bottom: 8px; font-size: 12.5px; line-height: 1.6;
@@ -3035,7 +3103,7 @@
       </div>
       <div style="margin-top:12px; font-size:11px; color:#888; text-align:right;">
         Last refreshed ${fmt(new Date())} ·
-        <a href="#" data-action="refresh">Refresh now</a>
+        <a href="#" class="qg-inline-btn" data-action="refresh">Refresh now</a>
       </div>
     `;
 
@@ -3525,7 +3593,44 @@
   }
   /* #298 — what this alarm was about, in order. */
   .qg-alarm-story { margin-top: 6px; }
-  .qg-alarm-story summary { cursor: pointer; font-size: 12.5px; color: #FFD9D9; }
+  /* 2026-08-29 (Paul): "controls that look like plain text" — a
+     disclosure inside an alarm card must read as a BUTTON, not as
+     underlined body copy. Same treatment for `.qg-alarm-names` below
+     and every other <summary> the operator can click. */
+  .qg-alarm-story summary,
+  .qg-alarm-names summary {
+    display: inline-flex; align-items: center; gap: 6px;
+    cursor: pointer; font-size: 12.5px; font-weight: 700;
+    color: #FFE9E9;
+    background: rgba(255,255,255,0.08);
+    border: 1px solid rgba(255,255,255,0.28);
+    border-radius: 6px;
+    padding: 4px 10px;
+    min-height: 28px;
+    line-height: 1.2;
+    list-style: none;                 /* hide the default triangle */
+    user-select: none;
+    transition: background .12s ease, border-color .12s ease;
+  }
+  .qg-alarm-story summary::-webkit-details-marker,
+  .qg-alarm-names summary::-webkit-details-marker { display: none; }
+  .qg-alarm-story summary::before,
+  .qg-alarm-names summary::before {
+    content: "▸";                     /* explicit expand indicator      */
+    font-size: 11px; line-height: 1;
+    transition: transform .15s ease;
+  }
+  .qg-alarm-story[open] > summary::before,
+  .qg-alarm-names[open] > summary::before { transform: rotate(90deg); }
+  .qg-alarm-story summary:hover,
+  .qg-alarm-names summary:hover {
+    background: rgba(255,255,255,0.16);
+    border-color: rgba(255,255,255,0.44);
+  }
+  .qg-alarm-story summary:focus-visible,
+  .qg-alarm-names summary:focus-visible {
+    outline: 2px solid #FFD34D; outline-offset: 2px;
+  }
   .qg-alarm-story ol { margin: 6px 0 0 18px; padding: 0; }
   .qg-alarm-story li { font-size: 12.5px; line-height: 1.45; margin-bottom: 3px; }
   .qg-alarm-story .qg-story-at { color: #B9C7D3; }
@@ -3565,7 +3670,8 @@
     min-height: 38px; align-self: center;
   }
   .qg-alarm-names { margin-top: 6px; font-size: 12.5px; }
-  .qg-alarm-names summary { cursor: pointer; }
+  /* Button treatment defined together with .qg-alarm-story above so both
+     disclosures inside an alarm card share the same look-and-feel. */
   .qg-alarm-names div { padding: 2px 0 2px 10px; }
   .qg-live-dot {
     width: 10px; height: 10px; border-radius: 50%;
@@ -6095,7 +6201,7 @@ window.QuakeAngelRescue = (function () {
      ═════════════════════════════════════════════════════════════════════ -->
 <details id="qg-tremor-panel" style="display:none; margin:12px 12px 4px; padding:6px 16px 14px;
      background:var(--surface); border:1px solid var(--border, #d0d3d9); border-radius:8px">
-  <summary style="cursor:pointer; font-size:14px; font-weight:700; color:var(--text); padding:10px 0; user-select:none">
+  <summary class="qg-disclosure-btn">
     Tremor notifications — what's been sent
   </summary>
   <div id="qg-tremor-panel-body" style="font-size:13px; color:var(--text); line-height:1.5">
@@ -6119,7 +6225,7 @@ window.QuakeAngelRescue = (function () {
      of this product" to an operator.
      ═════════════════════════════════════════════════════════════════════ -->
 <details id="qg-admintools" style="display:none; margin:16px 12px; padding:4px 16px 16px; background:var(--surface); border:1px dashed var(--border-strong, #999); border-radius:8px">
-  <summary style="cursor:pointer; font-size:14px; font-weight:700; color:var(--text); padding:10px 0; user-select:none">
+  <summary class="qg-disclosure-btn">
     🧪 Admin testing tools — Preview Mode &amp; radius override
   </summary>
   <div style="font-size:12px; color:var(--text-muted); margin:2px 0 10px">
@@ -6163,7 +6269,7 @@ window.QuakeAngelRescue = (function () {
      ═════════════════════════════════════════════════════════════════════ -->
 <details id="qg-devices-panel" style="display:none; margin:12px 12px 4px; padding:6px 16px 14px;
      background:var(--surface); border:1px solid var(--border, #d0d3d9); border-radius:8px">
-  <summary style="cursor:pointer; font-size:14px; font-weight:700; color:var(--text); padding:10px 0; user-select:none">
+  <summary class="qg-disclosure-btn">
     📱 Registered devices
   </summary>
   <div style="font-size:12px; color:var(--text-muted); margin:0 0 10px">
@@ -6655,8 +6761,41 @@ window.QuakeAngelRescue = (function () {
 (function () {
   var API_ORIGIN = "https://quake-alert-18.emergent.host";
   var SUMMARY_ENDPOINT = API_ORIGIN + "/api/public/summary";
-  var MALTA_CENTER = [35.8997, 14.5146];
+
+  // ── HOME position: fixed Malta + Gozo box, NEVER derived from markers ──
+  // Paul, 2026-08-29: "'Recentre on Malta' must go to a fixed home
+  // position showing Malta and Gozo, never a position worked out from
+  // wherever the markers happen to be." Same rule applies to the FIRST
+  // paint. Do NOT ever call fitBounds(markerGroup.getBounds()) or
+  // setView(marker.getLatLng()) as a "helpful" auto-focus — that is
+  // exactly what makes the map jump to Sicily when a stray test pin
+  // lands north-east of the group, or the search radius happens to
+  // include southern Sicily. The home position is a HARD-CODED
+  // rectangle covering both islands with a small sea margin.
+  //
+  //   Malta      35.79°N … 35.99°N , 14.18°E … 14.60°E
+  //   Gozo       36.02°N … 36.09°N , 14.18°E … 14.35°E
+  //   + margin so tiles don't sit flush against the frame
+  var MALTA_GOZO_BOUNDS = L.latLngBounds(
+    [35.78, 14.15],   // south-west corner (below Malta's south tip)
+    [36.11, 14.62]    // north-east corner (above Gozo's north tip)
+  );
+  // Kept for any external callers/tests that still read these names.
+  var MALTA_CENTER = [35.945, 14.385];   // geographic centre of Malta+Gozo
   var MALTA_ZOOM = 11;
+
+  function recentreOnMalta() {
+    // The one and only function allowed to move the map to "home".
+    // fitBounds is used because it guarantees BOTH islands are visible
+    // whatever the container's aspect ratio — a fixed centre+zoom cannot.
+    try { map.invalidateSize(false); } catch (_) {}
+    map.fitBounds(MALTA_GOZO_BOUNDS, {
+      padding: [24, 24],
+      animate: false,
+      maxZoom: 12,      // don't zoom in past a "both islands in view" level
+    });
+  }
+  window.qgRecentreOnMalta = recentreOnMalta;
 
   var mapWrap = document.getElementById("map-wrap");
   var mapEl = document.getElementById("map");
@@ -6664,7 +6803,10 @@ window.QuakeAngelRescue = (function () {
   // scrollWheelZoom OFF: a plain wheel over the map must scroll the PAGE,
   // never zoom. Paul got trapped zooming out to world view. Zoom is
   // Ctrl/Cmd+scroll (handled below), pinch, double-click or the +/- control.
-  var map = L.map("map", { scrollWheelZoom: false }).setView([35.8997, 14.5146], 13);
+  // Initial view uses the same fixed home rectangle as the Recentre
+  // button, applied AFTER the tile layer is attached (see below).
+  var map = L.map("map", { scrollWheelZoom: false }).fitBounds(
+    MALTA_GOZO_BOUNDS, { padding: [24, 24], animate: false, maxZoom: 12 });
   L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
     attribution: "&copy; OpenStreetMap contributors",
   }).addTo(map);
@@ -6775,9 +6917,13 @@ window.QuakeAngelRescue = (function () {
       var btn = L.DomUtil.create("button", "qg-recentre-btn");
       btn.type = "button";
       btn.textContent = "\u2302 Recentre on Malta";
-      btn.title = "Reset the map view to Malta";
+      btn.title = "Reset the map view to show Malta and Gozo";
       L.DomEvent.disableClickPropagation(btn);
-      btn.addEventListener("click", function () { map.setView(MALTA_CENTER, MALTA_ZOOM); });
+      // Uses recentreOnMalta() — a fixed Malta+Gozo bounding box.
+      // Never derives its target from the current marker set (that is
+      // exactly the bug it fixes: markers or a search radius could
+      // drag the "home" view to southern Sicily). See MALTA_GOZO_BOUNDS.
+      btn.addEventListener("click", function () { recentreOnMalta(); });
       return btn;
     },
   });
@@ -9741,7 +9887,7 @@ window.QuakeAngelRescue = (function () {
     var esc = window.qgEsc;
     var whoList = "";
     if (stayingReal > 0) {
-      whoList = "<details><summary>Show me who</summary><ul>";
+      whoList = '<details class="qg-disclosure-btn" style="margin-top:8px"><summary>Show me who</summary><ul>';
       stayingList.forEach(function (p) {
         var line = "<strong>" + esc(p.code || "No code") + "</strong> · " +
           esc(p.name || "No name given") + " · " + esc(p.words || "Asked for help");

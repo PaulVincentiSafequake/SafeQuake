@@ -3488,3 +3488,70 @@ undermines confidence for no reason. Removed:
     `qgGroupBadge` / `qgGroupLine` return the exact spec values across the
     full input range (null/1/2/3/5/7/10).
 
+
+---
+
+## Dashboard trio v2 (Paul, 2026-08-29) — DONE
+
+Three tightly-scoped fixes on `memory/dashboard_build/index.html`.
+
+### 1. "Recentre on Malta" now goes to a FIXED home position
+
+Verbatim: *"'Recentre on Malta' put me in southern Sicily — Scicli,
+Modica, Pozzallo on screen, Malta not visible at all. It must go to a
+fixed home position showing Malta and Gozo, never a position worked
+out from wherever the markers happen to be."*
+
+- New constant `MALTA_GOZO_BOUNDS = L.latLngBounds([35.78, 14.15], [36.11, 14.62])`
+  — a hard-coded rectangle covering both islands with a small sea margin.
+- New function `recentreOnMalta()` calls
+  `map.fitBounds(MALTA_GOZO_BOUNDS, { padding:[24,24], animate:false, maxZoom:12 })`.
+- The Recentre control button and the map's INITIAL paint BOTH go
+  through the same bounds — nothing derives the view from markers.
+
+### 2. Test people no longer drag the map away
+
+Same fix. The map is not moved by any data-load / marker code — no
+`fitBounds(markerGroup.getBounds())`, no `map.setView(marker.getLatLng())`.
+Guarded by `test_recentre_fixed_home.py::test_no_marker_derived_fitbounds_anywhere`
+which scans the file (with `//` comments scrubbed) for the forbidden
+patterns.
+
+### 3. Every "text-looking" control now reads as a button
+
+Found 7 patterns of controls that rendered as body-copy text:
+
+| # | What                                                         | Where |
+|---|--------------------------------------------------------------|-------|
+| 1 | "What happened" disclosure                                   | alarm cards (`.qg-alarm-story summary`) |
+| 2 | "Show me who (N)" disclosure                                 | alarm cards (`.qg-alarm-names summary`) — 2 templates |
+| 3 | "Tremor notifications — what's been sent" disclosure         | `#qg-tremor-panel > summary` |
+| 4 | "🧪 Admin testing tools — Preview Mode & radius override"    | `#qg-admintools > summary` |
+| 5 | "📱 Registered devices" disclosure                            | `#qg-devices-panel > summary` |
+| 6 | "Show me who" disclosure in export receipt                   | `whoList` template |
+| 7 | "Refresh now" inline anchor                                  | preview-panel meta line |
+
+Two new shared treatments now cover every one of them:
+
+- `.qg-alarm-story summary, .qg-alarm-names summary` — filled pill,
+  custom `▸` chevron that rotates on `[open]`, hover feedback,
+  visible focus ring, `list-style: none` and hidden
+  `::-webkit-details-marker` so the native triangle can't show.
+- `.qg-disclosure-btn` — reference-tier pill for admin/export
+  disclosures (used on all three admin heads and the export "Show me
+  who").
+- `.qg-inline-btn` — pill treatment for anchors used as buttons (used
+  on the "Refresh now" anchor).
+
+### Tests added
+- `tests/test_recentre_fixed_home.py` — 4 static-HTML asserts
+- `tests/test_text_buttons_are_buttons.py` — 4 static-HTML asserts
+
+### Verification
+- 8/8 guard tests pass locally and via testing_agent.
+- Playwright visual pass on a local `http.server`: Malta+Gozo visible
+  on initial paint AND after Recentre at both 1400×900 and 500×900
+  (narrow portrait). No Sicily creep. Alarm-card summaries, admin-tool
+  summaries and the "Refresh now" anchor all render as obvious pills
+  with chevrons and hover states.
+

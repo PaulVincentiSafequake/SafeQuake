@@ -20,7 +20,7 @@ import pytest
 import requests
 
 BASE_URL = os.environ.get("EXPO_PUBLIC_BACKEND_URL",
-                          "https://silent-device-mapper.preview.emergentagent.com").rstrip("/")
+                          "https://coverage-caveat-ui.preview.emergentagent.com").rstrip("/")
 ADMIN_TOKEN = os.environ.get("ADMIN_TRIGGER_PASSWORD", "m11vRwfDoxnHvIMLkKzjUwQy")
 
 
