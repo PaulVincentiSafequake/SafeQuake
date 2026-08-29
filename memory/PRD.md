@@ -3555,3 +3555,44 @@ Two new shared treatments now cover every one of them:
   summaries and the "Refresh now" anchor all render as obvious pills
   with chevrons and hover states.
 
+
+
+### Follow-up (2026-08-29, same day): map didn't fit the visible viewport
+
+Paul, verbatim: *"the map is taller than my browser window, so its
+centre sits below the fold. After pressing Recentre on Malta I still
+have to scroll down to see Malta at all."*
+
+Root cause: `#map-wrap` was `flex: 1 1 60%` in a wrapping flex row,
+so it grew to match the sidebar's tall intrinsic content (count pills,
+count notes, off-board area, walking-wounded list). On any typical
+laptop that pushed the map's centre below the fold — `fitBounds`
+framed Malta correctly INSIDE the div, but the div itself extended
+off-screen.
+
+Fix (single CSS edit):
+```css
+.layout { … align-items: flex-start; }
+#map-wrap {
+  align-self: flex-start;         /* decouple from sidebar height */
+  height: calc(100dvh - 220px);   /* fit visible viewport minus top chrome */
+  min-height: 340px;
+  max-height: 780px;
+}
+```
+
+`map.invalidateSize()` (already wired to load/resize via `fixMapSize`)
+picks up the new size automatically.
+
+Verification (testing_agent iteration 58):
+- 9/9 guard tests pass (including a new
+  `test_map_container_is_capped_to_the_visible_viewport`).
+- Geometric Playwright proof at four viewport sizes, on each the
+  `#map-wrap` bottom edge sits INSIDE `window.innerHeight`, and after
+  clicking "Recentre on Malta" `document.body.scrollTop === 0`:
+  | Viewport | wrap bottom | innerHeight | Fits? |
+  |---|---|---|---|
+  | 1440×900 | 884 | 900 | ✅ |
+  | 1366×768 | 752 | 768 | ✅ |
+  | 1280×720 | 704 | 720 | ✅ |
+  | 500×900 (mobile 50vh path) | 787 | 900 | ✅ |

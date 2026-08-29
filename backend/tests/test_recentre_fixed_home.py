@@ -76,3 +76,30 @@ def test_initial_map_paints_the_same_fixed_home_box():
     assert "L.map(\"map\", { scrollWheelZoom: false }).fitBounds(" in DASH
     # And there must be no leftover of the old setView(..., 13) init.
     assert 'setView([35.8997, 14.5146], 13)' not in DASH
+
+
+def test_map_container_is_capped_to_the_visible_viewport():
+    # 2026-08-29 (Paul, follow-up): "the map is taller than my browser
+    # window, so its centre sits below the fold. After pressing
+    # Recentre on Malta I still have to scroll down to see Malta."
+    #
+    # Root cause: `#map-wrap` was `flex: 1 1 60%` in a wrapping flex
+    # row, so it grew to match the SIDEBAR's tall intrinsic content
+    # (count pills, count notes, off-board, walking wounded list…),
+    # pushing the map's geometric centre below the viewport.
+    #
+    # Fix: `#map-wrap` gets a viewport-relative height AND
+    # `align-self: flex-start` so the sidebar's height no longer
+    # stretches it. Guard both so the fix cannot silently regress.
+    map_wrap_rule = DASH.split("#map-wrap {", 1)[1].split("}", 1)[0]
+    assert "align-self: flex-start" in map_wrap_rule, (
+        "#map-wrap must set `align-self: flex-start` so the sidebar's "
+        "intrinsic height does not stretch the map below the fold."
+    )
+    # A viewport-relative height cap must exist (100dvh preferred so
+    # mobile URL-bar toggling doesn't clip the map, but any of the
+    # viewport units is acceptable — just NOT a fixed pixel height).
+    assert any(unit in map_wrap_rule for unit in ("100dvh", "100vh", "100svh")), (
+        "#map-wrap must be sized against the viewport height so the "
+        "map fits inside the visible screen without scrolling."
+    )

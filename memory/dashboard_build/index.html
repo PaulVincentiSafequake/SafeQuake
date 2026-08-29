@@ -228,8 +228,34 @@
     .qg-sev-chip svg * { fill: #000 !important; stroke: #000 !important; }
   }
 
-  .layout { display: flex; flex: 1 1 auto; min-height: 420px; flex-wrap: wrap; }
-  #map-wrap { position: relative; flex: 1 1 60%; min-height: 400px; }
+  .layout { display: flex; flex: 1 1 auto; min-height: 420px; flex-wrap: wrap; align-items: flex-start; }
+  /* ── 2026-08-29 (Paul): the map must fit inside the visible screen ─────
+     Before: `#map-wrap` was flex-stretched to match the sidebar's
+     intrinsic height (count pills, count notes, off-board area, walking
+     wounded list…). On a laptop that pushed the map's geometric centre
+     BELOW the fold, so pressing "Recentre on Malta" fit Malta+Gozo
+     into a rectangle the user then had to scroll down to see.
+     After:
+       * `align-self: flex-start` on the map wrapper decouples its height
+         from the sidebar (the sidebar stays as tall as it needs to be
+         and the row no longer forces the map to grow with it).
+       * `height: calc(100dvh - 220px)` sizes the map to the visible
+         viewport minus a conservative top-chrome allowance (header +
+         sign-in banner + logo strip + coverage caveat). `dvh` is used
+         so mobile URL-bar transitions don't clip the map.
+       * `min-height` keeps it usable on tiny windows; `max-height`
+         stops it from becoming absurdly tall on 4k monitors.
+     `map.invalidateSize()` is already called on load, resize and a
+     couple of settle delays (fixMapSize), so Leaflet re-measures after
+     the container changes size. */
+  #map-wrap {
+    position: relative;
+    flex: 1 1 60%;
+    align-self: flex-start;
+    height: calc(100dvh - 220px);
+    min-height: 340px;
+    max-height: 780px;
+  }
   #map { position: absolute; inset: 0; }
   .map-filters {
     position: absolute;
