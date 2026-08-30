@@ -20,7 +20,7 @@ import pytest
 import requests
 
 BASE_URL = os.environ.get("EXPO_PUBLIC_BACKEND_URL",
-                          "https://rescue-alert-hub-3.preview.emergentagent.com").rstrip("/")
+                          "https://siren-fix.preview.emergentagent.com").rstrip("/")
 ADMIN_TOKEN = os.environ.get("ADMIN_TRIGGER_PASSWORD", "m11vRwfDoxnHvIMLkKzjUwQy")
 
 

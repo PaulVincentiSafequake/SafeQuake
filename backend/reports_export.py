@@ -920,15 +920,53 @@ def _short_codes_for(device_ids) -> dict:
     return codes
 
 
+async def _current_alert_start() -> Optional[datetime]:
+    """Start of the CURRENT alert = latest `push_events` row of kind
+    'trigger' (or legacy rows without a `kind`, which are triggers by
+    convention — see server.py:3925). Different from `_last_alert_start`
+    which returns the newest push_events row of any kind (including
+    `alert_stood_down`) — see #135."""
+    rows = await db.push_events.find(
+        {"$or": [{"kind": "trigger"}, {"kind": {"$exists": False}}]},
+        {"_id": 0, "created_at": 1},
+    ).sort("created_at", -1).to_list(1)
+    if not rows:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(rows[0].get("created_at")).replace("Z", "+00:00"))
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return None
+
+
 async def _trapped_since_map(device_ids) -> dict:
     """device_id -> ISO timestamp of the FIRST 'trapped' report of the
     current trapped spell (walks back until a non-trapped event breaks
-    the run). Drives 'Trapped for …' on cards and the team report."""
+    the run). Drives 'Trapped for …' on cards and the team report.
+
+    2026-02-XX (Paul, live-report bug): a person who reported trapped in
+    a PRIOR alert and was never explicitly marked safe/rescued would
+    carry that stale timestamp into a fresh alert — the dashboard showed
+    "Trapped for 2 hours 20 minutes" for someone who had reported four
+    minutes earlier, because the walk-back never hit a non-trapped event
+    between the two alerts. The current spell cannot start before the
+    current alert did, so we bound the ledger to `created_at >= current
+    alert start`. If there is no alert on record we fall back to the
+    original (unbounded) behaviour so pre-alert bootstrap data still
+    works."""
     ids = [d for d in device_ids if d]
     if not ids:
         return {}
+    alert_start = await _current_alert_start()
+    query: dict = {"device_id": {"$in": ids}}
+    if alert_start is not None:
+        # `recorded_at` is stored as an ISO-8601 UTC string (see
+        # server.py:406, 486). ISO-8601 UTC strings sort lexicographically
+        # the same way the timestamps do, so a string comparison is
+        # correct here and matches the sort() clause below.
+        query["recorded_at"] = {"$gte": alert_start.isoformat()}
     rows = await db.status_events.find(
-        {"device_id": {"$in": ids}},
+        query,
         {"_id": 0, "device_id": 1, "status": 1, "recorded_at": 1},
     ).sort("recorded_at", -1).to_list(20000)
     out: dict = {}

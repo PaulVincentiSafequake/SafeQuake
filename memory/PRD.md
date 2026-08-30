@@ -3734,3 +3734,56 @@ both the exact sentences and the absence of severity words.
 - 2/2 e2e round-trip tests pass.
 - 66/66 regression pack tests pass.
 
+
+---
+
+## 2026-02-XX — Dashboard "Trapped for …" clock started from the wrong time
+
+### Paul's report (verbatim)
+> On the dashboard, a person's pin says "Trapped for 2 hours and 20 minutes"
+> when they actually reported trapped less than 5 minutes earlier. I checked
+> twice, 4 minutes apart, and the number went up by exactly 4 minutes — so
+> it's a real clock, just starting from the wrong time. Can you find out
+> why it's not using their most recent report as the starting point, and
+> fix it?
+
+### Root cause
+`reports_export._trapped_since_map` walked back through the ENTIRE
+`status_events` ledger for the device. If a device reported "trapped" in a
+PRIOR alert and was never explicitly closed by a `safe` / `rescued` event,
+that stale timestamp was returned as the CURRENT-spell start when the
+device reported trapped again in a new alert. Two consecutive trapped
+events across two different alerts were being read as one long spell.
+
+### Fix
+- New helper `reports_export._current_alert_start()`: returns the
+  `created_at` of the latest `push_events` row of kind `trigger` (legacy
+  rows without a `kind` are triggers by convention; `alert_stood_down`
+  rows are explicitly ignored — a stand-down is NOT an alert start).
+- `_trapped_since_map` now bounds its ledger query with
+  `recorded_at >= _current_alert_start()`. Events strictly before the
+  current alert cannot be part of the current spell. When there is no
+  `push_events` on record we fall back to the original unbounded walk,
+  so bootstrap/test-only fixtures still work.
+
+### Tests
+- New: `tests/test_trapped_since_bounded_by_alert.py` — 10 unit tests
+  covering the verbatim Paul scenario, stand-down-after-prior-alert,
+  same-alert multi-trapped, safe-between-trapped, no-push-events
+  fallback, legacy-no-kind trigger, and the current-alert-start helper
+  contract.
+- New (added by testing_agent, iteration 62):
+  `tests/test_trapped_since_live_integration.py` — 2 tests, real HTTP
+  round-trip against `/api/devices` that seeds the verbatim Paul
+  scenario in MongoDB and asserts `trapped_since` equals the fresh
+  event (not the stale one), plus a device with only pre-alert trapped
+  events getting `trapped_since = null`.
+
+### Verification (testing_agent iteration 62)
+- 10/10 new unit tests pass.
+- 2/2 new live integration tests pass.
+- `test_export_hardening.py::test_devices_trapped_since_and_short_codes`
+  still passes (no regression).
+- 61/62 adjacent regression pack tests pass (the single failure —
+  `test_b2_rescued_narrative_equals_table` — is a pre-existing
+  regression unrelated to this fix, tracked separately).
