@@ -3787,3 +3787,59 @@ events across two different alerts were being read as one long spell.
 - 61/62 adjacent regression pack tests pass (the single failure —
   `test_b2_rescued_narrative_equals_table` — is a pre-existing
   regression unrelated to this fix, tracked separately).
+
+---
+
+## 2026-02-XX — Pin popup wording second pass (#332, second cut)
+
+### Paul's report (verbatim)
+> The pin popup still says "X people at this address" instead of the
+> wording we asked for: "They said X people are here. There may be more
+> we do not know about." Can you check where this text actually lives
+> on the popup, since the earlier change doesn't seem to have reached
+> it, and update it there?
+
+### Investigation
+The "X people at this address" wording was already removed in the first
+#332 pass (commit 53ebecf) — the current source has NO instance of that
+string. Paul was looking at the DEPLOYED GitHub Pages copy, which lags
+the repo until the site is redeployed. Confirmed with him. Not a code
+regression.
+
+### Wording change he asked for on top of that
+The first-pass wording was "App user said N people are here including
+them. There may be more we do not know about." Paul asked to tighten it
+to "They said N people are here. There may be more we do not know
+about." — dropping the "App user" category noun (reads awkward on a
+pin), and the "including them" clause (redundant because the mobile app
+already frames the question as "including you, how many people are
+here?" so the answer already includes the answerer).
+
+### Fix
+`window.qgGroupLine` in `memory/dashboard_build/index.html` (~line 1507)
+now emits:
+- null → "Group size not given"
+- 1    → "They said they are the only person here."
+- 2..4 → "They said N people are here. There may be more we do not know about."
+- 5+   → "They said 5 or more people are here. There may be more we do not know about."
+
+Both call sites — `popupHtml` (map popup, ~line 7885) and `itemHtml`
+(sidebar card, ~line 8024) — go through `qgGroupLine`, so the map pin
+and the sidebar card share the same string.
+
+### Tests
+Updated `tests/test_331_silent_since_alert_beats_rescued.py::TestGroupSizeWording`
+- 5 tests total, including new `test_qg_group_line_no_longer_says_app_user_or_including_them`
+  guard that fails if the old strings ever come back.
+- Behavioural node test now asserts the exact new sentences (anchored
+  with `^` and `$`) and adds `App user`, `including them` to the
+  leaked-forbidden-words check.
+
+### Verification (testing_agent iteration 63)
+- 5/5 TestGroupSizeWording tests pass.
+- 53/53 adjacent regression tests pass (test_dashboard_reads_group_size_322,
+  test_group_size_185, test_e2e_322_group_size_roundtrip,
+  test_iteration_60_step_b_e2e, full test_331).
+- Grep confirms no live code path emits the banned strings.
+- Redeploy required to make Paul see the change on the live GitHub
+  Pages dashboard.

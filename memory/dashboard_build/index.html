@@ -1509,13 +1509,20 @@
     // person told us — not something we know — and must NEVER read as
     // "N people are trapped". We only asked how many are here, not how
     // many are hurt.
+    //
+    // 2026-02-XX (Paul, second pass): tightened wording — "App user
+    // said" → "They said" (natural English at a glance), and the
+    // "including them" clause is dropped (the mobile app already asks
+    // "including you, how many people are here?" so "N people are
+    // here" already includes the answerer; the operator does not need
+    // that clause spelled out on the pin).
     if (n == null) return "Group size not given";
-    if (n <= 1) return "App user said they are the only person here.";
+    if (n <= 1) return "They said they are the only person here.";
     if (n >= 5) {
-      return "App user said 5 or more people are here including them. "
+      return "They said 5 or more people are here. "
         + "There may be more we do not know about.";
     }
-    return "App user said " + n + " people are here including them. "
+    return "They said " + n + " people are here. "
       + "There may be more we do not know about.";
   };
 

@@ -192,22 +192,27 @@ class TestDashboardBehavesTheSameWay:
 
 # ── 3. Wording change (#332) — the popup line reads as REPORTED ──────
 class TestGroupSizeWording:
-    """Verbatim from Paul: 'App user said 4 people are here including
-    them. There may be more we do not know about.' The line must not
-    say 'people at this address' (ambiguous — sounds like something we
-    know) and must never say those people are trapped (we only asked
-    how many are there, not how many are hurt)."""
+    """Verbatim from Paul (2026-02-XX, second pass): 'They said 4 people
+    are here. There may be more we do not know about.' The line must
+    not say 'people at this address' (ambiguous — sounds like something
+    we know) and must never say those people are trapped (we only asked
+    how many are there, not how many are hurt). Superseded the earlier
+    'App user said N people are here including them' wording — 'App
+    user' reads like a category noun rather than the person, and
+    'including them' is redundant because the mobile app asks
+    'including you, how many people are here?', so the answer already
+    includes the answerer."""
 
     def test_qg_group_line_uses_the_new_wording(self):
         body = _extract_function_body("window.qgGroupLine")
         # The exact user-authored sentence, one instance per plural
         # branch (2..4 and 5_plus).
         assert (
-            'App user said " + n + " people are here including them. '
+            'They said " + n + " people are here. '
             in body
         ), "qgGroupLine does not use the new n-people wording"
         assert (
-            'App user said 5 or more people are here including them. '
+            'They said 5 or more people are here. '
             in body
         ), "qgGroupLine does not use the new 5+ wording"
         assert "There may be more we do not know about." in body, (
@@ -222,6 +227,25 @@ class TestGroupSizeWording:
         body = _extract_function_body("window.qgGroupLine")
         assert "people at this address" not in body
         assert "Just this person" not in body
+
+    def test_qg_group_line_no_longer_says_app_user_or_including_them(self):
+        """Second-pass wording (2026-02-XX): the "App user said …
+        including them" phrasing is replaced by "They said … . The
+        old strings must be gone so a later drift back cannot go
+        unnoticed."""
+        body = _extract_function_body("window.qgGroupLine")
+        # Strip // comments before scanning so a comment that EXPLAINS
+        # the ban does not trip it.
+        scrub = re.sub(r"//[^\n]*", "", body)
+        assert "App user said" not in scrub, (
+            "qgGroupLine has regressed to the old 'App user said' "
+            "wording — Paul asked for 'They said' on the pin popup."
+        )
+        assert "including them" not in scrub, (
+            "qgGroupLine still carries the redundant 'including them' "
+            "clause — the mobile app already frames the question as "
+            "'including you', so the answer already includes them."
+        )
 
     def test_qg_group_line_never_implies_trapped(self):
         """Group size is a question about how many are here, not how
@@ -248,17 +272,17 @@ class TestGroupSizeWording:
             "const cases = ["
             "  [null, 'Group size not given'],"
             "  [1, /only person here/],"
-            "  [2, /App user said 2 people are here including them/],"
-            "  [3, /App user said 3 people are here including them/],"
-            "  [4, /App user said 4 people are here including them/],"
-            "  [5, /App user said 5 or more people are here including them/],"
+            "  [2, /^They said 2 people are here\\. There may be more we do not know about\\.$/],"
+            "  [3, /^They said 3 people are here\\. There may be more we do not know about\\.$/],"
+            "  [4, /^They said 4 people are here\\. There may be more we do not know about\\.$/],"
+            "  [5, /^They said 5 or more people are here\\. There may be more we do not know about\\.$/],"
             "];"
             "for (const [inp, want] of cases) {"
             "  const got = fn(inp);"
             "  const ok = want instanceof RegExp ? want.test(got) : got === want;"
             "  if (!ok) { console.error('BAD', JSON.stringify(inp), '->', got); process.exit(1); }"
-            "  if (typeof got === 'string' && /trapped|injured|hurt/i.test(got)) {"
-            "    console.error('LEAKED SEVERITY WORD:', got); process.exit(1);"
+            "  if (typeof got === 'string' && /trapped|injured|hurt|App user|including them/i.test(got)) {"
+            "    console.error('LEAKED FORBIDDEN WORD:', got); process.exit(1);"
             "  }"
             "}"
             "console.log('ok');"
