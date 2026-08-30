@@ -1505,10 +1505,18 @@
     return String(n);
   };
   window.qgGroupLine = function (n) {
+    // #332 (Paul, 2026-08-29): wording must make clear this is what the
+    // person told us — not something we know — and must NEVER read as
+    // "N people are trapped". We only asked how many are here, not how
+    // many are hurt.
     if (n == null) return "Group size not given";
-    if (n <= 1) return "Just this person";
-    if (n >= 5) return "5 or more people at this address";
-    return n + " people at this address";
+    if (n <= 1) return "App user said they are the only person here.";
+    if (n >= 5) {
+      return "App user said 5 or more people are here including them. "
+        + "There may be more we do not know about.";
+    }
+    return "App user said " + n + " people are here including them. "
+      + "There may be more we do not know about.";
   };
 
   // ── Coverage caveat: SINGLE source of truth ───────────────────────────
@@ -6991,8 +6999,10 @@ window.QuakeAngelRescue = (function () {
     if (u.map_color === null || u.map_color === undefined) {
       // Legacy fallback — mirrors the server-side rule set exactly. If
       // an old backend is deployed, the client still paints correctly.
-      if (u.status === "rescued") return null;
+      // #331 (2026-08-29): silent-since-alert overrides rescued, same
+      // doctrine as the backend map_color().
       if (u.silent_since_alert) return "red";
+      if (u.status === "rescued") return null;
       if (u.status === "safe") return "green";
       if (u.status === "trapped") return u.severity === "red" ? "red" : "yellow";
       return null;
@@ -7075,13 +7085,13 @@ window.QuakeAngelRescue = (function () {
     // ── #326 (2026-09-02 — Paul): read the server-derived colour first ──
     // The backend's people_counts.map_color is the single source of
     // truth. A phone alerted-but-silent comes back as RED here without
-    // us needing to know that fact locally. Rescued returns null so
-    // the code below can still route rescued to the rescued visual.
+    // us needing to know that fact locally.
     var mc = mapColorFor(u);
-    // Rescued keeps its own visual (green check inside a muted circle) —
-    // colour of a resolved case is a separate concern from the three
-    // live-answer colours.
-    if (u.status === "rescued") {
+    // #331 (2026-08-29 — Paul): silent-since-alert overrides an
+    // earlier rescued status on the live map. Rescued only keeps its
+    // own visual when the rescue still stands — i.e. we haven't
+    // alerted them since. See matchesFilter for the same doctrine.
+    if (u.status === "rescued" && !u.silent_since_alert) {
       return { kind: "rescued", color: "#1F8A3A", shape: "check", tag: "\u2713 found" };
     }
     if (mc === "red") {
@@ -7735,10 +7745,17 @@ window.QuakeAngelRescue = (function () {
   }
 
   function matchesFilter(u) {
-    // #297: rescued kept behind its own toggle. "Hidden by default while
-    // an alert is running, one toggle to show them. A resolved case is
-    // not wrong, so it does not get colour."
-    if (u.status === "rescued") return showRescuedOnMap;
+    // #331 (2026-08-29 — Paul): silent-since-alert reactivates a
+    // rescued record on the live map. Verbatim: "The moment an alert
+    // goes out, every phone we alerted shows red straight away. Being
+    // previously rescued cannot be an exception — those are exactly
+    // the people standing in a damaged building when an aftershock
+    // hits." So the rescued-toggle only hides people whose rescue
+    // still stands. A rescued-but-alerted person follows the RED
+    // toggle like anyone else silent-since-alert.
+    if (u.status === "rescued" && !u.silent_since_alert) {
+      return showRescuedOnMap;
+    }
     // #326 (2026-09-02 — Paul): three independent toggles for the three
     // answer colours. Off means REMOVED from the map, not faded ("must
     // actually remove those pins from the map, not just fade them.").

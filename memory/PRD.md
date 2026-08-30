@@ -3657,3 +3657,80 @@ groupSize: (function (raw) {
 - New E2E round-trip: 4/4 pass
 - Regression pack: 70/71 pass, 1 skip; only failure is the pre-existing
   unrelated `test_b2_rescued_narrative_equals_table` (64 vs 70 rescued).
+
+---
+
+## #331 — A new alert reactivates previously rescued/safe on the map
+
+Paul, verbatim: *"When a new alert fires, anyone previously marked safe
+or rescued stays hidden on the map until they answer. […] Being
+previously rescued cannot be an exception — those are exactly the
+people standing in a damaged building when an aftershock hits."*
+
+Root cause was a three-layer bug:
+1. `people_counts.map_color()` short-circuited on `rescued_at` BEFORE
+   checking `silent_since_alert`. A rescued phone we alerted again
+   never got a colour.
+2. Dashboard `matchesFilter` hid every `status === "rescued"` behind
+   the "Show rescued" toggle regardless.
+3. Dashboard `markerVisual` returned the green ✓ "found" visual for
+   every rescued row regardless.
+
+Fix (one function per layer):
+- Backend `map_color`: `silent_since_alert(row)` is the first check;
+  returns `"red"` unconditionally when true. Only falls through to
+  the rescued/safe/trapped branches when NOT silent-since-alert.
+- Dashboard `matchesFilter`: guard is now
+  `if (u.status === "rescued" && !u.silent_since_alert) return showRescuedOnMap;`
+- Dashboard `markerVisual`: same guard — rescued+silent draws the
+  SILENT-RED visual ("never answered" tag), not the ✓ found visual.
+- Dashboard `mapColorFor` legacy fallback: `silent_since_alert`
+  check re-ordered above `status === "rescued"`.
+
+**Nothing is deleted from the row.** `rescued_at`, `rescued_by`,
+`pre_rescue_status`, `pre_rescue_severity`, `pre_rescue_mobility`
+stay on `device_status`. `status_events` still contains the rescue
+entry. Verified end-to-end by testing_agent iteration 60: after
+stamping `last_alerted_at` on a rescued row, `/api/devices` returns
+`map_color=="red"`, `silent_since_alert==True`, and `rescued_at` +
+`rescued_by` + `status=="rescued"` are preserved byte-for-byte.
+
+## #332 — Group-size line reads as REPORTED, not KNOWN
+
+Paul, verbatim: *"Where the pin popup currently says '4 people at
+this address', change it to: 'App user said 4 people are here
+including them. There may be more we do not know about.' […] it
+must be clear this is what the person told us, not something we
+know. And it must never say those people are trapped — we only
+asked how many are there, not how many are hurt."*
+
+`window.qgGroupLine` rewritten to:
+```
+null → "Group size not given"
+1    → "App user said they are the only person here."
+2..4 → "App user said N people are here including them. There may be more we do not know about."
+5    → "App user said 5 or more people are here including them. There may be more we do not know about."
+```
+
+The words "at this address", "trapped", "injured", "hurt", "casualty"
+are all now banned inside `qgGroupLine` by a guard test. Behavioural
+`node -e` test runs the function against every bucket and confirms
+both the exact sentences and the absence of severity words.
+
+### Tests
+- New: `tests/test_331_silent_since_alert_beats_rescued.py` — 15
+  tests, incl. `node -e` behavioural on `qgGroupLine`.
+- Updated: `tests/test_326_map_derivation.py` — flipped
+  `test_rescued_beats_silent_since_alert` to
+  `test_silent_since_alert_beats_rescued`; added
+  `test_rescued_with_alert_only_when_updated_is_after` for the
+  ordering-matters boundary.
+- Added by testing agent (iteration 60):
+  `tests/test_iteration_60_step_b_e2e.py` — 2 tests, real HTTP
+  round-trip against the public backend URL proving the doctrine.
+
+### Verification (testing_agent iteration 60)
+- 46/46 new + updated guard tests pass.
+- 2/2 e2e round-trip tests pass.
+- 66/66 regression pack tests pass.
+

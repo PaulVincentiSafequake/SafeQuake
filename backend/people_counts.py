@@ -106,17 +106,21 @@ def silent_since_alert(row: Dict[str, Any]) -> bool:
 def map_color(row: Dict[str, Any]) -> Optional[str]:
     """The colour a pin must render as on the rescuer dashboard.
 
-    Locked mapping (Paul, 2026-09-02, #326):
-
-      * rescued_at set                     → None
-          (Off the map by default; the operator's Show-rescued toggle
-          adds them back with a rescued marker style, not a colour.)
+    Locked mapping (Paul, 2026-09-02, #326; extended 2026-08-29, #331):
 
       * silent-since-alert                 → "red"
-          Silence must never be invisible. Overrides the raw status —
-          a phone that used to report "safe" a week ago and got alerted
-          overnight comes back as RED because we have not heard from them
-          since we called out.
+          Silence must never be invisible. Overrides EVERYTHING —
+          including an earlier rescue or safe self-report. The moment
+          we broadcast an alert every phone we alerted comes back on
+          the live map as red until it speaks, because aftershocks hit
+          exactly the people we already marked rescued. The rescue
+          record itself is preserved on the row (rescued_at,
+          rescued_by, pre_rescue_*) so the history is intact — only
+          the LIVE map treatment changes.
+
+      * rescued_at set (and NOT silent-since-alert) → None
+          Off the map by default; the operator's Show-rescued toggle
+          adds them back with a rescued marker style, not a colour.
 
       * status == "safe" (self-reported)   → "green"
           Off the map by default. The operator's green toggle adds them.
@@ -136,10 +140,15 @@ def map_color(row: Dict[str, Any]) -> Optional[str]:
 
       * anything else                      → None
     """
-    if row.get("rescued_at"):
-        return None
+    # #331 (Paul, 2026-08-29): silence-since-alert ranks ABOVE rescued
+    # and safe. Verbatim: "Please make a new alert reset previously safe
+    # and rescued people back to red and visible, like everyone else,
+    # until they answer. Nothing is deleted — their earlier rescue stays
+    # in the history."
     if silent_since_alert(row):
         return "red"
+    if row.get("rescued_at"):
+        return None
     st = row.get("status")
     if st == "safe":
         return "green"

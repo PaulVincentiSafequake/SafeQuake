@@ -184,10 +184,38 @@ class TestMapColorUnit:
         assert map_color(row) is None
         assert last_known_position(row) is False
 
-    def test_rescued_beats_silent_since_alert(self):
-        row = {"status": "trapped", "severity": "red",
-               "last_alerted_at": _iso(_now()),
-               "rescued_at": _iso(_now())}
+    def test_silent_since_alert_beats_rescued(self):
+        """#331 (Paul, 2026-08-29): a new alert reactivates people
+        previously marked rescued — they were the exact ones standing
+        in a damaged building when an aftershock hits. Silent-since-
+        alert now overrides rescued for map colouring; the rescued_at
+        stays on the row so the earlier rescue remains in the history.
+        """
+        # rescued yesterday, alerted this morning, no report since.
+        yesterday = _iso(_now() - timedelta(hours=18))
+        this_morning = _iso(_now() - timedelta(minutes=15))
+        row = {"status": "rescued", "rescued_at": yesterday,
+               "updated_at": yesterday,
+               "last_alerted_at": this_morning}
+        assert silent_since_alert(row) is True
+        assert map_color(row) == "red"
+        # `last_known_position` still returns False because the person
+        # is red for the "never answered the new alert" reason, not for
+        # having answered-then-gone-quiet — same doctrine as any other
+        # silent-since-alert row.
+        assert last_known_position(row) is False
+
+    def test_rescued_with_alert_only_when_updated_is_after(self):
+        """The rescue still stands ONLY when the phone reported (or was
+        rescued, which stamps updated_at) AFTER the last alert. That is
+        the check silent_since_alert already does — this test pins the
+        boundary."""
+        old_alert = _iso(_now() - timedelta(hours=6))
+        rescued_later = _iso(_now() - timedelta(hours=1))
+        row = {"status": "rescued", "rescued_at": rescued_later,
+               "updated_at": rescued_later,
+               "last_alerted_at": old_alert}
+        assert silent_since_alert(row) is False
         assert map_color(row) is None
 
     def test_not_responding_without_alert_is_offmap(self):
