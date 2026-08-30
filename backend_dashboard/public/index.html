@@ -7322,9 +7322,31 @@ window.QuakeAngelRescue = (function () {
       //
       // Consumers: makeIcon (map badge), popupHtml (map popup line),
       // itemHtml (card line). Never a count aggregation.
-      groupSize: (typeof d.group_size === "number" && d.group_size >= 1)
-        ? d.group_size
-        : null,
+      //
+      // The wire is a STRING BUCKET, not a number — see the backend
+      // contract on StatusInPayload.group_size:
+      //   just_me | 2 | 3 | 4 | 5_plus
+      // The renderer wants a number so `qgGroupBadge`/`qgGroupLine`
+      // can decide "no badge for just me", "5+" for the top bucket
+      // etc. We do the string→number conversion in ONE place, here,
+      // so no downstream consumer has to know about the wire form.
+      // Anything unrecognised falls through to null so the popup
+      // honestly says "Group size not given" rather than pretending.
+      // (Before 2026-08-29 this line was a bare
+      //   typeof d.group_size === "number" && d.group_size >= 1
+      //   ? d.group_size : null
+      // which silently discarded every real bucket the backend sent
+      // — user reported 322: "the app has captured it and is showing
+      // it back to me, but it is not reaching the board". Root
+      // cause: dashboard was not reading the field it received.)
+      groupSize: (function (raw) {
+        if (raw == null) return null;
+        if (typeof raw === "number" && raw >= 1) return raw;  // legacy tolerated
+        if (raw === "just_me") return 1;
+        if (raw === "5_plus") return 5;
+        if (raw === "2" || raw === "3" || raw === "4") return parseInt(raw, 10);
+        return null;
+      })(d.group_size),
       // #146: server-computed. True for recognised test/synthetic device ids
       // and for rows an operator has tagged by hand (our own test check-ins
       // come from a real phone, so no id pattern can catch them).
