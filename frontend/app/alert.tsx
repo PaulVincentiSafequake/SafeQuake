@@ -275,6 +275,72 @@ export default function AlertScreen() {
     }
   }, [sirenStatus.playing, sirenPlayer]);
 
+  // ─── SIREN RESURRECTION (BUG-2026-09-volume-down-kills-siren) ─────────
+  // Paul, testing a Critical Alert siren: pressed volume-down once while
+  // the siren was playing. Instead of lowering the volume, the sound was
+  // killed completely, and turning volume back up did not bring it back.
+  //
+  // Root cause: on Android (and some iOS builds) the hardware volume-down
+  // key at a low media-stream level, plus any brief audio-focus loss from
+  // the volume-key UI, transitions the expo-audio player into a paused
+  // state. Nothing in the alert screen was watching for that transition,
+  // so a siren silenced by an OS event stayed silenced for the rest of
+  // the incident — which for a Critical Alert is unacceptable, since the
+  // audible cue is the whole point of the screen.
+  //
+  // The rule (Paul, verbatim): "Volume-down should keep it playing, just
+  // quieter." That is the OS's job for the *media stream volume*, and we
+  // must not interfere with it. Our job is to make sure the *player* keeps
+  // running so turning volume back up brings the sound back.
+  //
+  // Implementation:
+  //   - `wasPlayingRef` latches true the first time the player actually
+  //     reports playing. That way this effect can distinguish an initial
+  //     "not yet playing" state (nothing to resurrect) from a "was
+  //     playing, then paused externally" transition.
+  //   - When playing flips from true → false while shouldPlayRef.current
+  //     is still true (i.e. the user has NOT tapped I'm Safe / triage /
+  //     Dismiss and no stand-down has arrived), we re-call play() after
+  //     a 200 ms debounce.
+  //   - The debounce lets the KILL-SWITCH, the status="sent" safety net,
+  //     the unmount cleanup, and the stand-down branch all run first —
+  //     each of those flips shouldPlayRef.current to false, and the
+  //     timeout callback re-checks the ref before touching the player.
+  //     So resurrection can never resurrect a siren the user silenced,
+  //     which is the #31/#50 failure shape.
+  //   - We re-apply loop=true and volume=1.0 on resume, because those
+  //     are the player's own settings — separate from the OS media
+  //     stream volume that the hardware key legitimately controls.
+  const wasPlayingRef = useRef(false);
+  useEffect(() => {
+    if (sirenStatus.playing) {
+      wasPlayingRef.current = true;
+      return;
+    }
+    // playing === false from here down.
+    if (!sirenStatus.isLoaded) return;
+    if (!shouldPlayRef.current) return;
+    if (!wasPlayingRef.current) return;
+    const t = setTimeout(() => {
+      // Re-check the guard — the user (or a stand-down) may have
+      // silenced the siren during the debounce window. If so, do
+      // nothing; this is what protects #31/#50.
+      if (!shouldPlayRef.current) return;
+      try {
+        sirenPlayer.loop = true;
+        sirenPlayer.volume = 1.0;
+        sirenPlayer.play();
+        console.log("[QuakeAngel] SIREN resurrected after external pause");
+      } catch (e) {
+        console.log(
+          "[QuakeAngel] SIREN resurrect() threw:",
+          (e as Error)?.message,
+        );
+      }
+    }, 200);
+    return () => clearTimeout(t);
+  }, [sirenStatus.isLoaded, sirenStatus.playing, sirenPlayer]);
+
   // ─── FINAL SAFETY NET: status transitions to "sent" ───────────────────
   // Whenever a submission completes (safe or trapped), imperatively pause
   // the player one more time. stopSiren() ran synchronously the moment
