@@ -1,36 +1,36 @@
 <analysis>**original_problem_statement**: 
 PRODUCT REQUIREMENTS: 
-1. **Siren Volume Bug (New)**: Pressing the volume-down button during a Critical Alert completely kills the siren sound instead of lowering it. The siren needs to keep playing (quieter) when volume-down is pressed.
-2. **Dashboard Map Centering**: Ensure Recentre on Malta and initial map load use a fixed home position rather than deriving bounds from marker positions.
-3. **Dashboard Button Styling**: Convert text-based interactive controls to look like distinct buttons.
-4. **Group Size Rendering (Bug #322)**: Ensure group size submitted from the mobile app's alert flow correctly displays on dashboard map badges.
-5. **Previously Rescued User Visibility (Bug #331)**: Ensure previously rescued users turn red and are visible on the map as unconfirmed during a new alert.
-6. **Group Size Wording (Bug #332)**: Update map pin popup wording to clarify group size is user-reported.
+1. **Dashboard Map Centering**: Ensure Recentre on Malta and initial map load use a fixed home position rather than deriving bounds from marker positions.
+2. **Dashboard Button Styling**: Convert text-based interactive controls to look like distinct buttons.
+3. **Group Size Rendering (Bug #322)**: Ensure group size submitted from the mobile app's alert flow correctly displays on dashboard map badges.
+4. **Previously Rescued User Visibility (Bug #331)**: Ensure previously rescued users turn red and are visible on the map as unconfirmed during a new alert.
+5. **Trapped Timer Clock Bug**: Dashboard map pin Trapped for X time timer incorrectly calculates from old/historic alerts rather than the most recent alert start time.
+6. **Group Size Wording (Bug #332)**: Update map pin popup wording to exactly: They said X people are here. There may be more we do not know about.
 
 **User's preferred language**: English (INSTRUCT NEXT AGENT: You MUST respond in English only)
 
 **what currently exists?**: 
-A full-stack React Native/Expo mobile app (QuakeGuard) and FastAPI backend. Recent dashboard UI map fixes are pending user verification. A new critical bug regarding the alert siren being killed by the OS upon pressing the volume-down hardware key was just fixed by adding a siren resurrection effect in . 
+A full-stack React Native/Expo mobile app (QuakeGuard) and FastAPI backend with a custom HTML/JS dashboard. The agent has successfully implemented fixes for the trapped timer bug and the map pin group size wording. The local environment is healthy and tests are passing, except for two pre-existing, isolated backend test failures. 
 
 **Last working item**: 
-    - Last item agent was working: Fixing the Critical Alert siren bug. The OS was interrupting the audio stream when hardware volume keys were pressed. The agent added an auto-resume/resurrection effect monitoring the  inside . 
+    - Last item agent was working: Fixing the map pin group size wording to They said X people are here. There may be more we do not know about. The agent discovered that the user was seeing old wording (X people at this address) because they were looking at the live deployed GitHub Pages site, not the local dev environment where recent changes are committed.
     - Status: USER VERIFICATION PENDING
     - Agent Testing Done: Y
-    - Which testing method agent to use? NA (Already tested via  and Pytest source tests)
+    - Which testing method agent to use? NA (Already verified via  in iteration 63)
     - User Testing Done: N
 
 **All Pending/In progress Issue list**:  
-  Issue 1: Resolve GitHub Merge Conflicts for  (From earlier fork)
-     - Attempted fixes: Agent previously mapped out conflict files.
-     - Next debug checklist: Check if the user wants to resolve the merge conflict. If so, ask them to paste the conflict blocks. 
-     - Why fix this issue and what will be achieved with the fix? Required to safely deploy previous and current work to production.
+  Issue 1: Resolve GitHub Merge Conflicts for  to unblock Deployment
+     - Attempted fixes: Identified that user cannot see new changes on their deployed GitHub pages dashboard because of pending merge conflicts preventing a new deploy.
+     - Next debug checklist: Check if the user wants to resolve the merge conflict so they can deploy the dashboard and verify fixes live. Ask them to paste the conflict blocks. 
+     - Why fix this issue and what will be achieved with the fix? Required to safely deploy previous and current work to production (GitHub pages dashboard).
      - Status: BLOCKED (Waiting on user git conflict blocks)
      - Is recurring issue? N
      - Should Test frontend/backend/both after fix? NA
      - Blocked on other issue: None
 
   Issue 2: Test failure in 
-     - Attempted fixes: None. Identified as a pre-existing failure during the current test suite run for the siren fix.
+     - Attempted fixes: None. Identified as a pre-existing failure during previous test suite runs.
      - Next debug checklist: Check . 
      - Why fix this issue and what will be achieved with the fix? Restore full CI/test suite passing state.
      - Status: NOT STARTED
@@ -62,8 +62,10 @@ A full-stack React Native/Expo mobile app (QuakeGuard) and FastAPI backend. Rece
     - Group triage list by location (#188) - P4
 
 **Completed work in this session**
-- Fixed urgent siren bug: Hardware volume-down key press no longer kills the Critical Alert siren permanently. Implemented siren resurrection in  (DONE)
-- Created  to cover the scenario (DONE)
+- Fixed Dashboard Trapped Timer Bug: Bounded  in  and  to only calculate trapped duration from the start of the current alert (), ignoring stale historic trapped status events. (DONE)
+- Created . (DONE)
+- Updated Dashboard Map Pin Wording: Modified  in  to output exact requested phrasing (They said X people are here. There may be more we do not know about.). (DONE)
+- Updated tests in  to validate the new wording. (DONE)
 
 **Earlier issues found/mentioned but not fixed**
    Issue 1: Test failure in  (See Pending Issues above).
@@ -77,25 +79,30 @@ A full-stack React Native/Expo mobile app (QuakeGuard) and FastAPI backend. Rece
 **Code Architecture**
 /app
 ├── frontend
-│   ├── app/ (alert.tsx)
-│   ├── src/utils/
+│   ├── app/ (Expo App)
 ├── backend
+│   ├── server.py (FastAPI core server)
+│   ├── reports_export.py
 │   ├── tests/
 ├── memory
-    ├── PRD.md 
+│   ├── dashboard_build/ (index.html)
+│   ├── PRD.md 
 
 **Key Technical Concepts**
-React Native, Expo (), FastAPI, MongoDB.
+React Native, Expo, FastAPI, MongoDB, Custom HTML/JS dashboard parsing.
 
 **key DB schema**
-  - : {device_id, status, severity, group_size, rescued_at, last_alerted_at, updated_at, ...}
+  - : Append-only ledger of device status reports.
+  - : Records of alerts broadcasted to devices.
 
 **changes in tech stack**
   - None
 
 **All files of reference** 
-  -  (Updated to handle OS audio stream interruptions)
-  -  (New test file)
+  -  &  (Updated  to enforce alert boundaries)
+  -  (New test file for timer logic)
+  -  (Updated group size text strings)
+  -  (Updated text string assertions)
 
 **Areas that need refactoring**: 
   - : Extremely large (>2700 lines). Noted by the testing agent for a future refactor.
@@ -106,18 +113,21 @@ React Native, Expo (), FastAPI, MongoDB.
   -  
 
 **Critical Info for New Agent** 
-- A high-priority fix for the siren audio was just pushed and thoroughly verified via the . 
-- Start by confirming with the user that the audio bug fix is complete and verify if they want to move to the remaining tasks (like the Home screen redesign #258 or addressing the two pre-existing backend test failures).
-- Avoid manually triggering  tests unless requested, as  is known to be failing from the branch state prior to this fix.
+- User verified they were testing against the live GitHub pages URL instead of the local preview environment, meaning they won't see recent dashboard fixes until a deployment happens. However, deployment is currently BLOCKED by unmerged GitHub conflicts on  (carried over from earlier). 
+- Your first step should be to ask the user if they want to resolve the merge conflict so they can push the newly committed code to GitHub Pages and verify the fixes on their live dashboard. 
+- Ignore the two pre-existing backend test suite failures unless the user explicitly asks to address them.
 
 **documents and test reports created in this job** 
   - 
+  - 
+  - 
 
 **Last 10 User Messages and any pending HUMAN messages** 
- 1. *User:* Please use ask_human tool and confirm your plan now. (Acknowledged, tool called)
- 2. *User:* the siren issue (send this one first, it's the most urgent): Testing a Critical Alert siren... pressed volume-down... killed sound completely... Can you find out why and fix it? (Fixed)
- 3. *User:* Reminder to use testing_agent for bugs. (Done)
- *(Pending Human Verification on the Siren Audio Fix).*
+ 1. *User:* On the dashboard, a person's pin says Trapped for 2 hours and 20 minutes when they actually reported trapped less than 5 minutes earlier... Can you find out why it's not using their most recent report as the starting point, and fix it? (Fixed)
+ 2. *User:* Reminder to use testing_agent for bugs. (Done)
+ 3. *User:* The pin popup still says X people at this address instead of the wording we asked for: They said X people are here. There may be more we do not know about. Can you check where this text actually lives... (Clarified and Fixed)
+ 4. *User:* <ask_human_response>Where are you seeing X people at this address?: **On the deployed dashboard URL (GitHub Pages)**... Wording you actually want on the popup:: **Change to your paraphrase: They said 3 people are here. There may be more we do not know about.**</ask_human_response> (Fixed logic, user needs to deploy)
+ *(No pending human messages).*
 
 **Project Health Check:**
 Healthy, though two backend test suites are failing ( and ). 
@@ -137,4 +147,4 @@ Healthy, though two backend test suites are failing ( and ).
 Check 
 
 **What agent forgot to execute**
-Nothing. The urgent bug was addressed and tested perfectly.</analysis>
+Nothing overlooked, but the user is testing the live GitHub Pages dashboard which hasn't been deployed yet. Ensure you offer to help unblock the git merge conflicts so they can deploy and verify.</analysis>

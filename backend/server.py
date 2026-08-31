@@ -425,10 +425,34 @@ async def post_status(payload: StatusInPayload):
          "needs_extraction": 1, "synthetic": 1},
     )
     returning = bool((prior or {}).get("resolved_at"))
+    # ── #341 (2026-09-04 — Paul): last-known location must survive a
+    # locationless check-in ────────────────────────────────────────────
+    # Old behaviour: `$set: doc` unconditionally wrote latitude/longitude,
+    # so a re-check that came in without a GPS fix (permission revoked,
+    # indoors, quick-answer flow, or a pre-permission app version) NULLED
+    # a previously-known location. The dashboard would then show the
+    # person on the working board with no pin on the map, and no
+    # explanation. That is exactly the QQ43D symptom Paul reported.
+    #
+    # Rule: software may only move a record TOWARDS being useful on the
+    # map (get a fix → store it; get a better fix → update it). It may
+    # never erase a previously-known fix on its own. `last_known_position`
+    # on the row already signals "this is where they WERE" so the pin can
+    # render as a last-known outline without pretending it is live.
+    #
+    # Implementation: pull lat/lng out of the doc before writing when the
+    # new payload has neither. Keep everything else as-is so a stale row
+    # cannot lock other fields (status, battery, group_size) in place.
+    set_doc = dict(doc)
+    if set_doc.get("latitude") is None and set_doc.get("longitude") is None:
+        set_doc.pop("latitude", None)
+        set_doc.pop("longitude", None)
+        # Accuracy without coordinates is meaningless; keep it paired.
+        set_doc.pop("accuracy_m", None)
     # Upsert latest state.
     await db.device_status.update_one(
         {"device_id": doc["device_id"]},
-        {"$set": doc, "$setOnInsert": {"created_at": now},
+        {"$set": set_doc, "$setOnInsert": {"created_at": now},
          # #268: a check-in proves the app is installed and the person is
          # answering, so both the operator's resolution and the durable
          # "app removed" stamp are cleared. This is the ONLY place either

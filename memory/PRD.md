@@ -3843,3 +3843,46 @@ Updated `tests/test_331_silent_since_alert_beats_rescued.py::TestGroupSizeWordin
 - Grep confirms no live code path emits the banned strings.
 - Redeploy required to make Paul see the change on the live GitHub
   Pages dashboard.
+
+## #341 — Card note + preserve last-known location (2026-09-04)
+
+### Symptom (Paul, verbatim)
+> QQ43D is tracked as trapped, with a full history in the alarm panel
+> and counted in "1 TRAPPED" — but it has no pin anywhere on the map.
+> Can you check whether this device has a saved location? If it
+> doesn't, please add a plain note on its card saying so, instead of
+> it just having no pin with no explanation. If it does have a
+> location, something is failing to draw the pin — please find out
+> why.
+
+### Root cause (two-part)
+1. Every check-in through `POST /api/status` used `{"$set": doc}` on
+   `db.device_status`, so a re-check that arrived WITHOUT lat/lng
+   (permission revoked, indoors, quick-answer flow, pre-permission
+   build) unconditionally nulled a previously-known fix. Result: pin
+   silently vanishes even though the row is still on the board.
+2. The dashboard card (`itemHtml` in `memory/dashboard_build/index.html`)
+   said nothing when a person had no coordinates. Operator saw a card
+   in "1 TRAPPED" with no matching pin and no explanation.
+
+### Fix
+- **Backend (`/app/backend/server.py` post_status handler):**
+  Build a sanitized `set_doc` and, if both new lat and lng are None,
+  pop `latitude`, `longitude`, and `accuracy_m` before `update_one`.
+  Rule: software may improve the map (fresh fix → stored) but never
+  erase it (locationless report → previous fix stands).
+- **Dashboard (`/app/memory/dashboard_build/index.html` itemHtml):**
+  New `hasLoc` guard, new `noLocLine` rendered between `battLine` and
+  `groupLine`, dedicated `.qg-card-no-loc` style (muted grey — a
+  fact, not a failure). Exact wording: *"📍 No saved location — this
+  phone never shared its position, so there is no pin on the map for
+  them."*
+
+### Tests
+- `/app/backend/tests/test_341_no_pin_note_and_location_preserved.py`
+  (7 tests: card sentence, hasLoc guard, HTML splice, CSS class,
+  preservation of prior coords, fresh-fix overwrites, static server
+  guard against `$set: doc` regression).
+- `/app/backend/tests/test_341_live_http.py` (3 tests: live POST
+  /api/status confirms round-trip through Mongo).
+- 10/10 pass. 58 adjacent regression tests still green.
