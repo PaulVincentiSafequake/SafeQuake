@@ -533,6 +533,16 @@
     color: #7a1216; background: #fdecec; border: 1px solid #e5b4b7;
     border-radius: 5px; padding: 3px 6px; display: inline-block;
   }
+  /* Explains WHY this person has no pin on the map. Without this note
+     the operator sees a card in "1 TRAPPED" with no matching pin and
+     has no way to tell if the map broke or if the phone simply never
+     shared its location. Muted-grey, not alarming red — a fact, not a
+     failure of the app. */
+  .qg-card-no-loc {
+    font-size: 12px; font-weight: 600; margin: 3px 0;
+    color: #4a5561; background: #f2f4f7; border: 1px solid #d7dde3;
+    border-radius: 5px; padding: 3px 6px; display: inline-block;
+  }
   .stat {
     flex: 1 1 calc(50% - 5px);
     background: #fff;
@@ -7928,6 +7938,22 @@ window.QuakeAngelRescue = (function () {
     var egressLine = u.needsExtraction
       ? '<div class="qg-card-batt-low">🚪 Cannot get out on their own — extraction needed (a team with cutting gear). Injuries may still be minor.</div>'
       : "";
+    // #341 (2026-09-04 — Paul): if this device has never shared a
+    // location, say so on the card. Without this note the operator sees
+    // a person in "1 TRAPPED" with no matching pin and has to guess
+    // whether the map is broken or the phone simply never sent GPS.
+    // A phone can end up here for real reasons — location permission
+    // denied, indoors with no fix at the moment of the alert, or a
+    // pre-permission app version — and the answer to "should I keep
+    // looking on the map?" is "no, there is nothing to look for".
+    // We check for null/undefined on either coordinate; a genuine 0/0
+    // never occurs on Malta so a string zero from a stale row still
+    // counts as "no location" here rather than pinning off Africa.
+    var hasLoc = (u.latitude != null && u.longitude != null &&
+                  !(Number(u.latitude) === 0 && Number(u.longitude) === 0));
+    var noLocLine = hasLoc
+      ? ""
+      : '<div class="qg-card-no-loc">📍 No saved location — this phone never shared its position, so there is no pin on the map for them.</div>';
     // C1: silence is information, and its two kinds must not look the same.
     // #268 (2026-08-21 — Paul): now FOUR kinds, decided server-side in
     // record_state.py, and the label is whatever an operator would say out
@@ -8032,7 +8058,7 @@ window.QuakeAngelRescue = (function () {
     return bulkCheck + head + trappedLine + egressLine + silenceLine +
       '<div class="meta">' + statusLabel(u.status, u.severity) + (mob ? " · " + mob : "") +
       (lowBatt ? "" : " · Battery " + (u.batteryPercent != null ? u.batteryPercent : "?") + "%") + "</div>" +
-      battLine + groupLine + updLine + rescueSlot + askBtn + histBtn + testBtn + offBtn +
+      battLine + noLocLine + groupLine + updLine + rescueSlot + askBtn + histBtn + testBtn + offBtn +
       '<div class="qg-off-panel" id="qg-off-panel-' + u.deviceId + '" hidden></div>';
   }
 
