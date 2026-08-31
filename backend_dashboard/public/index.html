@@ -3715,6 +3715,15 @@
     padding: 5px 8px; border-radius: 4px;
   }
   .qg-alarm-meta { font-size: 12px; margin-top: 4px; color: #E0BDBD; }
+  /* #341: says WHY there is no pin on the map for this alarm's
+     person. Amber over the dark alarm-panel background, not red — a
+     fact about missing information, distinct from a severity warning
+     and distinct from the muted-grey sidebar version. */
+  .qg-alarm-no-loc {
+    font-size: 12.5px; font-weight: 600; margin-top: 6px;
+    padding: 5px 8px; border-radius: 5px;
+    color: #2A1F00; background: #F6D477; border: 1px solid #C99A2E;
+  }
   .qg-alarm-ack {
     background: #fff; color: #7A0B0B; border: 0; border-radius: 8px;
     padding: 8px 12px; font-size: 13.5px; font-weight: 700; cursor: pointer;
@@ -9268,6 +9277,24 @@ window.QuakeAngelRescue = (function () {
               storyHtml(p) + "</div>";
           }).join("") + "</details>";
       }
+      // #341 (Paul, 2026-09-04 — live re-test): if this alarm's person
+      // has no saved location, say so on the card. Without it the
+      // operator sees a red NEEDS HELP with no matching map pin and no
+      // way to tell whether the map broke or the phone simply never
+      // shared its position. Muted amber — a fact about missing info,
+      // not a failure warning. For multi-person minute-clusters, name
+      // how many are missing so a partial gap is not hidden.
+      var noLocLine = "";
+      if (g.count === 1 && g.has_location === false) {
+        noLocLine =
+          '<div class="qg-alarm-no-loc">📍 No saved location — this phone never shared its position, so there is no pin on the map for them.</div>';
+      } else if (g.count > 1 && g.missing_location_count > 0) {
+        var n = g.missing_location_count;
+        var of = g.count;
+        noLocLine =
+          '<div class="qg-alarm-no-loc">📍 ' + n + ' of ' + of +
+          ' have no saved location — those phones never shared their position, so no pin is drawn for them on the map.</div>';
+      }
       // #298 (Paul, 2026-08-25): "if I was an operator, I have no idea what
       // all that was about." A single-person alarm now carries its own
       // story — what was reported, what has happened since, who
@@ -9294,6 +9321,7 @@ window.QuakeAngelRescue = (function () {
             (acked && g.ack_by
               ? " · acknowledged by " + window.qgEsc(g.ack_by) + " at " + window.qgEsc(window.qgTime(g.ack_at))
               : "") + "</div>" +
+          noLocLine +
           story +
           names +
         "</div>" +
