@@ -3886,3 +3886,49 @@ Updated `tests/test_331_silent_since_alert_beats_rescued.py::TestGroupSizeWordin
 - `/app/backend/tests/test_341_live_http.py` (3 tests: live POST
   /api/status confirms round-trip through Mongo).
 - 10/10 pass. 58 adjacent regression tests still green.
+
+## #341 follow-up — Alarm-panel card also carries the note (2026-09-04)
+
+### Symptom (Paul, verbatim)
+> We checked live: the code for the "no saved location" note is
+> deployed and correct, but it does not appear on the red "NEEDS HELP"
+> alarm card for QQ43D — that card only shows the alarm history,
+> nothing about location.
+
+### Root cause
+The first #341 pass added the note only to the SIDEBAR triage card
+(`itemHtml`). Paul was reading the ALARM PANEL card, populated by
+`GET /api/admin/alarms` from `board_alarms.list_open()`. Different data
+source, different renderer, no location fields flowing through.
+
+Live probe (testing_agent, iteration 65): 76 of 83 open alarms on
+Paul's live DB have `has_location=False`, and 1 has a partial gap
+(4/6 devices missing coords). So QQ43D isn't unusual — most alerted
+phones on that deployment never shared a location.
+
+### Fix
+- **`/app/backend/board_alarms.py` `list_open()`**: batched
+  `db.device_status.find({device_id: {$in: [...]}})` lookup builds a
+  `_has_location` per row. Group fold sets `has_location` (strict-AND
+  across members) and `missing_location_count`. Every person in
+  `groups[].people[]` carries `has_location`.
+- **`/app/memory/dashboard_build/index.html` alarm renderer** (~9276):
+  emits `noLocLine` when `g.has_location === false`. Single-person
+  wording matches the sidebar exactly; multi-person cluster says
+  "N of M have no saved location". Amber-on-dark styling
+  (`.qg-alarm-no-loc`) distinct from the muted-grey sidebar variant.
+
+### Tests
+- `/app/backend/tests/test_341_alarm_card_no_loc_note.py` (8 tests:
+  renderer wording, guard on `g.has_location === false`, partial-gap
+  message, HTML splice position, dedicated CSS class, backend fold-up
+  in 4 shape variants).
+- Adjacent regression suite (test_board_alarms_296, test_303, test_304,
+  test_268 e2e, test_alarm_panel_clicks_302, test_alarm_buttons_never_
+  covered_307) plus prior #341 tests: 85 passing.
+
+### How to inspect a device's saved location on record
+`GET /api/admin/device-history/{device_id}` returns every status event
+with `latitude`/`longitude` per event AND the current row. For QQ43D
+this endpoint answers "does this device have any location on file"
+without needing a Mongo shell.

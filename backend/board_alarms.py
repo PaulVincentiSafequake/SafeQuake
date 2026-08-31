@@ -735,6 +735,40 @@ async def list_open(db, now: Optional[datetime] = None,
     )
     rows = merged_rows
 
+    # #341 (Paul, 2026-09-04 — live re-test): the alarm card must say
+    # when a person has no saved location. Paul reported QQ43D on a
+    # NEEDS HELP card with no pin on the map and no explanation on the
+    # card itself. The triage-sidebar card already carries the note; the
+    # alarm card needs the same fact so an operator reading the alarm
+    # panel does not have to cross-reference the sidebar to understand
+    # why the pin is missing.
+    #
+    # Batched device_status lookup by device_id — single query per
+    # list_open() call, no per-alarm chatter. A person "has a saved
+    # location" when both latitude and longitude are numbers; anything
+    # else (missing field, None, empty) counts as no location.
+    _dids = sorted({r.get("device_id") for r in rows if r.get("device_id")})
+    _has_loc: Dict[str, bool] = {}
+    if _dids:
+        try:
+            async for st in db.device_status.find(
+                {"device_id": {"$in": list(_dids)}},
+                {"_id": 0, "device_id": 1, "latitude": 1, "longitude": 1},
+            ):
+                did = st.get("device_id")
+                if not did:
+                    continue
+                lat = st.get("latitude")
+                lng = st.get("longitude")
+                _has_loc[did] = (
+                    isinstance(lat, (int, float)) and isinstance(lng, (int, float))
+                )
+        except Exception as e:
+            logging.warning(f"alarm has_location lookup failed: {e}")
+    # Attach the flag to every row so it flows into `people` below.
+    for r in rows:
+        r["_has_location"] = bool(_has_loc.get(r.get("device_id"), False))
+
     unacked = [r for r in rows if not r.get("ack_at")]
     # #306 (Paul, 2026-08-23): "quiet for a day does not mean resolved...
     # no sound, but they must never be invisible." A permanent line, always
@@ -800,6 +834,18 @@ async def list_open(db, now: Optional[datetime] = None,
         g["count"] = count
         g["is_test"] = all(bool(m.get("is_test")) for m in g["members"])
         g["acknowledged"] = len(g["unacked_ids"]) == 0
+        # #341: fold the per-member `has_location` up to the card. For a
+        # single-person alarm the flag mirrors that person exactly. For a
+        # multi-person minute-cluster we also count how many are missing
+        # a saved location so the card can say "3 of 5 have no saved
+        # location" instead of hiding a partial gap.
+        _no_loc = [m for m in g["members"] if not m.get("_has_location")]
+        if count == 1:
+            g["has_location"] = bool(g["members"][0].get("_has_location"))
+            g["missing_location_count"] = 0 if g["has_location"] else 1
+        else:
+            g["has_location"] = len(_no_loc) == 0
+            g["missing_location_count"] = len(_no_loc)
         # #289: what has happened SINCE. For a single-person alarm it is the
         # person's newest report; in a group it would be several different
         # facts, so the group line says how many have moved on and the
@@ -842,6 +888,13 @@ async def list_open(db, now: Optional[datetime] = None,
                 "since_report": m.get("since_report"),
                 # #301: labelled, never hidden inside a real-looking row.
                 "is_test": bool(m.get("is_test")),
+                # #341 (Paul, 2026-09-04): does this device have a saved
+                # latitude/longitude on device_status? Drives the "no
+                # saved location" note on the alarm card, so an operator
+                # reading a red NEEDS HELP row never has to guess whether
+                # the map is broken or the phone simply never shared its
+                # position. False when either coord is missing/null.
+                "has_location": bool(m.get("_has_location")),
                 # #298 (Paul, 2026-08-25): "if I was an operator, I have no
                 # idea what all that was about." Every alarm now carries its
                 # own short story — what was reported when it was raised,
