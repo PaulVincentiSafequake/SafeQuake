@@ -154,7 +154,7 @@ def test_no_raw_selector_leaks_into_the_operator_message():
     src = _src()
     assert "covered by \" + what" not in src, "old raw-name leak still present"
     assert "These buttons are being covered by something else on the page (\"" not in src
-    marker = "The alarm-panel buttons are sitting behind "
+    marker = "Something in the alarm card is sitting behind "
     assert marker in src, "new plain-English warning is missing"
     msg_start = src.index(marker)
     msg_end = src.index(";", msg_start)

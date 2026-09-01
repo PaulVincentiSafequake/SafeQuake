@@ -538,10 +538,16 @@
      has no way to tell if the map broke or if the phone simply never
      shared its location. Muted-grey, not alarming red — a fact, not a
      failure of the app. */
+  /* #342 (Paul, 2026-09-05): was `display: inline-block` — an inline
+     block can share a line with a neighbouring inline element (e.g.
+     the group-size badge below), which produced the same visual
+     collision family as the alarm-panel bug. `block` + full width
+     forces its own line, always. */
   .qg-card-no-loc {
-    font-size: 12px; font-weight: 600; margin: 3px 0;
+    font-size: 12px; font-weight: 600; margin: 4px 0;
     color: #4a5561; background: #f2f4f7; border: 1px solid #d7dde3;
-    border-radius: 5px; padding: 3px 6px; display: inline-block;
+    border-radius: 5px; padding: 4px 8px;
+    display: block; width: 100%; box-sizing: border-box;
   }
   .stat {
     flex: 1 1 calc(50% - 5px);
@@ -3515,10 +3521,18 @@
     max-height: 50vh;
     overflow-y: auto;
   }
-  /* Same rule at the alarm-panel level so the internal rows list
-     inside the annunciator scrolls when the operator is looking at
-     it in isolation, without truncating individual card content. */
-  #qg-annun-rows { max-height: 42vh; overflow-y: auto; }
+  /* #342 (Paul, 2026-09-05 — live re-test): the double-scroll was the
+     mechanism behind the fourth clipping bug in a row (previous three
+     were #295, #307, #209, #253). The outer `.qg-topstrip` already
+     scrolls; when `#qg-annun-rows` had its OWN `max-height + overflow`
+     the tall card that added an amber "No saved location" note (or a
+     since-report line, or an expanded story) could scroll inside a
+     nested area whose top edge sat below the annunciator head — so a
+     card's first line disappeared into the head's baseline while the
+     head itself stayed visible. One scroll ancestor for the whole
+     panel means a card is either fully in view or the whole panel
+     scrolls to bring it fully in view; a partial half-in-half-out
+     state is now geometrically impossible. */
   /* #296 — the annunciator strip. Word + shape + colour, never colour
      alone, so it reads with the sound off and in black and white. */
   .qg-annun {
@@ -3546,16 +3560,46 @@
     border-left: 3px solid #FF9A9A; padding-left: 8px;
   }
   .qg-annun-note[hidden] { display: none; }
-  /* The count and the headline stay on screen; the rows themselves scroll,
-     so a long list of alarms can never push the board off the screen. */
+  /* #342 (Paul, 2026-09-05): SINGLE scroll ancestor now — the outer
+     `.qg-topstrip` (capped at 50vh, see above). No `max-height` or
+     `overflow-y` here on the rows list; a long list of alarms scrolls
+     via its ancestor exactly like every other panel on the sidebar,
+     with the annunciator head scrolling with them (correct: a head is
+     a label for the list beneath it, not a permanent banner over an
+     independently-scrolling list, which is what produced the fourth
+     clip-behind-a-fixed-header bug). */
   #qg-annun-rows {
-    max-height: 38vh; overflow-y: auto;
     display: flex; flex-direction: column; gap: 8px;
   }
+  /* #342 (Paul, 2026-09-05 — live re-test): the Acknowledge button
+     used to be the third child of a horizontal flexbox with
+     `align-self: center`. On a tall card (a No-Saved-Location note
+     + a since-report + an expanded story), the button was centred
+     against a body that had grown by ~120px, leaving it visually
+     hovering next to the "Send a team — IMMEDIATE, cannot move."
+     line — a shape an operator reads as "the button is covering the
+     order to send a team". A grid layout with shape + body on row 1
+     and the button spanning row 2 makes the button STRUCTURALLY
+     below every piece of body content: no vertical centring, no
+     `align-self` gymnastics, no way for the button to sit alongside
+     any of the words. Also: this is the same shape #307 fixed for
+     top-of-page bars — content lives in one column with the action
+     underneath, so there is no second axis on which anything can
+     drift over anything else. */
   .qg-alarm {
     border: 1px solid #7A2323; border-radius: 8px;
     background: #3A1010; padding: 10px;
-    display: flex; gap: 10px; align-items: flex-start;
+    display: grid;
+    grid-template-columns: 22px 1fr;
+    grid-template-rows: auto auto;
+    column-gap: 10px;
+    row-gap: 8px;
+    align-items: start;
+    /* If the sticky panel scrolls, snap this card fully into view
+       instead of leaving its top row grazing the top of the scroll
+       container — belt and braces for the class of clip-behind-fixed
+       bugs. */
+    scroll-margin-top: 12px;
   }
   .qg-alarm.is-new { animation: qgAlarmFlash 1s steps(1, end) infinite; }
   @keyframes qgAlarmFlash {
@@ -3699,8 +3743,18 @@
     min-height: 40px;
   }
   .qg-annun-bulk button[disabled] { opacity: .6; cursor: default; }
-  .qg-alarm-shape { font-size: 20px; line-height: 1; width: 22px; text-align: center; }
-  .qg-alarm-body { flex: 1; }
+  .qg-alarm-shape {
+    font-size: 20px; line-height: 1; width: 22px; text-align: center;
+    grid-column: 1; grid-row: 1;
+  }
+  .qg-alarm-body {
+    /* min-width:0 lets long headlines / action words wrap in the
+       grid track instead of forcing the track wider than its column
+       (a subtle flex/grid trap that can push text under the shape
+       column). */
+    grid-column: 2; grid-row: 1;
+    min-width: 0;
+  }
   .qg-alarm-word {
     font-size: 12px; font-weight: 800; letter-spacing: .04em;
     text-transform: uppercase; color: #FFC9C9;
@@ -3718,16 +3772,27 @@
   /* #341: says WHY there is no pin on the map for this alarm's
      person. Amber over the dark alarm-panel background, not red — a
      fact about missing information, distinct from a severity warning
-     and distinct from the muted-grey sidebar version. */
+     and distinct from the muted-grey sidebar version.
+     #342 (2026-09-05): `display:block` + full-width explicit so it
+     cannot ever be laid alongside an adjacent inline element under
+     any layout accident. Standalone line, always. */
   .qg-alarm-no-loc {
     font-size: 12.5px; font-weight: 600; margin-top: 6px;
-    padding: 5px 8px; border-radius: 5px;
+    padding: 6px 8px; border-radius: 5px;
     color: #2A1F00; background: #F6D477; border: 1px solid #C99A2E;
+    display: block; width: 100%; box-sizing: border-box;
   }
   .qg-alarm-ack {
     background: #fff; color: #7A0B0B; border: 0; border-radius: 8px;
     padding: 8px 12px; font-size: 13.5px; font-weight: 700; cursor: pointer;
-    min-height: 38px; align-self: center;
+    min-height: 44px;               /* iOS/Android touch target */
+    /* #342: the button always sits on its OWN row, spanning the body
+       column, below every piece of content. It cannot cover the
+       "No saved location" note, the "Send a team" line or anything
+       else in the card. */
+    grid-column: 2; grid-row: 2;
+    justify-self: stretch;
+    width: 100%;
   }
   .qg-alarm-names { margin-top: 6px; font-size: 12.5px; }
   /* Button treatment defined together with .qg-alarm-story above so both
@@ -9512,30 +9577,64 @@ window.QuakeAngelRescue = (function () {
   }
 
   var lastCoverWarning = "";
-  function checkNothingIsCoveringTheButtons() {
-    var btn = document.querySelector("#qg-annun button");
-    var warnEl = document.getElementById("qg-annun-blocked");
-    if (!btn || !warnEl) return;
-    var r = btn.getBoundingClientRect();
-    if (!r.width || !r.height) return;
-    // Off-screen (scrolled away) is not a fault.
-    if (r.bottom < 0 || r.top > window.innerHeight) { warnEl.hidden = true; return; }
+  // #342 (Paul, 2026-09-05 — live re-test): "the note box sits under
+  // the red header, so its first line is unreadable and it also hides
+  // 'Send a team — IMMEDIATE, cannot move.'" This is the fourth time
+  // content on an alarm card has been reported clipped behind another
+  // element (#295, #307, #209, #253 before it). We already had a
+  // detector for the Acknowledge / Silence BUTTONS; extend it to the
+  // TEXT LINES an operator has to read — the action ("Send a team…"),
+  // the amber "No saved location" note, and the headline. If a point
+  // sample at the geometric centre of any of these lines lands on a
+  // DIFFERENT element, the panel says so instead of pretending the
+  // page is fine.
+  function pointCovered(el) {
+    var r = el.getBoundingClientRect();
+    if (!r.width || !r.height) return null;
+    if (r.bottom < 0 || r.top > window.innerHeight) return null;
     var top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
-    var covered = top && top !== btn && !btn.contains(top) && !top.contains(btn);
+    if (!top) return null;
+    // Ancestor OR descendant is fine — the point is inside our own
+    // subtree, so nothing is covering us.
+    if (top === el || el.contains(top) || top.contains(el)) return null;
+    return top;
+  }
+  function checkNothingIsCoveringTheButtons() {
+    var warnEl = document.getElementById("qg-annun-blocked");
+    if (!warnEl) return;
+    // Every element whose visibility is critical to acting on a red
+    // alarm card. Buttons FIRST (same priority as before), text lines
+    // after — the check falls through to the first covered one.
+    var criticals = [];
+    var addAll = function (sel) {
+      var list = document.querySelectorAll(sel);
+      for (var i = 0; i < list.length; i++) criticals.push(list[i]);
+    };
+    addAll("#qg-annun button");            // Silence / Acknowledge etc.
+    addAll(".qg-alarm-ack");               // per-card Acknowledge
+    addAll(".qg-alarm-action");            // "Send a team — IMMEDIATE, cannot move."
+    addAll(".qg-alarm-no-loc");            // #341 amber "No saved location"
+    addAll(".qg-alarm-headline");          // who this alarm is about
+    if (!criticals.length) return;
+    var covered = null;
+    var coveredBy = null;
+    for (var i = 0; i < criticals.length; i++) {
+      var by = pointCovered(criticals[i]);
+      if (by) { covered = criticals[i]; coveredBy = by; break; }
+    }
     if (covered) {
-      var friendly = friendlyDescribeCover(top);
+      var friendly = friendlyDescribeCover(coveredBy);
       warnEl.hidden = false;
       // Plain English only — no IDs, no class names, no code words.
       warnEl.textContent =
-        "The alarm-panel buttons are sitting behind " + friendly + ", " +
-        "so tapping them may do nothing. Reload the page. If it happens " +
-        "again, tell the developer that " + friendly + " is covering the " +
-        "alarm buttons.";
-      // Developer detail stays in the console (never on screen).
-      var rawKey = (top.id || (top.className && (top.className.baseVal || top.className)) || top.tagName || "").toString();
+        "Something in the alarm card is sitting behind " + friendly + ", " +
+        "so a critical line may be unreadable. Reload the page. If it " +
+        "happens again, tell the developer that " + friendly +
+        " is covering the alarm card.";
+      var rawKey = (coveredBy.id || (coveredBy.className && (coveredBy.className.baseVal || coveredBy.className)) || coveredBy.tagName || "").toString();
       if (rawKey !== lastCoverWarning) {
         lastCoverWarning = rawKey;
-        try { console.error("[qg] alarm panel buttons covered by:", top); } catch (_) {}
+        try { console.error("[qg] alarm card element covered:", covered, "by:", coveredBy); } catch (_) {}
       }
     } else {
       warnEl.hidden = true;

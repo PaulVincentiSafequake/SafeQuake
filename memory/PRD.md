@@ -3932,3 +3932,108 @@ phones on that deployment never shared a location.
 with `latitude`/`longitude` per event AND the current row. For QQ43D
 this endpoint answers "does this device have any location on file"
 without needing a Mongo shell.
+
+## Bug #342 — "No saved location" note clipped behind red header on QQ43D (2026-09-05 — Paul, live)
+
+### Report
+> "the No saved location note you just added is covered up on the live
+> dashboard. On the red NEEDS HELP card for QQ43D, the note box sits
+> under the red header, so its first line is unreadable and it also
+> hides 'Send a team — IMMEDIATE, cannot move.' This is the fourth
+> time content has been clipped behind a fixed element (#295, #307,
+> #209, #253). Fix the layout cause once and sweep every card type."
+
+### Root cause (systemic, not per-instance)
+`.qg-alarm` was a horizontal flexbox: `[shape] [body] [Acknowledge]`
+with `align-self: center` on the button. When the body grew (a
+`.qg-alarm-since` line, an expanded story, the new `.qg-alarm-no-loc`
+note), the button vertically centred against a body that was now ~120px
+taller and ended up hovering NEXT TO the action line "Send a team —
+IMMEDIATE, cannot move." — reading as "the button is on top of the
+order to send a team". Two secondary contributors: `#qg-annun-rows`
+had its OWN `overflow-y:auto + max-height:38vh` scroll INSIDE the
+sticky topstrip's `overflow-y:auto + max-height:50vh` — a nested
+scroll where a tall card could slip half-in-half-out of the inner
+container while the outer container stayed still. And the sidebar's
+`.qg-card-no-loc` was `display:inline-block`, so it COULD share a line
+with the next inline element.
+
+### Fix (`/app/memory/dashboard_build/index.html`)
+1. **`.qg-alarm` → `display: grid`** with `grid-template-columns:
+   22px 1fr; grid-template-rows: auto auto`. Shape + body on row 1;
+   the **Acknowledge button spans row 2 full-width** below every piece
+   of body content. No `align-self`, no vertical centring, no second
+   axis on which anything can drift over anything else.
+2. **`.qg-alarm-body { min-width: 0 }`** — long headlines wrap inside
+   the grid column instead of pushing the column wider.
+3. **`.qg-alarm-ack { min-height: 44px; width: 100% }`** — full-width
+   tap target on its own row (also brings it up to iOS/Android touch
+   target guidance).
+4. **`.qg-alarm-no-loc { display: block; width: 100%; box-sizing:
+   border-box }`** — the amber note is a standalone line, always.
+5. **`.qg-card-no-loc { display: block; width: 100% }`** — same for
+   the sidebar-triage variant.
+6. **Removed `#qg-annun-rows` inner scroll** (kept only the outer
+   `.qg-topstrip` scroll cap #295 defined) — one scroll ancestor for
+   the whole panel; a card is either fully in view or the panel scrolls
+   to bring it fully in view, half-in-half-out is now geometrically
+   impossible.
+7. **`scroll-margin-top: 12px` on `.qg-alarm`** — belt and braces for
+   scroll-into-view calls in the future.
+
+### Runtime detector extended (`checkNothingIsCoveringTheButtons`)
+Was: checked ONLY `#qg-annun button` (the Silence / Acknowledge
+buttons, #302/#307 doctrine — a covered button that does nothing on
+tap is a silent failure). Now: also samples the geometric centre of
+every `.qg-alarm-ack`, `.qg-alarm-action`, `.qg-alarm-no-loc`,
+`.qg-alarm-headline`. If any critical line lands on a foreign element
+the panel says so in plain English and logs the raw covering element
+to the console for the developer.
+
+### Sweep — how many card types were checked
+Every card type in the dashboard:
+1. **Alarm-panel card** (`.qg-alarm`) — FIXED (grid layout + note
+   `display:block`).
+2. **Sidebar triage card** (`itemHtml` → `<li>`) — FIXED (`.qg-card-
+   no-loc` now `display:block; width:100%`).
+3. **Map popup** — inspected; does not render the No-Saved-Location
+   note (pin only exists when location exists), no button-over-text
+   layout. No change needed.
+4. **Rescued list, off-board list, audit-item cards, stat cards, ask-
+   flow modal, Recent Activity items** — inspected; none use
+   `align-self: center` on a horizontal-flex button, none carry the
+   note. No change needed.
+
+**2 card types were carrying the note; both fixed. 1 layout pattern
+(horizontal-flex + `align-self:center` button next to variable-height
+body) was the root cause and it was found in exactly one place — the
+alarm-panel card.**
+
+### Test steps (paste to Paul)
+1. Hard refresh live: `Cmd+Shift+R` on Safari / `Ctrl+Shift+R` on
+   Chrome & Firefox — the CSS is cached at Render's edge for ~1h so
+   a soft refresh is not enough.
+2. Sign in with a TEST operator account (not `pmvincenti@`).
+3. From a TEST device (not Paul's phone), fire an alert without ever
+   sharing location — the pattern that produces QQ43D on the map.
+4. Look at the red NEEDS HELP card in the top-right alarm panel:
+   - `NEEDS HELP NOW` header
+   - Headline (short code — Trapped)
+   - `Send a team — IMMEDIATE, cannot move.` — fully readable, no
+     element sitting on top of it
+   - `14:32 Malta time` meta line
+   - Amber `📍 No saved location…` note — full width, standalone line,
+     never overlapping anything
+   - Full-width white `Acknowledge` button ON ITS OWN ROW below all
+     the text. It is NEVER beside the action line.
+5. On an unacknowledged card the panel-level `qg-annun-blocked` line
+   stays hidden — the extended detector actively verifies nothing
+   covers the action or the note.
+
+### Regression tests (unit / visual)
+- Grid geometry unit tests to be added: alarm-panel card has button
+  in `grid-row: 2`, no `align-self: center` anywhere in the sidebar
+  alarm CSS.
+- Runtime detector unit test to be added: covers every
+  `.qg-alarm-action` / `.qg-alarm-no-loc` / `.qg-alarm-headline` in
+  addition to buttons.

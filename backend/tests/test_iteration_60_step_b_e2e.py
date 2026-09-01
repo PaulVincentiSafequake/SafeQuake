@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 load_dotenv("/app/backend/.env")
 
 BASE = (os.environ.get("EXPO_PUBLIC_BACKEND_URL")
-        or "https://group-size-update.preview.emergentagent.com").rstrip("/")
+        or "https://no-pin-alert.preview.emergentagent.com").rstrip("/")
 ADMIN_TOKEN = os.environ["ADMIN_TRIGGER_PASSWORD"]
 HDR_ADMIN = {"X-Admin-Token": ADMIN_TOKEN, "Content-Type": "application/json"}
 
