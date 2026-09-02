@@ -4037,3 +4037,60 @@ alarm-panel card.**
 - Runtime detector unit test to be added: covers every
   `.qg-alarm-action` / `.qg-alarm-no-loc` / `.qg-alarm-headline` in
   addition to buttons.
+
+
+---
+
+## Dashboard map — colour + shape + legend (2026-02-11)
+
+### Ask
+1. Three states by colour on the operator map: red = needs help now,
+   yellow = hurt but stable, green = self-reported safe.
+2. Split red into TWO shapes so colour is never the only signal:
+     * FILLED red circle → they asked for help.
+     * OUTLINE (hollow) red ring → we alerted them, they never
+       answered.
+   Must still work when printed in black and white.
+3. Hide greens and rescued from the map by default. Toggles stay.
+4. Filters REMOVE pins, they do not dim them.
+5. Add a legend naming every colour and every shape in plain English,
+   with a line stating that greens and rescued are hidden by default.
+6. Invariants preserved:
+     * Greens and rescued still count in every headline number
+       (filters change the map only, never the totals).
+     * Anyone hidden who flips back to needing help reappears
+       immediately (next poll tick, ≤ 4 s).
+     * When someone turns red is unchanged (server-side map_color
+       rule set — a phone that gets an alert and does not answer is
+       still red the instant we alerted it).
+     * Nothing is deleted; full history stays available.
+     * Filters are a lens.
+
+### Implementation (files touched: 1, discrete places: 4)
+All changes are in `/app/memory/dashboard_build/index.html`:
+  1. `svgShape()` — new `"ring"` shape (white centre, thick coloured
+     stroke, thin black outer stroke so the outline reads in B&W).
+  2. `markerVisual()` — silent-since-alert reds now pick shape
+     `"ring"` instead of `"circle"`; asked-for-help reds keep the
+     filled circle. Tags ("SOS" / "never answered") stay for extra
+     redundancy.
+  3. Legend HTML — floating panel at the bottom-left of the map,
+     `<details>` element, default open. Names all five pin visuals in
+     plain English (red filled circle, red outline ring, yellow
+     triangle, green dot, grey circle with a tick) plus the
+     "hidden by default" note and the extra-marks note (dashed halo
+     for last-known-position, small badge for group size).
+  4. Legend CSS — `.map-legend` + rows + summary + print rules; no
+     `position: fixed`, uses `absolute` inside `#map-wrap`.
+
+### Verification
+- Visual verification of the legend + filter controls done against a
+  locally-served copy of the dashboard file (signed-out view renders
+  the map, filters and legend without needing backend data).
+- Visual verification of the five pin shapes (colour and B&W)
+  rendered via a temporary standalone harness; each of the five
+  shapes is distinguishable without colour.
+- No touch to any counts code path (`updateCountPills`,
+  `pillsFromServerCounts`), so totals cannot be affected by filter
+  state.
+- No touch to server-side `map_color` rules.

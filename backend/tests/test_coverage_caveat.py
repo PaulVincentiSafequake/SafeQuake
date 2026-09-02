@@ -30,7 +30,7 @@ from people_counts import COVERAGE_CAVEAT
 
 BASE_URL = os.environ.get(
     "EXPO_PUBLIC_BACKEND_URL",
-    "https://no-pin-alert.preview.emergentagent.com",
+    "https://group-size-render.preview.emergentagent.com",
 ).rstrip("/")
 ADMIN_TOKEN = os.environ.get("ADMIN_TRIGGER_PASSWORD", "m11vRwfDoxnHvIMLkKzjUwQy")
 

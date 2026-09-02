@@ -7,18 +7,19 @@ PRODUCT REQUIREMENTS:
 5. **Trapped Timer Clock Bug**: Dashboard map pin Trapped for X time timer incorrectly calculates from old/historic alerts rather than the most recent alert start time.
 6. **Group Size Wording (Bug #332)**: Update map pin popup wording to exactly: They said X people are here. There may be more we do not know about.
 7. **No Pin Location Bug (Bug #341)**: Device tracked as trapped with history but missing a map pin. Needs to preserve location across locationless check-ins and clearly indicate No saved location on the dashboard triage and alarm cards if no location exists.
+8. **Dashboard Card Overlap Bug (Bug #342)**: The No saved location note box on the dashboard's NEEDS HELP alarm cards sits under the header, rendering the first line unreadable and hiding the Send a team text. Fix the systemic layout cause (clipping/overlapping), sweep all card types, and ensure the Acknowledge button is never clipped.
 
 **User's preferred language**: English (INSTRUCT NEXT AGENT: You MUST automatically detect the user's primary language from their messages inside the <trajectory> tag and INSTRUCT next agent to respond in the user's preferred language only. Currently, English.)
 
 **what currently exists?**: 
-A full-stack React Native/Expo mobile app (QuakeGuard) and FastAPI backend with a custom HTML/JS dashboard. The agent has successfully resolved Bug #341. Location data is now preserved on the backend during location-less check-ins, and a No saved location warning is dynamically injected into both the sidebar triage cards and the red needs-help alarm cards when coordinates are missing. The backend fixes have been deployed by the user, and the frontend changes are waiting for the user to push them to GitHub.
+A full-stack React Native/Expo mobile app (QuakeGuard) and FastAPI backend with a custom HTML/JS dashboard. The agent has successfully resolved Bug #342 (Card Overlap Bug). The dashboard alarm card layout was refactored from flexbox to CSS Grid to prevent elements from clipping or vertically centering incorrectly. A sweep was performed across all card types, and the runtime overlap-detector was extended. The fix is staged in the  file, waiting for the user to push to GitHub for deployment.
 
 **Last working item**: 
-    - Last item agent was working: Instructing the user on how to push the fix to their GitHub repository using the Emergent UI's Save to GitHub button. The user wants to push the changes to a new branch named  rather than .
+    - Last item agent was working: Fixing dashboard alarm card layout overlap (Bug #342) where the dynamically added No saved location note overlapped the header and hid action text. The agent fixed the HTML/CSS, tested it locally, wrote regression tests, verified with the , and provided manual test steps to the user.
     - Status: USER VERIFICATION PENDING
     - Agent Testing Done: Y
     - Which testing method agent to use? testing_agent
-    - User Testing Done: N (Backend is deployed, but user still needs to push the frontend to GitHub to trigger a Render deployment)
+    - User Testing Done: N (Fix is staged, user must push to GitHub and verify on their Render environment)
 
 **All Pending/In progress Issue list**:  
   Issue 1: Test failure in 
@@ -40,7 +41,7 @@ A full-stack React Native/Expo mobile app (QuakeGuard) and FastAPI backend with 
      - Blocked on other issue: None
 
 **In progress Task List**: 
-*(None currently active other than awaiting the user's GitHub push)*
+*(None currently active other than awaiting user validation of Bug #342)*
 
 **Upcoming and Future Tasks**
     Upcoming Tasks:
@@ -54,11 +55,11 @@ A full-stack React Native/Expo mobile app (QuakeGuard) and FastAPI backend with 
     - Group triage list by location (#188) - P4
 
 **Completed work in this session**
-- Location Preservation (Bug #341): Updated  () to retain existing device latitude/longitude when a new check-in omits location data. (DONE)
-- Alarm API Extension: Updated  to append  (boolean) and  to the  payload. (DONE)
-- Dashboard Sidebar Note: Added No saved location logic to  in . (DONE)
-- Dashboard Alarm Card Note: Styled  and updated  in  to flag alarms with missing locations. (DONE)
-- Authored test suites: , , . All tests passing. (DONE)
+- Fixed layout clipping/overlap on Alarm Cards (Bug #342): Refactored  in  to use CSS Grid instead of horizontal flexbox, ensuring the Acknowledge button and body content are perfectly row-separated. (DONE)
+- Card Type Sweep: Updated  and  globally to enforce  and . (DONE)
+- Runtime Detector Extension: Upgraded  in  to sample the geometric center of the action line, note box, and headline (not just the Acknowledge button). (DONE)
+- New Regression tests authored: . (DONE)
+- Updated tests: Adjusted . (DONE)
 
 **Earlier issues found/mentioned but not fixed**
    Issue 1: Test failure in  (See Pending Issues).
@@ -83,7 +84,7 @@ A full-stack React Native/Expo mobile app (QuakeGuard) and FastAPI backend with 
 │   ├── PRD.md 
 
 **Key Technical Concepts**
-React Native, Expo, FastAPI, MongoDB, Custom HTML/JS dashboard rendering, external UI deployment via GitHub/Render.
+React Native, Expo, FastAPI, MongoDB, Custom HTML/JS dashboard rendering, Python Pytest, CSS Grid, DOM layout bounding rect detection.
 
 **key DB schema**
   - : Append-only ledger of device status reports.
@@ -94,10 +95,10 @@ React Native, Expo, FastAPI, MongoDB, Custom HTML/JS dashboard rendering, extern
   - None
 
 **All files of reference** 
-  -  (Updated to preserve coordinates during status POST)
-  -  (Added  properties)
-  -  (Added No saved location UI flags)
-  -  (New regression test suites authored and passed)
+  -  (CSS Grid layout fix, runtime overlap detection update)
+  -  (New regression test)
+  -  (Updated to handle extended checks)
+  -  (Updated to document Bug #342 fix details)
 
 **Areas that need refactoring**: 
   - : Extremely large (>2700 lines). Noted for a future refactor.
@@ -109,26 +110,19 @@ React Native, Expo, FastAPI, MongoDB, Custom HTML/JS dashboard rendering, extern
   -  
 
 **Critical Info for New Agent** 
-- **CRITICAL**: The user is currently pushing the latest code using the **Save to GitHub button in the Emergent UI**. Because you (the agent) do not have UI clicking privileges, the user must execute this action manually.
-- The user is creating a new branch called  instead of pushing to . Do not assume the code is on . 
-- The user has already deployed the backend portion of the fix via the Emergent Platform.
-- Clarification: The merge conflict discussed heavily in the past was a false positive from a stale memory state. There is no active conflict on the user's GitHub PRs. 
+- **CRITICAL DEPLOYMENT INFO**: The dashboard  fix is purely staged in the memory folder. Because you (the agent) do not have UI clicking privileges, the user must manually click **Save to GitHub** in the Emergent UI to push it to their branch.
+- **Environment Reminders**: The user is reminded that they are currently working in a dev/preview environment. To test the dashboard live, they must push the code and perform a hard refresh () on their external Render dashboard to clear the CDN cache.
+- Do not make changes to  URLs.
 
 **documents and test reports created in this job** 
-  - 
-  - 
-  -  (Updated to track the Bug #341 fix logic)
-  - 
-  - 
+  -  (Updated)
   - 
 
 **Last 10 User Messages and any pending HUMAN messages** 
- 1. *User:* Checked live: the no saved location note doesn't appear on the red NEEDS HELP alarm card... (Agent investigated and fixed)
- 2. *User:* Before I paste the conflict — which exact file(s) does it involve? ... Also dashboard is on Render, not GitHub pages. (Agent clarified file paths and deployment flows)
- 3. *User:* I don't see a conflict screen anywhere. Tell me the exact website address or button. (Agent admitted conflict might not exist)
- 4. *User:* I checked GitHub. No conflict. Please push the real fix directly as a new commit on main. (Agent explained it lacks GitHub push permissions)
- 5. *User:* Backend is published. Now use Save to GitHub, but push to a NEW branch — not main. Name it fix-341-dashboard. (Agent reiterated it cannot click the button and guided the user to do it)
- *(Pending: Await user's confirmation that they have clicked the Save to GitHub button and created the branch ).*
+ 1. *User:* Reported Bug #342 regarding the No saved location note clipping underneath the header on red NEEDS HELP cards. Demanded a systemic fix across all card types and explicit confirmation that the Acknowledge button is not blocked.
+ 2. *User:* System injection reminder to use the  subagent to verify the bug fix before concluding.
+ 3. *User:* System injection to explicitly append deployment/preview testing guidelines to the final finish tool output regarding Expo Go limitations and native builds.
+ *(Pending: Await user's confirmation that they have tested the pushed dashboard code on their live dashboard URL and validated the fix).*
 
 **Project Health Check:**
 Healthy.
@@ -141,11 +135,11 @@ Healthy.
 **Testing status**
   - Testing agent used after significant changes: YES
   - Troubleshoot agent used after agent stuck in loop: NO
-  - Test files created: [, , ]
-  - Known regressions: [, ] (Pre-existing)
+  - Test files created: []
+  - Known regressions: [, ] (Pre-existing/Historical)
 
 **Credentials to test flow:**
 Check 
 
 **What agent forgot to execute**
-Nothing was forgotten. The agent provided correct instructions to the user to trigger the Save to GitHub deployment flow manually, as the agent cannot interact directly with Emergent UI buttons.</analysis>
+Nothing. The agent accurately verified the DOM overlap locally, fixed the layout globally using CSS Grid, deployed regression tests, executed , and provided perfectly aligned testing instructions to the user.</analysis>
