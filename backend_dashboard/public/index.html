@@ -281,6 +281,91 @@
   }
   .map-filter-btn:hover { background: rgba(0,0,0,0.06); }
   .map-filter-btn.active { background: #1c2b36; color: #fff; }
+
+  /* ── #NEW (2026-02-11 — Paul): permanent map legend ───────────────────
+     A quiet, always-visible key. Names every colour and every shape in
+     plain English, and tells the operator up-front that greens and
+     rescued people are OFF the map by default (they are still counted).
+     The legend must still be readable when printed in black and white,
+     so each row shows the SVG shape (not just the colour swatch) and
+     the words describe the case, not just the colour name. Positioned
+     bottom-left of the map wrapper so it does not fight the top-left
+     filters, the top-right zoom, or the top-right recentre button.
+     Wrapped in <details> so it can be folded away — but DEFAULT OPEN
+     because "operator sees what every pin means without asking" is a
+     ground rule, not a preference. */
+  .map-legend {
+    position: absolute;
+    left: 12px;
+    bottom: 12px;
+    z-index: 1000;
+    background: rgba(255,255,255,0.96);
+    border: 1px solid rgba(0,0,0,0.15);
+    border-radius: 10px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.18);
+    font-size: 12px;
+    color: #1a1a1a;
+    max-width: 320px;
+  }
+  .map-legend > summary {
+    list-style: none;
+    cursor: pointer;
+    padding: 6px 10px;
+    font-weight: 700;
+    font-size: 12px;
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .map-legend > summary::-webkit-details-marker,
+  .map-legend > summary::marker { display: none; }
+  .map-legend > summary::after {
+    content: "▾";
+    margin-left: auto;
+    font-size: 11px;
+    color: #555;
+  }
+  .map-legend:not([open]) > summary::after { content: "▸"; }
+  .map-legend[open] > summary { border-bottom: 1px solid rgba(0,0,0,0.1); }
+  .map-legend-body { padding: 8px 10px 10px; }
+  .map-legend-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 3px 0;
+    line-height: 1.35;
+  }
+  .map-legend-row .map-legend-swatch {
+    flex: 0 0 20px;
+    width: 20px;
+    height: 20px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .map-legend-row .map-legend-label { flex: 1 1 auto; }
+  .map-legend-note {
+    margin-top: 8px;
+    padding-top: 6px;
+    border-top: 1px dashed rgba(0,0,0,0.2);
+    color: #333;
+    font-size: 11.5px;
+    line-height: 1.4;
+  }
+  .map-legend-note b { color: #111; }
+  @media (max-width: 700px) {
+    .map-legend { max-width: 78vw; font-size: 11.5px; }
+    .map-legend > summary { padding: 5px 8px; }
+    .map-legend-body { padding: 6px 8px 8px; }
+  }
+  @media print {
+    .map-legend { position: static; box-shadow: none; break-inside: avoid; }
+  }
+  /* When the operator is signed out the map data is blank, but the
+     legend is a plain factual key — it stays readable so the operator
+     knows what to expect after signing in. */
+  body.qg-signed-out .map-legend { opacity: 1; }
   .sidebar {
     flex: 1 1 320px;
     max-width: 380px;
@@ -3849,8 +3934,8 @@
               aria-pressed="true" onclick="toggleColour('red')"
               data-label-on="Hide red — needs help / never answered"
               data-label-off="Show red — needs help / never answered"
-              title="Immediate cases and anyone we alerted who never answered">
-        <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true" style="vertical-align:-1px;margin-right:5px"><circle cx="6" cy="6" r="5" fill="#C21818" stroke="#000" stroke-width="1"/></svg><span class="qg-map-filter-label">Hide red — needs help / never answered</span>
+              title="Immediate cases (filled circle) and anyone we alerted who never answered (hollow ring). Toggles BOTH reds together.">
+        <svg width="26" height="12" viewBox="0 0 26 12" aria-hidden="true" style="vertical-align:-1px;margin-right:5px"><circle cx="6" cy="6" r="5" fill="#C21818" stroke="#000" stroke-width="1"/><circle cx="20" cy="6" r="5" fill="#fff" stroke="#000" stroke-width="0.8"/><circle cx="20" cy="6" r="3.4" fill="none" stroke="#C21818" stroke-width="2"/></svg><span class="qg-map-filter-label">Hide red — needs help / never answered</span>
       </button>
       <button class="map-filter-btn active" data-colour="yellow" type="button"
               aria-pressed="true" onclick="toggleColour('yellow')"
@@ -3871,6 +3956,62 @@
       <button class="map-filter-btn" id="qg-rescued-toggle" type="button" aria-pressed="false">Show rescued</button>
     </div>
     <div id="map"></div>
+    <!-- #NEW (2026-02-11 — Paul): permanent map legend. Names every
+         colour and every shape in plain English, and states up-front
+         that greens and rescued are OFF the map by default (still
+         counted). Kept as a floating panel at the bottom-left of the
+         map so it stays with the map on any scroll. Default OPEN. -->
+    <details class="map-legend" id="qg-map-legend" open>
+      <summary aria-label="Map legend — what every pin means">
+        <span aria-hidden="true">🗺️</span>
+        <span>What every pin means</span>
+      </summary>
+      <div class="map-legend-body">
+        <div class="map-legend-row">
+          <span class="map-legend-swatch" aria-hidden="true">
+            <svg width="18" height="18" viewBox="0 0 18 18"><circle cx="9" cy="9" r="7" fill="#C21818" stroke="#000" stroke-width="1.2"/></svg>
+          </span>
+          <span class="map-legend-label"><b>Red filled circle</b> — needs help now (they asked for help)</span>
+        </div>
+        <div class="map-legend-row">
+          <span class="map-legend-swatch" aria-hidden="true">
+            <svg width="18" height="18" viewBox="0 0 18 18"><circle cx="9" cy="9" r="7.4" fill="#fff" stroke="#000" stroke-width="1"/><circle cx="9" cy="9" r="5.6" fill="none" stroke="#C21818" stroke-width="3"/></svg>
+          </span>
+          <span class="map-legend-label"><b>Red outline (ring)</b> — needs help now (we alerted them, they never answered)</span>
+        </div>
+        <div class="map-legend-row">
+          <span class="map-legend-swatch" aria-hidden="true">
+            <svg width="18" height="18" viewBox="0 0 18 18"><polygon points="9,2 16,15.5 2,15.5" fill="#F2A114" stroke="#000" stroke-width="1.2" stroke-linejoin="round"/></svg>
+          </span>
+          <span class="map-legend-label"><b>Yellow triangle</b> — hurt but stable</span>
+        </div>
+        <div class="map-legend-row">
+          <span class="map-legend-swatch" aria-hidden="true">
+            <svg width="18" height="18" viewBox="0 0 18 18"><circle cx="9" cy="9" r="5" fill="#2E7D32" stroke="#000" stroke-width="1"/></svg>
+          </span>
+          <span class="map-legend-label"><b>Green dot</b> — self-reported safe <i>(hidden by default)</i></span>
+        </div>
+        <div class="map-legend-row">
+          <span class="map-legend-swatch" aria-hidden="true">
+            <svg width="18" height="18" viewBox="0 0 18 18"><circle cx="9" cy="9" r="7" fill="#8A8A8A" stroke="#000" stroke-width="1.2"/><path d="M5.2 9.4 l2.2 2.2 l4.4 -4.8" stroke="#fff" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </span>
+          <span class="map-legend-label"><b>Grey circle with a tick</b> — confirmed rescued <i>(hidden by default)</i></span>
+        </div>
+        <div class="map-legend-note">
+          <b>Hidden by default:</b> green (self-reported safe) and rescued pins
+          are OFF the map so live concerns stand out. Both are <b>still
+          counted</b> in the live totals — filters change the map only,
+          never the numbers. Turn them on with the toggles at the top of
+          the map.
+          <br><br>
+          <b>Extra marks you may see on a pin:</b>
+          a <b>dashed ring</b> around the shape means the pin is where the
+          phone was <i>last</i> heard from, not where the person is now.
+          A small numbered <b>badge</b> means "they said this many people
+          are here" (never added to any total).
+        </div>
+      </div>
+    </details>
   </div>
   <div class="sidebar">
     <!-- #295 / #296: the strip that must be on screen wherever the
@@ -7186,14 +7327,18 @@ window.QuakeAngelRescue = (function () {
       return { kind: "rescued", color: "#1F8A3A", shape: "check", tag: "\u2713 found" };
     }
     if (mc === "red") {
-      // #326: silent-since-alert AND immediate live under the same red.
-      // The tag distinguishes them ("silent" vs "SOS") so an operator
-      // scanning the map can tell what kind of red each pin is.
+      // #326 + #NEW (2026-02-11 — Paul): silent-since-alert AND immediate
+      // both live under the same red toggle, but they must be
+      // distinguishable WITHOUT colour — a black-and-white printout of
+      // this map must still tell them apart. So the shape splits:
+      //   * immediate ("asked for help")    → FILLED red circle
+      //   * silent_red ("never answered")   → HOLLOW red ring
+      // Tags stay too ("SOS" vs "never answered") for extra redundancy.
       var silentRed = !!u.silent_since_alert;
       return {
         kind: silentRed ? "silent_red" : "immediate",
         color: "#C21818",
-        shape: "circle",
+        shape: silentRed ? "ring" : "circle",
         tag: silentRed ? "never answered" : "SOS",
       };
     }
@@ -7225,6 +7370,18 @@ window.QuakeAngelRescue = (function () {
       return '<svg width="' + s + '" height="' + s + '"><circle cx="' + h + '" cy="' + h + '" r="' + (h - 1.5) + '" fill="' + color + '" stroke="#000" stroke-width="1.5"/><path d="M' + (s * 0.28) + ' ' + (s * 0.52) + ' l' + (s * 0.15) + ' ' + (s * 0.17) + ' l' + (s * 0.3) + ' ' + (-s * 0.33) + '" stroke="#fff" stroke-width="' + Math.max(2, s * 0.12) + '" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>';
     if (shape === "dot")
       return '<svg width="' + s + '" height="' + s + '"><circle cx="' + h + '" cy="' + h + '" r="' + (h * 0.55) + '" fill="' + color + '" stroke="#000" stroke-width="1"/></svg>';
+    if (shape === "ring") {
+      // #NEW (2026-02-11 — Paul): red hollow ring. Used for the
+      // "never answered" case (silent-since-alert). White centre so it
+      // reads as a ring, thick coloured stroke so the colour still
+      // registers at a glance, thin black outer stroke so the outline
+      // survives a black-and-white printout.
+      var ringStroke = Math.max(2.5, s * 0.22);
+      return '<svg width="' + s + '" height="' + s + '">' +
+        '<circle cx="' + h + '" cy="' + h + '" r="' + (h - 1.5) + '" fill="#fff" stroke="#000" stroke-width="1"/>' +
+        '<circle cx="' + h + '" cy="' + h + '" r="' + (h - (ringStroke / 2) - 1.5) + '" fill="none" stroke="' + color + '" stroke-width="' + ringStroke + '"/>' +
+        '</svg>';
+    }
     return '<svg width="' + s + '" height="' + s + '"><rect x="2" y="2" width="' + (s - 4) + '" height="' + (s - 4) + '" fill="none" stroke="' + color + '" stroke-width="2" stroke-dasharray="3,2"/></svg>';
   }
 
